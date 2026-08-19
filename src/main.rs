@@ -1,38 +1,37 @@
 #![no_std]
 #![no_main]
 
+pub mod serial;
+pub mod sync;
+pub mod vga_buffer;
+
 use core::panic::PanicInfo;
+use vga_buffer::Color;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
-    let msg = b"Hello World from 64-bit Rust (x86_64)!";
+    vga_buffer::clear_screen();
 
-    // 1. Clear the entire VGA text screen (80 cols * 25 rows = 2000 cells = 4000 bytes)
-    let vga_buffer = 0xb8000 as *mut u8;
-    for i in 0..(80 * 25) {
-        unsafe {
-            *vga_buffer.add(i * 2) = b' ';
-            *vga_buffer.add(i * 2 + 1) = 0x07; // Light gray on black
-        }
-    }
+    vga_buffer::set_color(Color::LightCyan, Color::Black);
+    println!("========================================");
+    println!("       Welcome to SaeOS (x86_64)!       ");
+    println!("========================================");
 
-    // 2. Write message to VGA text buffer
-    for (i, &byte) in msg.iter().enumerate() {
-        unsafe {
-            *vga_buffer.add(i * 2) = byte;
-            *vga_buffer.add(i * 2 + 1) = 0x0f; // Bright white on black
-        }
+    vga_buffer::set_color(Color::LightGreen, Color::Black);
+    println!("[OK] 64-bit Long Mode initialized.");
+    println!("[OK] VGA Text Buffer driver active (80x25).");
+    println!("[OK] Spinlock-synchronized formatted printing.");
+
+    vga_buffer::set_color(Color::Yellow, Color::Black);
+    for i in 1..=5 {
+        println!("  -> Testing formatted line #{}: val={:#x}", i, i * 0x1000);
     }
 
-    // 2. Write to Serial Port COM1 (0x3F8) for terminal output in QEMU
-    for &byte in msg.iter() {
-        unsafe {
-            core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") byte, options(nomem, nostack));
-        }
-    }
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'\n', options(nomem, nostack));
-    }
+    vga_buffer::set_color(Color::White, Color::Black);
+    println!("\nSystem ready and spinning.");
+
+    // Mirror to serial port COM1 for terminal logs
+    serial_println!("SaeOS initialized successfully.");
 
     loop {
         core::hint::spin_loop();
@@ -40,7 +39,12 @@ pub extern "C" fn kernel_main() -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    vga_buffer::set_color(Color::LightRed, Color::Black);
+    println!("\n[KERNEL PANIC]");
+    println!("{}", info);
+    serial_println!("[KERNEL PANIC] {}", info);
+
     loop {
         core::hint::spin_loop();
     }
