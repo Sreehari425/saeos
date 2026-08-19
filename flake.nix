@@ -28,6 +28,8 @@
             rustToolchain
             cargo-bootimage
             qemu
+            nasm
+            binutils
             llvm
           ];
 

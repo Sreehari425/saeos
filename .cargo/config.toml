@@ -1,6 +1,5 @@
 [build]
 target = "x86_64-unknown-none"
 
-[target.'cfg(target_os = "none")']
-runner = "bootimage run"
-
+[target.x86_64-unknown-none]
+runner = ["sh", "-c", "objcopy -O elf32-i386 \"$0\" \"$0.bin\" && qemu-system-x86_64 -kernel \"$0.bin\" -serial stdio"] 
