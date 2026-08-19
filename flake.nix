@@ -31,6 +31,8 @@
             nasm
             binutils
             llvm
+            gnumake
+            gdb
           ];
 
           shellHook = ''
