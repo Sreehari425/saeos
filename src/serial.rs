@@ -40,6 +40,12 @@ impl Write for SerialPort {
     }
 }
 
+impl Default for SerialPort {
+    fn default() -> Self {
+        Self::new(SERIAL_COM1)
+    }
+}
+
 pub static SERIAL1: SpinMutex<SerialPort> = SpinMutex::new(SerialPort::new(SERIAL_COM1));
 
 #[doc(hidden)]
