@@ -149,6 +149,22 @@ impl Writer {
         }
     }
 
+    pub fn backspace(&mut self) {
+        if self.column_position > 0 {
+            self.column_position -= 1;
+            let blank = ScreenChar {
+                ascii_character: b' ',
+                color_code: self.color_code,
+            };
+            unsafe {
+                write_volatile(
+                    &mut (*self.buffer).chars[self.row_position][self.column_position],
+                    blank,
+                );
+            }
+        }
+    }
+
     pub fn clear_screen(&mut self) {
         for row in 0..BUFFER_HEIGHT {
             self.clear_row(row);
@@ -180,6 +196,10 @@ pub fn _print(args: fmt::Arguments) {
 
 pub fn clear_screen() {
     WRITER.lock().clear_screen();
+}
+
+pub fn backspace() {
+    WRITER.lock().backspace();
 }
 
 pub fn set_color(foreground: Color, background: Color) {
