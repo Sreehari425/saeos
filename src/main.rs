@@ -2,8 +2,10 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+pub mod apic;
 pub mod gdt;
 pub mod interrupts;
+pub mod interrupt_controller;
 pub mod keyboard;
 pub mod pic;
 pub mod serial;
@@ -12,6 +14,7 @@ pub mod sync;
 pub mod vga_buffer;
 
 use core::panic::PanicInfo;
+use interrupt_controller::ControllerKind;
 use vga_buffer::Color;
 
 #[unsafe(no_mangle)]
@@ -28,23 +31,34 @@ pub extern "C" fn kernel_main() -> ! {
     vga_buffer::set_color(Color::LightGreen, Color::Black);
     println!("[OK] GDT & TSS with IST loaded.");
 
-    // 2. Initialize IDT (Exception & Hardware IRQ handlers)
+    // 2. Initialize IDT (Exceptions + Hardware IRQs + Spurious)
     interrupts::init_idt();
-    println!("[OK] IDT loaded (Exceptions + Hardware IRQs).");
+    println!("[OK] IDT loaded (256 vectors).");
 
-    // 3. Initialize & Remap 8259 PIC
-    pic::init();
-    println!("[OK] 8259 PIC remapped (IRQs 0x20..=0x2F).");
+    // 3. Initialize Interrupt Controller (APIC with 8259 PIC Fallback)
+    let mode = interrupt_controller::init();
+    match mode {
+        ControllerKind::Apic => {
+            vga_buffer::set_color(Color::LightGreen, Color::Black);
+            println!("[OK] APIC active (LAPIC @ 0xFEE00000, IOAPIC @ 0xFEC00000).");
+            println!("[OK] 8259 Legacy PIC masked and disabled.");
+            serial_println!("SaeOS initialized with APIC (LAPIC+IOAPIC).");
+        }
+        ControllerKind::LegacyPic => {
+            vga_buffer::set_color(Color::Yellow, Color::Black);
+            println!("[WARN] APIC unavailable. Falling back to 8259 Legacy PIC.");
+            serial_println!("SaeOS initialized with 8259 Legacy PIC fallback.");
+        }
+    }
 
     // 4. Enable CPU Hardware Interrupts
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
-    println!("[OK] CPU Hardware Interrupts enabled (sti).\n");
+    vga_buffer::set_color(Color::LightGreen, Color::Black);
+    println!("[OK] CPU Interrupts enabled (sti).\n");
 
-    serial_println!("SaeOS initialized with IDT and Keyboard. Starting shell.");
-
-    // 5. Start interactive Echo Shell
+    // 5. Start interactive Shell
     shell::run();
 }
 

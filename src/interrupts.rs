@@ -1,4 +1,6 @@
+use crate::apic::lapic::SPURIOUS_INTERRUPT_VECTOR;
 use crate::gdt;
+use crate::interrupt_controller;
 use crate::keyboard;
 use crate::pic;
 use crate::println;
@@ -93,11 +95,15 @@ pub fn init_idt() {
         IDT.entries[13].set_handler_addr(general_protection_fault_handler as *const () as u64);
         IDT.entries[14].set_handler_addr(page_fault_handler as *const () as u64);
 
-        // 2. Hardware Interrupts
+        // 2. Hardware Interrupts (Vectors 0x20 = 32, 0x21 = 33)
         IDT.entries[pic::PIC_1_OFFSET as usize]
             .set_handler_addr(timer_interrupt_handler as *const () as u64);
         IDT.entries[(pic::PIC_1_OFFSET + 1) as usize]
             .set_handler_addr(keyboard_interrupt_handler as *const () as u64);
+
+        // 3. APIC Spurious Interrupt Handler (Vector 0xFF = 255)
+        IDT.entries[SPURIOUS_INTERRUPT_VECTOR as usize]
+            .set_handler_addr(spurious_interrupt_handler as *const () as u64);
 
         let idt_descriptor = IdtDescriptor {
             limit: (core::mem::size_of::<InterruptDescriptorTable>() - 1) as u16,
@@ -187,7 +193,7 @@ extern "x86-interrupt" fn page_fault_handler(
 
 // Hardware Interrupt Handlers
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    pic::notify_end_of_interrupt(pic::PIC_1_OFFSET);
+    interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET);
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
@@ -198,5 +204,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
     keyboard::handle_scancode(scancode);
 
-    pic::notify_end_of_interrupt(pic::PIC_1_OFFSET + 1);
+    interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET + 1);
+}
+
+// APIC Spurious Interrupt Handler (No EOI is sent for spurious interrupts)
+extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Intentionally empty: Intel specification states no EOI should be generated
 }

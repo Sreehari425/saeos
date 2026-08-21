@@ -14,7 +14,7 @@ p4_table:
 p3_table:
     resb 4096
 p2_table:
-    resb 4096
+    resb 4096 * 4                 ; 4 Page Directories to map 4 GiB
 stack_bottom:
     resb 65536                    ; 64 KB stack
 stack_top:
@@ -105,21 +105,31 @@ set_up_page_tables:
     mov eax, p3_table
     or eax, 0b11 ; present + writable
     mov [p4_table], eax
+    mov dword [p4_table + 4], 0
 
-    ; Map first P3 entry to P2 table
-    mov eax, p2_table
+    ; Map P3 entries 0..3 to the 4 P2 tables
+    mov ecx, 0
+.map_p3_table:
+    mov eax, 4096
+    mul ecx
+    add eax, p2_table
     or eax, 0b11 ; present + writable
-    mov [p3_table], eax
+    mov [p3_table + ecx * 8], eax
+    mov dword [p3_table + ecx * 8 + 4], 0
+    inc ecx
+    cmp ecx, 4
+    jne .map_p3_table
 
-    ; Map each P2 entry to a 2MiB huge page (maps 512 * 2MiB = 1GiB total)
+    ; Map each P2 entry to a 2MiB huge page (maps 2048 * 2MiB = 4GiB total)
     mov ecx, 0
 .map_p2_table:
     mov eax, 0x200000       ; 2MiB
-    mul ecx                 ; address of ecx-th page
+    mul ecx                 ; address of ecx-th page (eax = low 32b, edx = high 32b)
     or eax, 0b10000011      ; present + writable + huge (2MiB)
     mov [p2_table + ecx * 8], eax
+    mov [p2_table + ecx * 8 + 4], edx
     inc ecx
-    cmp ecx, 512
+    cmp ecx, 2048
     jne .map_p2_table
     ret
 
