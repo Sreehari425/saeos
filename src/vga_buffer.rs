@@ -63,6 +63,11 @@ pub struct Writer {
 
 unsafe impl Send for Writer {}
 
+const VGA_CRTC_INDEX_PORT: u16 = 0x3D4;
+const VGA_CRTC_DATA_PORT: u16 = 0x3D5;
+const CURSOR_LOCATION_HIGH_REG: u8 = 0x0E;
+const CURSOR_LOCATION_LOW_REG: u8 = 0x0F;
+
 impl Writer {
     pub const fn new() -> Self {
         Self {
@@ -70,6 +75,36 @@ impl Writer {
             row_position: 0,
             color_code: ColorCode::new(Color::White, Color::Black),
             buffer: VGA_BUFFER_ADDRESS as *mut Buffer,
+        }
+    }
+
+    pub fn update_cursor(&self) {
+        let pos = (self.row_position * BUFFER_WIDTH + self.column_position) as u16;
+        unsafe {
+            core::arch::asm!(
+                "out dx, al",
+                in("dx") VGA_CRTC_INDEX_PORT,
+                in("al") CURSOR_LOCATION_HIGH_REG,
+                options(nomem, nostack, preserves_flags)
+            );
+            core::arch::asm!(
+                "out dx, al",
+                in("dx") VGA_CRTC_DATA_PORT,
+                in("al") ((pos >> 8) & 0xFF) as u8,
+                options(nomem, nostack, preserves_flags)
+            );
+            core::arch::asm!(
+                "out dx, al",
+                in("dx") VGA_CRTC_INDEX_PORT,
+                in("al") CURSOR_LOCATION_LOW_REG,
+                options(nomem, nostack, preserves_flags)
+            );
+            core::arch::asm!(
+                "out dx, al",
+                in("dx") VGA_CRTC_DATA_PORT,
+                in("al") (pos & 0xFF) as u8,
+                options(nomem, nostack, preserves_flags)
+            );
         }
     }
 
@@ -99,6 +134,7 @@ impl Writer {
                     );
                 }
                 self.column_position += 1;
+                self.update_cursor();
             }
         }
     }
@@ -135,6 +171,7 @@ impl Writer {
             self.clear_row(BUFFER_HEIGHT - 1);
         }
         self.column_position = 0;
+        self.update_cursor();
     }
 
     pub fn clear_row(&mut self, row: usize) {
@@ -162,6 +199,7 @@ impl Writer {
                     blank,
                 );
             }
+            self.update_cursor();
         }
     }
 
@@ -171,6 +209,7 @@ impl Writer {
         }
         self.row_position = 0;
         self.column_position = 0;
+        self.update_cursor();
     }
 }
 
@@ -200,6 +239,10 @@ pub fn clear_screen() {
 
 pub fn backspace() {
     WRITER.lock().backspace();
+}
+
+pub fn update_cursor() {
+    WRITER.lock().update_cursor();
 }
 
 pub fn set_color(foreground: Color, background: Color) {
