@@ -72,9 +72,7 @@ impl IoApic {
         let high: u32 = (dest_apic_id as u32) << 24;
 
         unsafe {
-            // Write high 32 bits (destination APIC ID) first
             self.write_reg(reg_high, high);
-            // Write low 32 bits (vector, delivery mode, mask)
             self.write_reg(reg_low, low);
         }
     }

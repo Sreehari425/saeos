@@ -1,3 +1,4 @@
+use crate::arch::x86_64::cpu;
 use crate::sync::SpinMutex;
 use core::fmt::{self, Write};
 use core::ptr::{read_volatile, write_volatile};
@@ -5,6 +6,11 @@ use core::ptr::{read_volatile, write_volatile};
 pub const BUFFER_HEIGHT: usize = 25;
 pub const BUFFER_WIDTH: usize = 80;
 pub const VGA_BUFFER_ADDRESS: usize = 0xb8000;
+
+const VGA_CRTC_INDEX_PORT: u16 = 0x3D4;
+const VGA_CRTC_DATA_PORT: u16 = 0x3D5;
+const CURSOR_LOCATION_HIGH_REG: u8 = 0x0E;
+const CURSOR_LOCATION_LOW_REG: u8 = 0x0F;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,11 +69,6 @@ pub struct Writer {
 
 unsafe impl Send for Writer {}
 
-const VGA_CRTC_INDEX_PORT: u16 = 0x3D4;
-const VGA_CRTC_DATA_PORT: u16 = 0x3D5;
-const CURSOR_LOCATION_HIGH_REG: u8 = 0x0E;
-const CURSOR_LOCATION_LOW_REG: u8 = 0x0F;
-
 impl Writer {
     pub const fn new() -> Self {
         Self {
@@ -81,30 +82,10 @@ impl Writer {
     pub fn update_cursor(&self) {
         let pos = (self.row_position * BUFFER_WIDTH + self.column_position) as u16;
         unsafe {
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") VGA_CRTC_INDEX_PORT,
-                in("al") CURSOR_LOCATION_HIGH_REG,
-                options(nomem, nostack, preserves_flags)
-            );
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") VGA_CRTC_DATA_PORT,
-                in("al") ((pos >> 8) & 0xFF) as u8,
-                options(nomem, nostack, preserves_flags)
-            );
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") VGA_CRTC_INDEX_PORT,
-                in("al") CURSOR_LOCATION_LOW_REG,
-                options(nomem, nostack, preserves_flags)
-            );
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") VGA_CRTC_DATA_PORT,
-                in("al") (pos & 0xFF) as u8,
-                options(nomem, nostack, preserves_flags)
-            );
+            cpu::outb(VGA_CRTC_INDEX_PORT, CURSOR_LOCATION_HIGH_REG);
+            cpu::outb(VGA_CRTC_DATA_PORT, ((pos >> 8) & 0xFF) as u8);
+            cpu::outb(VGA_CRTC_INDEX_PORT, CURSOR_LOCATION_LOW_REG);
+            cpu::outb(VGA_CRTC_DATA_PORT, (pos & 0xFF) as u8);
         }
     }
 
@@ -142,9 +123,7 @@ impl Writer {
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
             match byte {
-                // Printable ASCII byte or newline
                 0x20..=0x7e | b'\n' => self.write_byte(byte),
-                // Not part of printable ASCII range; print solid box (0xfe)
                 _ => self.write_byte(0xfe),
             }
         }
@@ -159,7 +138,7 @@ impl Writer {
         if self.row_position < BUFFER_HEIGHT - 1 {
             self.row_position += 1;
         } else {
-            // Scroll existing rows up by 1
+            // Scroll rows up by 1
             for row in 1..BUFFER_HEIGHT {
                 for col in 0..BUFFER_WIDTH {
                     unsafe {
@@ -253,7 +232,7 @@ pub fn set_color(foreground: Color, background: Color) {
 
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::drivers::vga::_print(format_args!($($arg)*)));
 }
 
 #[macro_export]

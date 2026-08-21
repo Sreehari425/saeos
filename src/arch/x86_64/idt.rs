@@ -1,8 +1,9 @@
-use crate::apic::lapic::SPURIOUS_INTERRUPT_VECTOR;
-use crate::gdt;
-use crate::interrupt_controller;
-use crate::keyboard;
-use crate::pic;
+use crate::arch::x86_64::apic::lapic::SPURIOUS_INTERRUPT_VECTOR;
+use crate::arch::x86_64::cpu;
+use crate::arch::x86_64::gdt;
+use crate::arch::x86_64::interrupt_controller;
+use crate::arch::x86_64::pic;
+use crate::drivers::keyboard;
 use crate::println;
 use crate::serial_println;
 
@@ -44,14 +45,12 @@ impl IdtEntry {
         self.pointer_middle = (addr >> 16) as u16;
         self.pointer_high = (addr >> 32) as u32;
         self.gdt_selector = 0x08; // Kernel Code Segment
-        // Present (bit 15), 64-bit Interrupt Gate (0xE in bits 8..11) = 0x8E00
-        self.options = 0x8E00;
+        self.options = 0x8E00;    // Present, 64-bit Interrupt Gate
         self.reserved = 0;
         self
     }
 
     pub fn set_stack_index(&mut self, index: u16) -> &mut Self {
-        // IST index is stored in bits 0..2
         self.options = (self.options & 0xFFF8) | ((index + 1) & 0x07);
         self
     }
@@ -84,7 +83,7 @@ struct IdtDescriptor {
 
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
-pub fn init_idt() {
+pub fn init() {
     unsafe {
         // 1. CPU Exceptions
         IDT.entries[0].set_handler_addr(divide_error_handler as *const () as u64);
@@ -123,7 +122,7 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
     println!("\n[EXCEPTION: DIVIDE BY ZERO]\n{:#?}", stack_frame);
     serial_println!("[EXCEPTION: DIVIDE BY ZERO] RIP={:#x}", stack_frame.instruction_pointer);
     loop {
-        core::hint::spin_loop();
+        cpu::pause();
     }
 }
 
@@ -146,7 +145,7 @@ extern "x86-interrupt" fn double_fault_handler(
         stack_frame.instruction_pointer
     );
     loop {
-        core::hint::spin_loop();
+        cpu::pause();
     }
 }
 
@@ -164,7 +163,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         stack_frame.instruction_pointer
     );
     loop {
-        core::hint::spin_loop();
+        cpu::pause();
     }
 }
 
@@ -187,7 +186,7 @@ extern "x86-interrupt" fn page_fault_handler(
         stack_frame.instruction_pointer
     );
     loop {
-        core::hint::spin_loop();
+        cpu::pause();
     }
 }
 
@@ -197,17 +196,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    let scancode: u8;
-    unsafe {
-        core::arch::asm!("in al, 0x60", out("al") scancode, options(nomem, nostack, preserves_flags));
-    }
+    let scancode = unsafe { cpu::inb(0x60) };
 
     keyboard::handle_scancode(scancode);
 
     interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET + 1);
 }
 
-// APIC Spurious Interrupt Handler (No EOI is sent for spurious interrupts)
-extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    // Intentionally empty: Intel specification states no EOI should be generated
-}
+// APIC Spurious Interrupt Handler (Intel specification states no EOI should be generated)
+extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {}

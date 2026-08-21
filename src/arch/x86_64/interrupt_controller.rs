@@ -1,5 +1,5 @@
-use crate::apic::{IoApic, LocalApic};
-use crate::pic;
+use crate::arch::x86_64::apic::{IoApic, LocalApic};
+use crate::arch::x86_64::pic;
 use crate::sync::SpinMutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,10 +34,7 @@ impl InterruptController {
             // 3. Attempt to initialize I/O APIC routing to BSP
             if self.ioapic.init(bsp_id).is_ok() {
                 // Completely mask 8259 PIC to disable legacy IRQ routing
-                unsafe {
-                    core::arch::asm!("out 0x21, al", in("al") 0xFFu8, options(nomem, nostack, preserves_flags));
-                    core::arch::asm!("out 0xa1, al", in("al") 0xFFu8, options(nomem, nostack, preserves_flags));
-                }
+                pic::mask_all();
 
                 self.mode = ControllerKind::Apic;
                 return ControllerKind::Apic;

@@ -8,7 +8,7 @@ fn main() {
 
     // 1. Assemble boot.asm with nasm into OUT_DIR
     let status = Command::new("nasm")
-        .args(["-f", "elf64", "src/boot.asm", "-o"])
+        .args(["-f", "elf64", "src/arch/x86_64/boot.asm", "-o"])
         .arg(&boot_obj)
         .status()
         .expect("Failed to execute nasm");
@@ -21,11 +21,11 @@ fn main() {
     println!("cargo:rustc-link-arg={}", boot_obj.display());
 
     // 3. Pass linker script and flags
-    println!("cargo:rustc-link-arg=-Tsrc/linker.ld");
+    println!("cargo:rustc-link-arg=-Tsrc/arch/x86_64/linker.ld");
     println!("cargo:rustc-link-arg=-n");
     println!("cargo:rustc-link-arg=-no-pie");
 
     // 4. Rebuild if boot.asm or linker.ld changes
-    println!("cargo:rerun-if-changed=src/boot.asm");
-    println!("cargo:rerun-if-changed=src/linker.ld");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/boot.asm");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/linker.ld");
 }

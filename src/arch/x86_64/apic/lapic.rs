@@ -1,3 +1,4 @@
+use crate::arch::x86_64::cpu;
 use core::ptr::{read_volatile, write_volatile};
 
 pub const DEFAULT_LAPIC_BASE: u64 = 0xFEE0_0000;
@@ -39,37 +40,8 @@ impl LocalApic {
     }
 
     pub fn is_supported() -> bool {
-        // CPUID EAX=1, check EDX bit 9 (APIC on chip)
-        let cpuid_res = core::arch::x86_64::__cpuid(1);
+        let cpuid_res = cpu::cpuid(1);
         (cpuid_res.edx & (1 << 9)) != 0
-    }
-
-    unsafe fn read_msr(msr: u32) -> u64 {
-        let (low, high): (u32, u32);
-        unsafe {
-            core::arch::asm!(
-                "rdmsr",
-                in("ecx") msr,
-                out("eax") low,
-                out("edx") high,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
-        ((high as u64) << 32) | (low as u64)
-    }
-
-    unsafe fn write_msr(msr: u32, val: u64) {
-        let low = val as u32;
-        let high = (val >> 32) as u32;
-        unsafe {
-            core::arch::asm!(
-                "wrmsr",
-                in("ecx") msr,
-                in("eax") low,
-                in("edx") high,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
     }
 
     #[inline]
@@ -95,7 +67,7 @@ impl LocalApic {
 
         unsafe {
             // 1. Read IA32_APIC_BASE MSR and ensure global APIC enable bit is set
-            let apic_base_msr = Self::read_msr(IA32_APIC_BASE_MSR);
+            let apic_base_msr = cpu::rdmsr(IA32_APIC_BASE_MSR);
             let base = apic_base_msr & IA32_APIC_BASE_MSR_ADDR_MASK;
             if base == 0 {
                 return Err("APIC base address from MSR is null");
@@ -104,7 +76,7 @@ impl LocalApic {
 
             // Ensure APIC global enable bit (bit 11) is set
             if (apic_base_msr & IA32_APIC_BASE_MSR_ENABLE) == 0 {
-                Self::write_msr(IA32_APIC_BASE_MSR, apic_base_msr | IA32_APIC_BASE_MSR_ENABLE);
+                cpu::wrmsr(IA32_APIC_BASE_MSR, apic_base_msr | IA32_APIC_BASE_MSR_ENABLE);
             }
 
             // 2. Set Flat Model in Destination Format Register (DFR)
