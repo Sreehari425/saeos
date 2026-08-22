@@ -7,7 +7,11 @@ if [ "$#" -lt 1 ]; then
 fi
 
 KERNEL_ELF="$1"
-KERNEL_BIN="${KERNEL_ELF}.bin"
+shift
+
+TEMP_DIR="$(mktemp -d -t saeos-bios.XXXXXX)"
+trap 'rm -rf "$TEMP_DIR"' EXIT
+KERNEL_BIN="$TEMP_DIR/saeos.bin"
 
 # 1. Convert 64-bit ELF container to Multiboot-compatible container for QEMU/GRUB
 objcopy -O elf32-i386 "$KERNEL_ELF" "$KERNEL_BIN"
@@ -16,4 +20,4 @@ objcopy -O elf32-i386 "$KERNEL_ELF" "$KERNEL_BIN"
 exec qemu-system-x86_64 \
     -kernel "$KERNEL_BIN" \
     -serial stdio \
-    "${@:2}"
+    "$@"
