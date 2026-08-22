@@ -73,6 +73,79 @@ pub fn pop_key() -> Option<char> {
     KEY_QUEUE.lock().pop()
 }
 
+/// Initialize the 8042 PS/2 keyboard controller.
+/// Enables the keyboard port, enables IRQ1 interrupts in the configuration byte, and starts keyboard scanning.
+pub fn init() {
+    unsafe {
+        // Drain any pending output in 8042 buffer
+        while (inb(0x64) & 0x01) != 0 {
+            let _ = inb(0x60);
+        }
+
+        // Enable first PS/2 port (keyboard)
+        outb(0x64, 0xAE);
+
+        // Read 8042 Controller Configuration Byte
+        outb(0x64, 0x20);
+        wait_input_full();
+        let mut config = inb(0x60);
+
+        // Enable IRQ1 (bit 0) and enable port clock (clear bit 4)
+        config |= 0x01; // First PS/2 port interrupt enabled
+        config &= !0x10; // First PS/2 port clock enabled
+
+        // Write updated Configuration Byte back
+        outb(0x64, 0x60);
+        wait_input_empty();
+        outb(0x60, config);
+
+        // Send enable scanning command to keyboard
+        wait_input_empty();
+        outb(0x60, 0xF4);
+        
+        // Drain response
+        let mut timeout = 10000;
+        while (inb(0x64) & 0x01) != 0 && timeout > 0 {
+            let _ = inb(0x60);
+            timeout -= 1;
+        }
+    }
+}
+
+#[inline]
+unsafe fn inb(port: u16) -> u8 {
+    let value: u8;
+    unsafe {
+        core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack));
+    }
+    value
+}
+
+#[inline]
+unsafe fn outb(port: u16, value: u8) {
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack));
+    }
+}
+
+#[inline]
+unsafe fn wait_input_empty() {
+    for _ in 0..100_000 {
+        if (unsafe { inb(0x64) } & 0x02) == 0 {
+            break;
+        }
+    }
+}
+
+#[inline]
+unsafe fn wait_input_full() {
+    for _ in 0..100_000 {
+        if (unsafe { inb(0x64) } & 0x01) != 0 {
+            break;
+        }
+    }
+}
+
 pub fn handle_scancode(scancode: u8) {
     let mut state = KEYBOARD_STATE.lock();
 

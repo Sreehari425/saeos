@@ -3,8 +3,30 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::mem::{align_of, size_of};
 use core::ptr;
 
-pub const HEAP_START: usize = 0x0040_0000; // 4 MiB (well above kernel and boot stacks)
+/// The kernel heap: a static byte array in .bss.
+///
+/// Embedding the heap here means the linker places it after all code/data sections,
+/// so it is safe in both BIOS mode (where it falls after the kernel image) and
+/// UEFI mode (where OVMF loads the EFI binary into low RAM and 0x400000 conflicts).
 pub const HEAP_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
+
+#[repr(C, align(16))]
+struct HeapStorage([u8; HEAP_SIZE]);
+
+static mut HEAP_STORAGE: HeapStorage = HeapStorage([0u8; HEAP_SIZE]);
+
+/// Returns the runtime start address of the embedded heap storage.
+#[inline]
+pub fn heap_start() -> usize {
+    // SAFETY: we only read the address, never the contents at this point.
+    core::ptr::addr_of!(HEAP_STORAGE) as usize
+}
+
+// Keep HEAP_START as a 0 sentinel; real address is from heap_start() above.
+// Kept for backward-compat with any callers that just want "the start for display".
+pub fn heap_start_display() -> usize {
+    heap_start()
+}
 
 struct ListNode {
     size: usize,
@@ -173,6 +195,6 @@ pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 pub fn init() {
     unsafe {
-        ALLOCATOR.init(HEAP_START, HEAP_SIZE);
+        ALLOCATOR.init(heap_start(), HEAP_SIZE);
     }
 }

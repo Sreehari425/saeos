@@ -230,14 +230,3 @@ pub fn set_color(foreground: Color, background: Color) {
         .lock()
         .set_color(ColorCode::new(foreground, background));
 }
-
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ($crate::drivers::vga::_print(format_args!($($arg)*)));
-}
-
-#[macro_export]
-macro_rules! println {
-    () => ($crate::print!("\n"));
-    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
-}

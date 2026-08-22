@@ -4,6 +4,7 @@ pub mod gdt;
 pub mod idt;
 pub mod interrupt_controller;
 pub mod pic;
+pub mod uefi;
 
 pub use interrupt_controller::ControllerKind;
 

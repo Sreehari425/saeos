@@ -1,7 +1,7 @@
 pub mod heap;
 pub mod multiboot;
 
-pub use heap::{HEAP_SIZE, HEAP_START};
+pub use heap::{heap_start, HEAP_SIZE};
 pub use multiboot::MultibootInfo;
 
 pub fn init(multiboot_info_addr: usize) {

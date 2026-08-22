@@ -1,8 +1,9 @@
 pub mod commands;
 
 use crate::arch::x86_64::cpu;
+use crate::drivers::console;
 use crate::drivers::keyboard;
-use crate::drivers::vga::{self, Color};
+use crate::drivers::vga::Color;
 use crate::print;
 use crate::println;
 use core::fmt::Write;
@@ -25,7 +26,7 @@ pub fn run() -> ! {
                     // Backspace
                     if cursor > 0 {
                         cursor -= 1;
-                        vga::backspace();
+                        console::backspace();
                         let _ = crate::drivers::serial::SERIAL1.lock().write_str("\x08 \x08");
                     }
                 }
@@ -45,7 +46,7 @@ pub fn run() -> ! {
                 c if c.is_ascii() && !c.is_ascii_control() && cursor < BUFFER_CAPACITY - 1 => {
                     line_buffer[cursor] = c as u8;
                     cursor += 1;
-                    vga::set_color(Color::White, Color::Black);
+                    console::set_color(Color::White, Color::Black);
                     print!("{}", c);
                 }
                 _ => {}
@@ -58,7 +59,7 @@ pub fn run() -> ! {
 }
 
 fn print_prompt() {
-    vga::set_color(Color::LightCyan, Color::Black);
+    console::set_color(Color::LightCyan, Color::Black);
     print!("saeos> ");
-    vga::set_color(Color::White, Color::Black);
+    console::set_color(Color::White, Color::Black);
 }

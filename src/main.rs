@@ -5,6 +5,7 @@
 extern crate alloc;
 
 pub mod arch;
+pub mod boot;
 pub mod collections;
 pub mod drivers;
 pub mod mm;
@@ -13,58 +14,97 @@ pub mod sync;
 
 use arch::x86_64::cpu;
 use arch::x86_64::interrupt_controller::ControllerKind;
+use boot::boot_info::{BootInfo, DisplayMode};
 use core::panic::PanicInfo;
-use drivers::vga::{self, Color};
+use drivers::vga::Color;
 
+/// BIOS entrypoint called from `boot.asm` with the Multiboot 1 info pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_main(multiboot_info_addr: usize) -> ! {
-    vga::clear_screen();
+pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
+    let mut total_memory_mb = 128;
+    if multiboot_info_addr != 0 {
+        let mb_info = unsafe { &*(multiboot_info_addr as *const mm::MultibootInfo) };
+        if mb_info.has_mem_info() {
+            total_memory_mb = mb_info.total_memory_mb();
+        }
+    }
 
-    vga::set_color(Color::LightCyan, Color::Black);
+    let boot_info = BootInfo {
+        display: DisplayMode::VgaText {
+            buffer_addr: 0xb8000,
+        },
+        total_memory_mb,
+        rsdp_addr: None,
+    };
+
+    kernel_main(&boot_info);
+}
+
+/// Unified kernel entrypoint shared by both BIOS and UEFI.
+pub fn kernel_main(boot_info: &BootInfo) -> ! {
+    // 1. Initialize Adaptive Console (VGA Text Buffer or GOP Truecolor Framebuffer)
+    drivers::console::init(boot_info.display);
+    drivers::console::clear_screen();
+
+    drivers::console::set_color(Color::LightCyan, Color::Black);
     println!("========================================");
     println!("       Welcome to SaeOS (x86_64)!       ");
     println!("========================================");
 
-    // 1. Initialize Architecture (GDT/TSS with IST, IDT, and Interrupt Controller)
+    match boot_info.display {
+        DisplayMode::VgaText { buffer_addr } => {
+            drivers::console::set_color(Color::LightCyan, Color::Black);
+            println!("[OK] Boot Mode: Legacy BIOS (VGA Text 80x25 @ {:#x}).", buffer_addr);
+        }
+        DisplayMode::GopFramebuffer(info) => {
+            drivers::console::set_color(Color::LightCyan, Color::Black);
+            println!(
+                "[OK] Boot Mode: Modern 64-bit UEFI (GOP Truecolor {}x{} @ {:#x}).",
+                info.width, info.height, info.base_addr
+            );
+        }
+    }
+
+    // 2. Initialize Architecture (GDT/TSS with IST, IDT, and Interrupt Controller)
     let mode = arch::x86_64::init();
-    vga::set_color(Color::LightGreen, Color::Black);
+    drivers::console::set_color(Color::LightGreen, Color::Black);
     println!("[OK] GDT & TSS with IST loaded.");
     println!("[OK] IDT loaded (256 vectors).");
 
     match mode {
         ControllerKind::Apic => {
-            vga::set_color(Color::LightGreen, Color::Black);
+            drivers::console::set_color(Color::LightGreen, Color::Black);
             println!("[OK] APIC active (LAPIC @ 0xFEE00000, IOAPIC @ 0xFEC00000).");
             println!("[OK] 8259 Legacy PIC masked and disabled.");
-            serial_println!("SaeOS initialized with APIC (LAPIC+IOAPIC).");
         }
         ControllerKind::LegacyPic => {
-            vga::set_color(Color::Yellow, Color::Black);
+            drivers::console::set_color(Color::Yellow, Color::Black);
             println!("[WARN] APIC unavailable. Falling back to 8259 Legacy PIC.");
-            serial_println!("SaeOS initialized with 8259 Legacy PIC fallback.");
         }
     }
 
-    // 2. Initialize Memory Management Subsystem & Kernel Heap Allocator
-    mm::init(multiboot_info_addr);
-    vga::set_color(Color::LightGreen, Color::Black);
-    println!("[OK] Kernel Heap Allocator initialized (10 MiB at 0x400000).");
-    serial_println!("Kernel Heap Allocator initialized (10 MiB).");
+    // 3. Initialize Memory Management & Heap Allocator (10 MiB)
+    mm::init(0);
+    drivers::console::set_color(Color::LightGreen, Color::Black);
+    println!(
+        "[OK] Kernel Heap Allocator initialized (10 MiB at {:#x}).",
+        mm::heap_start()
+    );
 
-    // 3. Enable CPU Hardware Interrupts
+    // 4. Initialize Keyboard Controller & Enable CPU Hardware Interrupts
+    drivers::keyboard::init();
     cpu::sti();
     println!("[OK] CPU Interrupts enabled (sti).\n");
 
-    // 4. Start interactive Shell
+    // 5. Start interactive Shell
     shell::run();
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    vga::set_color(Color::LightRed, Color::Black);
+    drivers::console::set_color(Color::LightRed, Color::Black);
     println!("\n[KERNEL PANIC]");
     println!("{}", info);
-    serial_println!("[KERNEL PANIC] {}", info);
 
     loop {
         cpu::hlt();

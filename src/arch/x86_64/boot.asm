@@ -1,5 +1,5 @@
 global _start
-extern kernel_main
+extern kernel_main_bios
 
 section .multiboot
 align 4
@@ -170,7 +170,7 @@ long_mode_start:
     mov rsp, stack_top
 
     ; Call 64-bit Rust kernel entry point
-    call kernel_main
+    call kernel_main_bios
 
     ; If kernel returns, halt
     cli
