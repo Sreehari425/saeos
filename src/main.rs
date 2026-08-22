@@ -2,8 +2,11 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
 pub mod arch;
 pub mod drivers;
+pub mod mm;
 pub mod shell;
 pub mod sync;
 
@@ -13,7 +16,7 @@ use core::panic::PanicInfo;
 use drivers::vga::{self, Color};
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_main() -> ! {
+pub extern "C" fn kernel_main(multiboot_info_addr: usize) -> ! {
     vga::clear_screen();
 
     vga::set_color(Color::LightCyan, Color::Black);
@@ -41,12 +44,17 @@ pub extern "C" fn kernel_main() -> ! {
         }
     }
 
-    // 2. Enable CPU Hardware Interrupts
-    cpu::sti();
+    // 2. Initialize Memory Management Subsystem & Kernel Heap Allocator
+    mm::init(multiboot_info_addr);
     vga::set_color(Color::LightGreen, Color::Black);
+    println!("[OK] Kernel Heap Allocator initialized (10 MiB at 0x400000).");
+    serial_println!("Kernel Heap Allocator initialized (10 MiB).");
+
+    // 3. Enable CPU Hardware Interrupts
+    cpu::sti();
     println!("[OK] CPU Interrupts enabled (sti).\n");
 
-    // 3. Start interactive Shell
+    // 4. Start interactive Shell
     shell::run();
 }
 

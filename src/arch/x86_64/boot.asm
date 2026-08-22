@@ -32,6 +32,7 @@ section .text
 bits 32
 _start:
     mov esp, stack_top
+    mov edi, ebx                 ; Save Multiboot info pointer in edi (becomes rdi in 64-bit)
 
     ; Check Multiboot magic
     cmp eax, 0x2BADB002

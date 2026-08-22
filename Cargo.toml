@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
 
 [[bin]]
 name = "saeos"

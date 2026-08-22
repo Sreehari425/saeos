@@ -5,8 +5,7 @@ use crate::drivers::keyboard;
 use crate::drivers::vga::{self, Color};
 use crate::print;
 use crate::println;
-use crate::serial_print;
-use crate::serial_println;
+use core::fmt::Write;
 
 const BUFFER_CAPACITY: usize = 80;
 
@@ -27,13 +26,12 @@ pub fn run() -> ! {
                     if cursor > 0 {
                         cursor -= 1;
                         vga::backspace();
-                        serial_print!("\x08 \x08");
+                        let _ = crate::drivers::serial::SERIAL1.lock().write_str("\x08 \x08");
                     }
                 }
                 '\n' => {
                     // Enter / Execute
                     println!();
-                    serial_println!();
 
                     if cursor > 0 {
                         if let Ok(line) = core::str::from_utf8(&line_buffer[..cursor]) {
@@ -49,7 +47,6 @@ pub fn run() -> ! {
                     cursor += 1;
                     vga::set_color(Color::White, Color::Black);
                     print!("{}", c);
-                    serial_print!("{}", c);
                 }
                 _ => {}
             }
@@ -63,6 +60,5 @@ pub fn run() -> ! {
 fn print_prompt() {
     vga::set_color(Color::LightCyan, Color::Black);
     print!("saeos> ");
-    serial_print!("saeos> ");
     vga::set_color(Color::White, Color::Black);
 }

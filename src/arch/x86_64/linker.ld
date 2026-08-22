@@ -2,6 +2,7 @@ ENTRY(_start)
 
 SECTIONS {
 	. = 1M;
+	_kernel_start = .;
 
 	.boot :
 	{
@@ -28,6 +29,9 @@ SECTIONS {
 		*(COMMON)
 		*(.bss .bss.*)
 	}
+
+	. = ALIGN(4K);
+	_kernel_end = .;
 
 	/DISCARD/ :
 	{
