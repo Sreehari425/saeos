@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 # 1. Build SaeOS for 64-bit UEFI target
 echo "==> Building SaeOS for x86_64-unknown-uefi..."
 cargo build --target x86_64-unknown-uefi "$@"
 
 # 2. Setup EFI System Partition directory structure (FAT filesystem for QEMU)
-ESP_DIR="build/esp"
+ESP_DIR="${ESP_DIR:-build/esp}"
 BOOT_DIR="$ESP_DIR/EFI/BOOT"
 mkdir -p "$BOOT_DIR"
 
@@ -15,7 +15,10 @@ cp target/x86_64-unknown-uefi/debug/saeos.efi "$BOOT_DIR/BOOTX64.EFI"
 echo "==> Prepared $BOOT_DIR/BOOTX64.EFI"
 
 # 4. Locate OVMF firmware
-OVMF_PATH="/usr/share/edk2/x64/OVMF.4m.fd"
+OVMF_PATH="${OVMF_PATH:-}"
+if [ -z "$OVMF_PATH" ]; then
+    OVMF_PATH="/usr/share/edk2/x64/OVMF.4m.fd"
+fi
 if [ ! -f "$OVMF_PATH" ]; then
     OVMF_PATH="/usr/share/OVMF/OVMF.fd"
 fi
