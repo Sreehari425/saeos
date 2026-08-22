@@ -42,6 +42,11 @@ pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
 
 /// Unified kernel entrypoint shared by both BIOS and UEFI.
 pub fn kernel_main(boot_info: &BootInfo) -> ! {
+    // Both BIOS and UEFI mirror console output to COM1. UEFI firmware may
+    // have initialized the UART already, but initializing it here keeps the
+    // BIOS path deterministic as well.
+    drivers::serial::init();
+
     // 1. Initialize Adaptive Console (VGA Text Buffer or GOP Truecolor Framebuffer)
     drivers::console::init(boot_info.display);
     drivers::console::clear_screen();

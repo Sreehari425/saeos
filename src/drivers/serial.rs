@@ -3,6 +3,7 @@ use crate::sync::SpinMutex;
 use core::fmt::{self, Write};
 
 const PORT_COM1: u16 = 0x3F8;
+const LINE_STATUS: u16 = 5;
 
 pub struct SerialPort {
     port: u16,
@@ -13,8 +14,26 @@ impl SerialPort {
         Self { port }
     }
 
+    /// Initialize the UART as COM1: 115200 baud, 8 data bits, no parity,
+    /// one stop bit, with the FIFO enabled.
+    pub fn init(&self) {
+        unsafe {
+            cpu::outb(self.port + 1, 0x00); // Disable interrupts
+            cpu::outb(self.port + 3, 0x80); // Enable divisor latch
+            cpu::outb(self.port, 0x01); // Divisor low: 115200 baud
+            cpu::outb(self.port + 1, 0x00); // Divisor high
+            cpu::outb(self.port + 3, 0x03); // 8N1
+            cpu::outb(self.port + 2, 0xC7); // Enable and clear FIFO
+            cpu::outb(self.port + 4, 0x0B); // IRQs enabled, RTS/DTR set
+        }
+    }
+
     pub fn write_byte(&self, byte: u8) {
         unsafe {
+            // Do not overwrite a byte still held by the UART transmitter.
+            while (cpu::inb(self.port + LINE_STATUS) & 0x20) == 0 {
+                core::hint::spin_loop();
+            }
             cpu::outb(self.port, byte);
         }
     }
@@ -34,6 +53,10 @@ impl Write for SerialPort {
 }
 
 pub static SERIAL1: SpinMutex<SerialPort> = SpinMutex::new(SerialPort::new(PORT_COM1));
+
+pub fn init() {
+    SERIAL1.lock().init();
+}
 
 #[doc(hidden)]
 pub fn _serial_print(args: fmt::Arguments) {
