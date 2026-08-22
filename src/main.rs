@@ -5,6 +5,7 @@
 extern crate alloc;
 
 pub mod arch;
+pub mod collections;
 pub mod drivers;
 pub mod mm;
 pub mod shell;

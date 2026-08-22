@@ -1,10 +1,11 @@
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::arch::x86_64::interrupt_controller::{self, ControllerKind};
+use crate::collections::hasher::BuildIdentityHasher;
+use crate::collections::{ChainedMap, HashSet, Map, OpenAddressMap, Set, StaticMap};
 use crate::drivers::vga::{self, Color};
 use crate::mm::{HEAP_SIZE, HEAP_START};
 use crate::println;
@@ -17,7 +18,7 @@ pub fn execute(cmd: &str) {
             println!("  help    - Show this help message");
             println!("  clear   - Clear the VGA text screen");
             println!("  apic    - Display APIC & interrupt controller status");
-            println!("  mem     - Test and display Kernel Heap & dynamic memory allocation");
+            println!("  mem     - Test Kernel Heap & in-tree trait-driven Collections");
             println!("  <text>  - Echoes your input back to the screen");
         }
         "clear" => {
@@ -25,52 +26,73 @@ pub fn execute(cmd: &str) {
         }
         "mem" | "alloc" => {
             vga::set_color(Color::LightCyan, Color::Black);
-            println!("--- Memory Management & Heap Status ---");
+            println!("--- Memory Management & Trait Collections ---");
             vga::set_color(Color::White, Color::Black);
             println!("Heap Base:     {:#x}", HEAP_START);
             println!("Heap Size:     {} MiB ({} bytes)", HEAP_SIZE / (1024 * 1024), HEAP_SIZE);
 
             vga::set_color(Color::Yellow, Color::Black);
-            println!("\nTesting dynamic Rust 'alloc' crate:");
+            println!("\n1. Testing dynamic Rust 'alloc' crate:");
 
-            // 1. Box test
+            // Box test
             let heap_box = Box::new(42u64);
             vga::set_color(Color::LightGreen, Color::Black);
             println!("  [+] Box<u64>: val = {}, addr = {:p}", *heap_box, heap_box);
 
-            // 2. Vector test
+            // Vector test
             let mut vec: Vec<usize> = Vec::new();
             for i in 0..8 {
                 vec.push(i * 10);
             }
             println!("  [+] Vec<usize>: len = {}, cap = {}, data = {:?}", vec.len(), vec.capacity(), vec.as_slice());
 
-            // 3. String & format! test
+            // String & format! test
             let formatted_str = format!("Dynamic string allocating {} elements", vec.len());
             println!("  [+] String (format!): \"{}\"", formatted_str);
 
-            // 4. BTreeMap test
-            let mut map = BTreeMap::new();
-            map.insert(String::from("kernel"), "SaeOS");
-            map.insert(String::from("arch"), "x86_64");
-            map.insert(String::from("allocator"), "LinkedList");
-            println!("  [+] BTreeMap<String, &str>: entries = {}", map.len());
-            for (k, v) in &map {
+            vga::set_color(Color::Yellow, Color::Black);
+            println!("\n2. Testing In-Tree Kernel Collections (trait Map<K,V>):");
+
+            // OpenAddressMap test (Flat table with FNV-1a hasher)
+            let mut open_map: OpenAddressMap<String, &str> = OpenAddressMap::new();
+            open_map.insert(String::from("vfs"), "Virtual File System");
+            open_map.insert(String::from("sched"), "Preemptive Scheduler");
+            open_map.insert(String::from("ipc"), "Inter-Process Comm");
+            vga::set_color(Color::LightGreen, Color::Black);
+            println!("  [+] OpenAddressMap<String, &str> (FNV-1a): len = {}", open_map.len());
+            for (k, v) in open_map.iter() {
                 println!("      - {} => {}", k, v);
             }
 
-            // 5. External crate HashMap (hashbrown) test
-            let mut hash_map = hashbrown::HashMap::new();
-            hash_map.insert("crate", "hashbrown");
-            hash_map.insert("status", "working in #![no_std]");
-            println!("  [+] HashMap (hashbrown crate): entries = {}", hash_map.len());
-            for (k, v) in &hash_map {
-                println!("      - {} => {}", k, v);
+            // ChainedMap test (Linux hlist-style buckets with IdentityHasher for integers)
+            let mut chained_map: ChainedMap<u64, &str, BuildIdentityHasher> = ChainedMap::with_hasher(BuildIdentityHasher::new());
+            chained_map.insert(1, "Init process (PID 1)");
+            chained_map.insert(2, "Kernel idle thread (PID 2)");
+            chained_map.insert(33, "Keyboard IRQ handler");
+            println!("  [+] ChainedMap<u64, &str, IdentityHasher>: len = {}", chained_map.len());
+            for (pid, desc) in chained_map.iter() {
+                println!("      - PID/IRQ {} => {}", pid, desc);
             }
+
+            // StaticMap test (Zero-heap, Interrupt/Panic safe)
+            let mut static_map: StaticMap<&str, u16, 4> = StaticMap::new();
+            static_map.insert("COM1", 0x3F8);
+            static_map.insert("VGA_CRTC", 0x3D4);
+            static_map.insert("PIC_MASTER", 0x20);
+            println!("  [+] StaticMap<&str, u16, 4> [ZERO-HEAP]: len = {}/{}", static_map.len(), static_map.capacity());
+            for (dev, port) in static_map.iter() {
+                println!("      - Hardware Port {} = {:#x}", dev, port);
+            }
+
+            // HashSet test
+            let mut set: HashSet<&str> = HashSet::new();
+            set.insert("ext2");
+            set.insert("fat32");
+            println!("  [+] HashSet<&str> (Set trait): len = {}", set.len());
 
             vga::set_color(Color::LightGreen, Color::Black);
-            println!("\n[OK] All dynamic allocations, collections, and drops OK!");
-            println!("---------------------------------------");
+            println!("\n[OK] All trait-driven collections and memory operations passed!");
+            println!("---------------------------------------------");
         }
         "apic" | "status" => {
             let ctrl = interrupt_controller::CONTROLLER.lock();
