@@ -21,44 +21,53 @@
         pkgs = import nixpkgs { inherit system overlays; };
 
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        cargoManifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        packageMetadata = cargoManifest.package;
 
-        cargoBuild = target: pkgs.stdenv.mkDerivation {
-          pname = "saeos-${target}";
-          version = "0.1.0";
-          src = ./.;
+        cargoBuild =
+          target:
+          pkgs.stdenv.mkDerivation {
+            pname = "${packageMetadata.name}-${target}";
+            version = packageMetadata.version;
+            src = ./.;
 
-          nativeBuildInputs = with pkgs; [
-            rustToolchain
-            nasm
-            binutils
-          ];
+            nativeBuildInputs = with pkgs; [
+              rustToolchain
+              nasm
+              binutils
+            ];
 
-          dontConfigure = true;
-          dontFixup = true;
+            dontConfigure = true;
+            dontFixup = true;
 
-          buildPhase = ''
-            runHook preBuild
-            export CARGO_HOME="$TMPDIR/cargo-home"
-            mkdir -p "$CARGO_HOME"
-            cargo build --offline --locked --target ${target}
-            runHook postBuild
-          '';
+            buildPhase = ''
+              runHook preBuild
+              export CARGO_HOME="$TMPDIR/cargo-home"
+              mkdir -p "$CARGO_HOME"
+              cargo build --offline --locked --target ${target}
+              runHook postBuild
+            '';
 
-          installPhase = ''
-            runHook preInstall
-            mkdir -p "$out"
-            ${if target == "x86_64-unknown-none" then ''
-              objcopy -O elf32-i386 \
-                target/${target}/debug/saeos \
-                "$out/saeos.bin"
-              cp target/${target}/debug/saeos "$out/saeos.elf"
-            '' else ''
-              mkdir -p "$out/EFI/BOOT"
-              cp target/${target}/debug/saeos.efi "$out/EFI/BOOT/BOOTX64.EFI"
-            ''}
-            runHook postInstall
-          '';
-        };
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              ${
+                if target == "x86_64-unknown-none" then
+                  ''
+                    objcopy -O elf32-i386 \
+                      target/${target}/debug/saeos \
+                      "$out/saeos.bin"
+                    cp target/${target}/debug/saeos "$out/saeos.elf"
+                  ''
+                else
+                  ''
+                    mkdir -p "$out/EFI/BOOT"
+                    cp target/${target}/debug/saeos.efi "$out/EFI/BOOT/BOOTX64.EFI"
+                  ''
+              }
+              runHook postInstall
+            '';
+          };
 
         bios = cargoBuild "x86_64-unknown-none";
         uefi = cargoBuild "x86_64-unknown-uefi";
