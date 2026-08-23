@@ -94,6 +94,9 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     println!("       Welcome to SaeOS (x86_64)!       ");
     println!("========================================");
 
+    drivers::console::set_color(Color::LightGreen, Color::Black);
+    println!("[OK] Available RAM: {} MiB.", boot_info.total_memory_mb());
+
     match boot_info.display {
         DisplayMode::VgaText { buffer_addr } => {
             drivers::console::set_color(Color::LightCyan, Color::Black);
