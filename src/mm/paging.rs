@@ -49,7 +49,7 @@ pub fn init() {
             let pd = &mut *direct.add(i);
             PDPT.0[i] = (pd as *mut PageTable as u64) | PRESENT | WRITABLE;
             for j in 0..512 {
-                let physical = (i as u64 * 1 << 30) + (j as u64 * 2 * 1024 * 1024);
+                let physical = ((i as u64) << 30) + (j as u64 * 2 * 1024 * 1024);
                 // The bootstrap identity/direct map must remain executable:
                 // the CPU continues fetching the current transition code from
                 // this map immediately after CR3 is loaded. Fine-grained NX
@@ -76,7 +76,7 @@ pub fn map_page(
 ) -> Result<(), &'static str> {
     let v = virtual_address.0;
     let p = physical.0;
-    if v < KERNEL_VIRT_BASE && v >= 4 * 1024 * 1024 * 1024 {
+    if (4 * 1024 * 1024 * 1024..KERNEL_VIRT_BASE).contains(&v) {
         return Err("virtual address outside bootstrap map");
     }
     if p & (PAGE_SIZE - 1) != 0 || v & (PAGE_SIZE - 1) != 0 {
@@ -105,7 +105,7 @@ pub fn map_page(
             NEXT_TABLE += 1;
             let base = entry & 0x000f_ffff_ffe0_0000;
             for i in 0..512 {
-                pt.0[i] = base + (i as u64 * PAGE_SIZE) | PRESENT | WRITABLE | NO_EXECUTE;
+                pt.0[i] = (base + (i as u64 * PAGE_SIZE)) | PRESENT | WRITABLE | NO_EXECUTE;
             }
             pd.0[pd_index] = (pt as *mut PageTable as u64) | PRESENT | WRITABLE;
         }

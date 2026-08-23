@@ -138,10 +138,10 @@ fn rsdp_valid(address: usize) -> bool {
 pub fn find_rsdp_bios() -> Option<u64> {
     // The EBDA segment pointer lives in the BIOS data area at 0x40E.
     let ebda = (read_u16(0x40E) as usize) << 4;
-    if ebda != 0 {
-        if let Some(address) = scan(ebda, ebda.saturating_add(1024)) {
-            return Some(address as u64);
-        }
+    if ebda != 0
+        && let Some(address) = scan(ebda, ebda.saturating_add(1024))
+    {
+        return Some(address as u64);
     }
 
     scan(0xE0000, 0x100000).map(|address| address as u64)
@@ -158,7 +158,9 @@ fn scan(start: usize, end: usize) -> Option<usize> {
     None
 }
 
-pub fn find_rsdp_uefi(
+/// # Safety
+/// `tables` must point to `count` valid UEFI configuration-table entries.
+pub unsafe fn find_rsdp_uefi(
     tables: *const super::uefi::proto::EfiConfigurationTable,
     count: usize,
 ) -> Option<u64> {
@@ -185,6 +187,8 @@ pub fn find_rsdp_uefi(
         .map(|address| address as u64)
 }
 
+/// # Safety
+/// `address` must point to a readable ACPI RSDP and its referenced tables.
 pub unsafe fn parse_rsdp(address: u64) -> Result<InterruptTopology, AcpiError> {
     let rsdp = address as usize;
     if !rsdp_valid(rsdp) {

@@ -327,9 +327,7 @@ pub unsafe extern "efiapi" fn efi_main(
             return mmap_status;
         }
 
-        unsafe {
-            parse_memory_map(mmap_ptr, memory_map_size, descriptor_size);
-        }
+        parse_memory_map(mmap_ptr, memory_map_size, descriptor_size);
 
         let mut exit_status = (bs.exit_boot_services)(image_handle, map_key);
         if exit_status != EFI_SUCCESS {
@@ -341,9 +339,7 @@ pub unsafe extern "efiapi" fn efi_main(
                 &mut descriptor_size,
                 &mut descriptor_version,
             );
-            unsafe {
-                parse_memory_map(mmap_ptr, retry_size, descriptor_size);
-            }
+            parse_memory_map(mmap_ptr, retry_size, descriptor_size);
             exit_status = (bs.exit_boot_services)(image_handle, map_key);
             if exit_status != EFI_SUCCESS {
                 serial_str("[UEFI] ExitBootServices failed\n");
@@ -383,7 +379,7 @@ pub unsafe extern "efiapi" fn efi_main(
         let boot_info = BootInfo {
             display,
             boot_mode: BootMode::Uefi,
-            memory_map: unsafe { UEFI_MEMORY_MAP },
+            memory_map: UEFI_MEMORY_MAP,
             kernel_physical_start: 0,
             kernel_physical_end: 0,
             rsdp_addr,
