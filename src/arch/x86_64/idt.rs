@@ -45,7 +45,7 @@ impl IdtEntry {
         self.pointer_middle = (addr >> 16) as u16;
         self.pointer_high = (addr >> 32) as u32;
         self.gdt_selector = 0x08; // Kernel Code Segment
-        self.options = 0x8E00;    // Present, 64-bit Interrupt Gate
+        self.options = 0x8E00; // Present, 64-bit Interrupt Gate
         self.reserved = 0;
         self
     }
@@ -120,7 +120,10 @@ pub fn init() {
 // Exception Handlers
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
     println!("\n[EXCEPTION: DIVIDE BY ZERO]\n{:#?}", stack_frame);
-    serial_println!("[EXCEPTION: DIVIDE BY ZERO] RIP={:#x}", stack_frame.instruction_pointer);
+    serial_println!(
+        "[EXCEPTION: DIVIDE BY ZERO] RIP={:#x}",
+        stack_frame.instruction_pointer
+    );
     loop {
         cpu::pause();
     }
@@ -128,7 +131,10 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     println!("\n[EXCEPTION: BREAKPOINT]\n{:#?}", stack_frame);
-    serial_println!("[EXCEPTION: BREAKPOINT] RIP={:#x}", stack_frame.instruction_pointer);
+    serial_println!(
+        "[EXCEPTION: BREAKPOINT] RIP={:#x}",
+        stack_frame.instruction_pointer
+    );
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -167,10 +173,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     }
 }
 
-extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: u64,
-) {
+extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     let faulting_address: u64;
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) faulting_address, options(nomem, nostack, preserves_flags));

@@ -1,5 +1,5 @@
-use crate::arch::x86_64::apic::{IoApic, LocalApic};
 use crate::arch::x86_64::acpi::InterruptTopology;
+use crate::arch::x86_64::apic::{IoApic, LocalApic};
 use crate::arch::x86_64::pic;
 use crate::sync::SpinMutex;
 
@@ -44,23 +44,29 @@ impl InterruptController {
                 let same_ioapic = timer_ioapic.address == keyboard_ioapic.address;
                 let timer_ready = if same_ioapic {
                     lapic_ready
-                        && self.ioapic.init(
-                            self.lapic.id() as u8,
-                            timer_ioapic.gsi_base,
-                            timer_gsi,
-                            timer_flags,
-                            keyboard_gsi,
-                            keyboard_flags,
-                        ).is_ok()
+                        && self
+                            .ioapic
+                            .init(
+                                self.lapic.id() as u8,
+                                timer_ioapic.gsi_base,
+                                timer_gsi,
+                                timer_flags,
+                                keyboard_gsi,
+                                keyboard_flags,
+                            )
+                            .is_ok()
                 } else {
                     lapic_ready
-                        && self.ioapic.init_single(
-                            self.lapic.id() as u8,
-                            timer_ioapic.gsi_base,
-                            timer_gsi,
-                            0x20,
-                            timer_flags,
-                        ).is_ok()
+                        && self
+                            .ioapic
+                            .init_single(
+                                self.lapic.id() as u8,
+                                timer_ioapic.gsi_base,
+                                timer_gsi,
+                                0x20,
+                                timer_flags,
+                            )
+                            .is_ok()
                 };
 
                 let keyboard_ready = if same_ioapic {
@@ -69,13 +75,15 @@ impl InterruptController {
                     let mut secondary = IoApic::new();
                     secondary.set_base_address(keyboard_ioapic.address);
                     let ready = lapic_ready
-                        && secondary.init_single(
-                            self.lapic.id() as u8,
-                            keyboard_ioapic.gsi_base,
-                            keyboard_gsi,
-                            0x21,
-                            keyboard_flags,
-                        ).is_ok();
+                        && secondary
+                            .init_single(
+                                self.lapic.id() as u8,
+                                keyboard_ioapic.gsi_base,
+                                keyboard_gsi,
+                                0x21,
+                                keyboard_flags,
+                            )
+                            .is_ok();
                     if ready {
                         self.secondary_ioapic = Some(secondary);
                     }
@@ -115,8 +123,7 @@ impl Default for InterruptController {
     }
 }
 
-pub static CONTROLLER: SpinMutex<InterruptController> =
-    SpinMutex::new(InterruptController::new());
+pub static CONTROLLER: SpinMutex<InterruptController> = SpinMutex::new(InterruptController::new());
 
 pub fn init(topology: Option<&InterruptTopology>) -> ControllerKind {
     CONTROLLER.lock().init(topology)

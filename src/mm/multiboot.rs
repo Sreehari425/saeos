@@ -2,6 +2,7 @@
 
 pub const MULTIBOOT_MEMORY_AVAILABLE: u32 = 1;
 pub const MULTIBOOT_MEMORY_RESERVED: u32 = 2;
+use crate::boot::boot_info::{PhysicalMemoryMap, PhysicalMemoryRegion};
 
 #[repr(C)]
 pub struct MultibootInfo {
@@ -41,5 +42,28 @@ impl MultibootInfo {
         } else {
             0
         }
+    }
+
+    pub fn usable_memory_map(&self) -> PhysicalMemoryMap {
+        let mut map = PhysicalMemoryMap::empty();
+        if !self.has_mmap_info() {
+            return map;
+        }
+        let mut offset = 0u32;
+        while offset < self.mmap_length {
+            let entry = unsafe { &*((self.mmap_addr + offset) as *const MultibootMmapEntry) };
+            if entry.memory_type == MULTIBOOT_MEMORY_AVAILABLE {
+                map.push(PhysicalMemoryRegion {
+                    start: entry.base_addr,
+                    length: entry.length,
+                });
+            }
+            let step = entry.size.saturating_add(4);
+            if step == 0 {
+                break;
+            }
+            offset = offset.saturating_add(step);
+        }
+        map
     }
 }

@@ -17,9 +17,7 @@ pub struct IoApic {
 
 impl IoApic {
     pub const fn new() -> Self {
-        Self {
-            base_addr: 0,
-        }
+        Self { base_addr: 0 }
     }
 
     #[inline]
@@ -112,7 +110,9 @@ impl IoApic {
         }
 
         let timer_index = timer_gsi.checked_sub(gsi_base).ok_or("Invalid timer GSI")?;
-        let keyboard_index = keyboard_gsi.checked_sub(gsi_base).ok_or("Invalid keyboard GSI")?;
+        let keyboard_index = keyboard_gsi
+            .checked_sub(gsi_base)
+            .ok_or("Invalid keyboard GSI")?;
         if timer_index >= max_entries || keyboard_index >= max_entries {
             return Err("MADT GSI is outside the selected IOAPIC range");
         }
@@ -123,13 +123,7 @@ impl IoApic {
         }
 
         // 2. Unmask and route IRQ 0 (Timer) to Vector 0x20 (32)
-        self.set_redirection_with_flags(
-            timer_index as u8,
-            0x20,
-            dest_apic_id,
-            timer_flags,
-            false,
-        );
+        self.set_redirection_with_flags(timer_index as u8, 0x20, dest_apic_id, timer_flags, false);
 
         // 3. Unmask and route IRQ 1 (Keyboard) to Vector 0x21 (33)
         self.set_redirection_with_flags(

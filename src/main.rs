@@ -12,29 +12,30 @@ pub mod mm;
 pub mod shell;
 pub mod sync;
 
-use arch::x86_64::cpu;
 use arch::x86_64::acpi;
+use arch::x86_64::cpu;
 use arch::x86_64::interrupt_controller::ControllerKind;
-use boot::boot_info::{BootInfo, DisplayMode};
+use boot::boot_info::{BootInfo, BootMode, DisplayMode};
 use core::panic::PanicInfo;
 use drivers::vga::Color;
 
 /// BIOS entrypoint called from `boot.asm` with the Multiboot 1 info pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
-    let mut total_memory_mb = 128;
+    let mut memory_map = boot::boot_info::PhysicalMemoryMap::empty();
     if multiboot_info_addr != 0 {
         let mb_info = unsafe { &*(multiboot_info_addr as *const mm::MultibootInfo) };
-        if mb_info.has_mem_info() {
-            total_memory_mb = mb_info.total_memory_mb();
-        }
+        memory_map = mb_info.usable_memory_map();
     }
 
     let boot_info = BootInfo {
         display: DisplayMode::VgaText {
             buffer_addr: 0xb8000,
         },
-        total_memory_mb,
+        boot_mode: BootMode::Bios,
+        memory_map,
+        kernel_physical_start: 0x100000,
+        kernel_physical_end: 0x100000 + 16 * 1024 * 1024,
         rsdp_addr: acpi::find_rsdp_bios(),
     };
 
@@ -47,6 +48,8 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     // have initialized the UART already, but initializing it here keeps the
     // BIOS path deterministic as well.
     drivers::serial::init();
+
+    mm::init(boot_info);
 
     let acpi_topology = match boot_info.rsdp_addr {
         Some(address) => match unsafe { acpi::parse_rsdp(address) } {
@@ -74,7 +77,10 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     match boot_info.display {
         DisplayMode::VgaText { buffer_addr } => {
             drivers::console::set_color(Color::LightCyan, Color::Black);
-            println!("[OK] Boot Mode: Legacy BIOS (VGA Text 80x25 @ {:#x}).", buffer_addr);
+            println!(
+                "[OK] Boot Mode: Legacy BIOS (VGA Text 80x25 @ {:#x}).",
+                buffer_addr
+            );
         }
         DisplayMode::GopFramebuffer(info) => {
             drivers::console::set_color(Color::LightCyan, Color::Black);
@@ -113,8 +119,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
         }
     }
 
-    // 3. Initialize Memory Management & Heap Allocator (10 MiB)
-    mm::init(0);
+    // 3. Memory management and heap were initialized before ACPI/hardware use.
     drivers::console::set_color(Color::LightGreen, Color::Black);
     println!(
         "[OK] Kernel Heap Allocator initialized (10 MiB at {:#x}).",

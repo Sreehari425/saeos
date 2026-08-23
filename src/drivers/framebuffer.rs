@@ -52,11 +52,19 @@ impl GopWriter {
     }
 
     pub fn cols(&self) -> usize {
-        if self.width == 0 { 0 } else { self.width / FONT_WIDTH }
+        if self.width == 0 {
+            0
+        } else {
+            self.width / FONT_WIDTH
+        }
     }
 
     pub fn rows(&self) -> usize {
-        if self.height == 0 { 0 } else { self.height / FONT_HEIGHT }
+        if self.height == 0 {
+            0
+        } else {
+            self.height / FONT_HEIGHT
+        }
     }
 
     #[inline]
@@ -132,7 +140,13 @@ impl GopWriter {
                 }
 
                 let c = byte as char;
-                self.draw_char(c, self.cursor_col, self.cursor_row, self.fg_color, self.bg_color);
+                self.draw_char(
+                    c,
+                    self.cursor_col,
+                    self.cursor_row,
+                    self.fg_color,
+                    self.bg_color,
+                );
                 self.cursor_col += 1;
             }
         }
@@ -177,7 +191,13 @@ impl GopWriter {
     pub fn backspace(&mut self) {
         if self.cursor_col > 0 {
             self.cursor_col -= 1;
-            self.draw_char(' ', self.cursor_col, self.cursor_row, self.fg_color, self.bg_color);
+            self.draw_char(
+                ' ',
+                self.cursor_col,
+                self.cursor_row,
+                self.fg_color,
+                self.bg_color,
+            );
         }
     }
 

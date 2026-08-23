@@ -20,7 +20,9 @@ impl<K, V, const CAPACITY: usize> StaticMap<K, V, CAPACITY> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.entries.iter().filter_map(|entry| entry.as_ref().map(|(k, v)| (k, v)))
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.as_ref().map(|(k, v)| (k, v)))
     }
 }
 

@@ -102,7 +102,7 @@ pub fn init() {
         // Send enable scanning command to keyboard
         wait_input_empty();
         outb(0x60, 0xF4);
-        
+
         // Drain response
         let mut timeout = 10000;
         while (inb(0x64) & 0x01) != 0 && timeout > 0 {

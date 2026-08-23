@@ -4,8 +4,8 @@ extern kernel_main_bios
 section .multiboot
 align 4
     dd 0x1BADB002                 ; Multiboot 1 magic
-    dd 0x00000003                 ; Flags: ALIGN | MEMINFO
-    dd -(0x1BADB002 + 0x00000003) ; Checksum
+    dd 0x00000043                 ; Flags: ALIGN | MEMINFO | MEMORY MAP
+    dd -(0x1BADB002 + 0x00000043) ; Checksum
 
 section .bss
 align 4096

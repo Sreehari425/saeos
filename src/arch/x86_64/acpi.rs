@@ -37,9 +37,17 @@ impl InterruptTopology {
     const fn empty() -> Self {
         Self {
             lapic_address: 0,
-            ioapics: [IoApicInfo { id: 0, address: 0, gsi_base: 0 }; MAX_IOAPICS],
+            ioapics: [IoApicInfo {
+                id: 0,
+                address: 0,
+                gsi_base: 0,
+            }; MAX_IOAPICS],
             ioapic_count: 0,
-            overrides: [InterruptOverride { source_irq: 0, gsi: 0, flags: 0 }; MAX_OVERRIDES],
+            overrides: [InterruptOverride {
+                source_irq: 0,
+                gsi: 0,
+                flags: 0,
+            }; MAX_OVERRIDES],
             override_count: 0,
         }
     }
@@ -172,7 +180,9 @@ pub fn find_rsdp_uefi(
         }
     }
 
-    acpi1.filter(|address| rsdp_valid(*address)).map(|address| address as u64)
+    acpi1
+        .filter(|address| rsdp_valid(*address))
+        .map(|address| address as u64)
 }
 
 pub unsafe fn parse_rsdp(address: u64) -> Result<InterruptTopology, AcpiError> {

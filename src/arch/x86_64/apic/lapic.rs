@@ -32,9 +32,7 @@ pub struct LocalApic {
 
 impl LocalApic {
     pub const fn new() -> Self {
-        Self {
-            base_addr: 0,
-        }
+        Self { base_addr: 0 }
     }
 
     pub fn is_supported() -> bool {
@@ -76,7 +74,10 @@ impl LocalApic {
 
             // Ensure APIC global enable bit (bit 11) is set
             if (apic_base_msr & IA32_APIC_BASE_MSR_ENABLE) == 0 {
-                cpu::wrmsr(IA32_APIC_BASE_MSR, apic_base_msr | IA32_APIC_BASE_MSR_ENABLE);
+                cpu::wrmsr(
+                    IA32_APIC_BASE_MSR,
+                    apic_base_msr | IA32_APIC_BASE_MSR_ENABLE,
+                );
             }
 
             // 2. Set Flat Model in Destination Format Register (DFR)
@@ -100,7 +101,10 @@ impl LocalApic {
             self.write_reg(REG_ESR, 0);
 
             // 7. Software-Enable Local APIC and set spurious interrupt vector (0xFF)
-            self.write_reg(REG_SVR, SVR_APIC_ENABLE | (SPURIOUS_INTERRUPT_VECTOR as u32));
+            self.write_reg(
+                REG_SVR,
+                SVR_APIC_ENABLE | (SPURIOUS_INTERRUPT_VECTOR as u32),
+            );
 
             // 8. Send initial EOI to clear any pending state
             self.eoi();

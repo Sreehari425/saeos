@@ -210,7 +210,10 @@ pub static WRITER: SpinMutex<Writer> = SpinMutex::new(Writer::new());
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     WRITER.lock().write_fmt(args).unwrap();
-    crate::drivers::serial::SERIAL1.lock().write_fmt(args).unwrap();
+    crate::drivers::serial::SERIAL1
+        .lock()
+        .write_fmt(args)
+        .unwrap();
 }
 
 pub fn clear_screen() {

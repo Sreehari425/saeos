@@ -27,7 +27,9 @@ pub fn run() -> ! {
                     if cursor > 0 {
                         cursor -= 1;
                         console::backspace();
-                        let _ = crate::drivers::serial::SERIAL1.lock().write_str("\x08 \x08");
+                        let _ = crate::drivers::serial::SERIAL1
+                            .lock()
+                            .write_str("\x08 \x08");
                     }
                 }
                 '\n' => {

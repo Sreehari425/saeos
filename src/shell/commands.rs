@@ -9,7 +9,7 @@ use crate::collections::hasher::BuildIdentityHasher;
 use crate::collections::{ChainedMap, HashSet, Map, OpenAddressMap, Set, StaticMap};
 use crate::drivers::console;
 use crate::drivers::vga::Color;
-use crate::mm::{heap_start, HEAP_SIZE};
+use crate::mm::{HEAP_SIZE, heap_start};
 use crate::println;
 
 pub fn execute(cmd: &str) {
@@ -31,7 +31,11 @@ pub fn execute(cmd: &str) {
             println!("--- Memory Management & Trait Collections ---");
             console::set_color(Color::White, Color::Black);
             println!("Heap Base:     {:#x}", heap_start());
-            println!("Heap Size:     {} MiB ({} bytes)", HEAP_SIZE / (1024 * 1024), HEAP_SIZE);
+            println!(
+                "Heap Size:     {} MiB ({} bytes)",
+                HEAP_SIZE / (1024 * 1024),
+                HEAP_SIZE
+            );
 
             console::set_color(Color::Yellow, Color::Black);
             println!("\n1. Testing dynamic Rust 'alloc' crate:");
@@ -46,7 +50,12 @@ pub fn execute(cmd: &str) {
             for i in 0..8 {
                 vec.push(i * 10);
             }
-            println!("  [+] Vec<usize>: len = {}, cap = {}, data = {:?}", vec.len(), vec.capacity(), vec.as_slice());
+            println!(
+                "  [+] Vec<usize>: len = {}, cap = {}, data = {:?}",
+                vec.len(),
+                vec.capacity(),
+                vec.as_slice()
+            );
 
             // String & format! test
             let formatted_str = format!("Dynamic string allocating {} elements", vec.len());
@@ -61,17 +70,24 @@ pub fn execute(cmd: &str) {
             open_map.insert(String::from("sched"), "Preemptive Scheduler");
             open_map.insert(String::from("ipc"), "Inter-Process Comm");
             console::set_color(Color::LightGreen, Color::Black);
-            println!("  [+] OpenAddressMap<String, &str> (FNV-1a): len = {}", open_map.len());
+            println!(
+                "  [+] OpenAddressMap<String, &str> (FNV-1a): len = {}",
+                open_map.len()
+            );
             for (k, v) in open_map.iter() {
                 println!("      - {} => {}", k, v);
             }
 
             // ChainedMap test (Linux hlist-style buckets with IdentityHasher for integers)
-            let mut chained_map: ChainedMap<u64, &str, BuildIdentityHasher> = ChainedMap::with_hasher(BuildIdentityHasher::new());
+            let mut chained_map: ChainedMap<u64, &str, BuildIdentityHasher> =
+                ChainedMap::with_hasher(BuildIdentityHasher::new());
             chained_map.insert(1, "Init process (PID 1)");
             chained_map.insert(2, "Kernel idle thread (PID 2)");
             chained_map.insert(33, "Keyboard IRQ handler");
-            println!("  [+] ChainedMap<u64, &str, IdentityHasher>: len = {}", chained_map.len());
+            println!(
+                "  [+] ChainedMap<u64, &str, IdentityHasher>: len = {}",
+                chained_map.len()
+            );
             for (pid, desc) in chained_map.iter() {
                 println!("      - PID/IRQ {} => {}", pid, desc);
             }
@@ -81,7 +97,11 @@ pub fn execute(cmd: &str) {
             static_map.insert("COM1", 0x3F8);
             static_map.insert("VGA_CRTC", 0x3D4);
             static_map.insert("PIC_MASTER", 0x20);
-            println!("  [+] StaticMap<&str, u16, 4> [ZERO-HEAP]: len = {}/{}", static_map.len(), static_map.capacity());
+            println!(
+                "  [+] StaticMap<&str, u16, 4> [ZERO-HEAP]: len = {}/{}",
+                static_map.len(),
+                static_map.capacity()
+            );
             for (dev, port) in static_map.iter() {
                 println!("      - Hardware Port {} = {:#x}", dev, port);
             }

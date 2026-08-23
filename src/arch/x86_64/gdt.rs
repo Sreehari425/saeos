@@ -69,10 +69,10 @@ pub fn init() {
         let tss_limit = (size_of::<TaskStateSegment>() - 1) as u64;
 
         let mut tss_low: u64 = tss_limit & 0xFFFF; // Bytes 0..1: Limit 0..15
-        tss_low |= (tss_ptr & 0x00FF_FFFF) << 16;  // Bytes 2..4: Base 0..23
-        tss_low |= 0x0000_8900_0000_0000;          // Byte 5: Present (1), Ring 0 (00), Type 0x9 (64-bit TSS)
+        tss_low |= (tss_ptr & 0x00FF_FFFF) << 16; // Bytes 2..4: Base 0..23
+        tss_low |= 0x0000_8900_0000_0000; // Byte 5: Present (1), Ring 0 (00), Type 0x9 (64-bit TSS)
         tss_low |= ((tss_limit >> 16) & 0x0F) << 48; // Byte 6: Limit 16..19
-        tss_low |= ((tss_ptr >> 24) & 0xFF) << 56;   // Byte 7: Base 24..31
+        tss_low |= ((tss_ptr >> 24) & 0xFF) << 56; // Byte 7: Base 24..31
         GDT[3] = tss_low;
 
         GDT[4] = tss_ptr >> 32;
