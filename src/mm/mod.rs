@@ -3,7 +3,9 @@ pub mod heap;
 pub mod multiboot;
 pub mod paging;
 
-pub use frame::{PhysAddr, PhysFrame, VirtAddr, alloc_frame, free_frame, reserve_range};
+pub use frame::{
+    PhysAddr, PhysFrame, VirtAddr, alloc_frame, alloc_frame_at_or_above, free_frame, reserve_range,
+};
 pub use heap::{HEAP_SIZE, heap_start};
 pub use multiboot::MultibootInfo;
 
@@ -50,10 +52,28 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         ),
     }
     activate_higher_half();
+    if let Some(frame) = frame::alloc_frame_at_or_above(PhysAddr(4 * 1024 * 1024 * 1024)) {
+        let address = paging::phys_to_virt(PhysAddr(frame.0)).0 as *mut u64;
+        unsafe {
+            address.write_volatile(0x5341_454f_5348_4947);
+            if address.read_volatile() == 0x5341_454f_5348_4947 {
+                crate::serial_println!(
+                    "Memory: verified direct access to frame {:#x} above 4 GiB.",
+                    frame.0
+                );
+            }
+        }
+        frame::free_frame(frame);
+    }
     init_heap();
     crate::serial_println!(
-        "Memory: {} MiB usable; higher-half page tables active at {:#x}.",
+        "Memory: {} MiB usable, highest physical {:#x}; direct map active at {:#x}.",
         boot_info.total_memory_mb(),
+        boot_info.memory_map.regions[..boot_info.memory_map.count]
+            .iter()
+            .map(|region| region.end())
+            .max()
+            .unwrap_or(0),
         paging::KERNEL_VIRT_BASE
     );
 }

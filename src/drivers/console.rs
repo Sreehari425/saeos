@@ -22,8 +22,9 @@ static CONSOLE_STATE: SpinMutex<ConsoleState> = SpinMutex::new(ConsoleState {
 pub fn init(display_mode: DisplayMode) {
     let mut state = CONSOLE_STATE.lock();
     match display_mode {
-        DisplayMode::VgaText { .. } => {
+        DisplayMode::VgaText { buffer_addr } => {
             state.kind = ConsoleKind::Vga;
+            VGA_WRITER.lock().set_buffer_address(buffer_addr as u64);
             VGA_WRITER.lock().clear_screen();
         }
         DisplayMode::GopFramebuffer(info) => {

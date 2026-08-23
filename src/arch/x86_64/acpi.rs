@@ -98,6 +98,14 @@ fn read_u16(address: usize) -> u16 {
     unsafe { core::ptr::read_unaligned(address as *const u16) }
 }
 
+fn mapped_address(address: u64) -> usize {
+    if crate::mm::paging::is_active() {
+        crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(address)).0 as usize
+    } else {
+        address as usize
+    }
+}
+
 fn checksum_ok(address: usize, length: usize) -> bool {
     let mut sum = 0u8;
     for offset in 0..length {
@@ -190,7 +198,7 @@ pub unsafe fn find_rsdp_uefi(
 /// # Safety
 /// `address` must point to a readable ACPI RSDP and its referenced tables.
 pub unsafe fn parse_rsdp(address: u64) -> Result<InterruptTopology, AcpiError> {
-    let rsdp = address as usize;
+    let rsdp = mapped_address(address);
     if !rsdp_valid(rsdp) {
         return Err(AcpiError::InvalidRsdp);
     }
@@ -202,7 +210,7 @@ pub unsafe fn parse_rsdp(address: u64) -> Result<InterruptTopology, AcpiError> {
         (read_u32(rsdp + 16) as u64, false)
     };
 
-    let root_address = root.0 as usize;
+    let root_address = mapped_address(root.0);
     if root_address == 0 {
         return Err(AcpiError::InvalidRootTable);
     }
@@ -219,9 +227,9 @@ pub unsafe fn parse_rsdp(address: u64) -> Result<InterruptTopology, AcpiError> {
     let entry_count = (root_length - 36) / entry_size;
     for index in 0..entry_count {
         let entry_address = if root.1 {
-            read_u64(root_address + 36 + index * 8) as usize
+            mapped_address(read_u64(root_address + 36 + index * 8))
         } else {
-            read_u32(root_address + 36 + index * 4) as usize
+            mapped_address(read_u32(root_address + 36 + index * 4) as u64)
         };
         if entry_address == 0 || !signature_equals(entry_address, b"APIC") {
             continue;

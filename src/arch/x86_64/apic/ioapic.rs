@@ -12,19 +12,23 @@ const IOAPIC_REDTBL_BASE: u32 = 0x10;
 const REDTBL_MASKED: u32 = 1 << 16;
 
 pub struct IoApic {
-    base_addr: u64,
+    physical_base_addr: u64,
+    mapped_base_addr: u64,
 }
 
 impl IoApic {
     pub const fn new() -> Self {
-        Self { base_addr: 0 }
+        Self {
+            physical_base_addr: 0,
+            mapped_base_addr: 0,
+        }
     }
 
     #[inline]
     unsafe fn read_reg(&self, reg: u32) -> u32 {
         unsafe {
-            let regsel = (self.base_addr + IOREGSEL as u64) as *mut u32;
-            let win = (self.base_addr + IOWIN as u64) as *const u32;
+            let regsel = (self.mapped_base_addr + IOREGSEL as u64) as *mut u32;
+            let win = (self.mapped_base_addr + IOWIN as u64) as *const u32;
             write_volatile(regsel, reg);
             read_volatile(win)
         }
@@ -33,8 +37,8 @@ impl IoApic {
     #[inline]
     unsafe fn write_reg(&self, reg: u32, val: u32) {
         unsafe {
-            let regsel = (self.base_addr + IOREGSEL as u64) as *mut u32;
-            let win = (self.base_addr + IOWIN as u64) as *mut u32;
+            let regsel = (self.mapped_base_addr + IOREGSEL as u64) as *mut u32;
+            let win = (self.mapped_base_addr + IOWIN as u64) as *mut u32;
             write_volatile(regsel, reg);
             write_volatile(win, val);
         }
@@ -53,7 +57,7 @@ impl IoApic {
     }
 
     pub fn base_address(&self) -> u64 {
-        self.base_addr
+        self.physical_base_addr
     }
 
     pub fn set_redirection(&mut self, irq: u8, vector: u8, dest_apic_id: u8, masked: bool) {
@@ -92,7 +96,8 @@ impl IoApic {
     }
 
     pub fn set_base_address(&mut self, address: u64) {
-        self.base_addr = address;
+        self.physical_base_addr = address;
+        self.mapped_base_addr = crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(address)).0;
     }
 
     pub fn init(

@@ -27,12 +27,16 @@ pub const SPURIOUS_INTERRUPT_VECTOR: u8 = 0xFF;
 const LVT_MASKED: u32 = 1 << 16;
 
 pub struct LocalApic {
-    base_addr: u64,
+    physical_base_addr: u64,
+    mapped_base_addr: u64,
 }
 
 impl LocalApic {
     pub const fn new() -> Self {
-        Self { base_addr: 0 }
+        Self {
+            physical_base_addr: 0,
+            mapped_base_addr: 0,
+        }
     }
 
     pub fn is_supported() -> bool {
@@ -43,7 +47,7 @@ impl LocalApic {
     #[inline]
     unsafe fn read_reg(&self, offset: usize) -> u32 {
         unsafe {
-            let ptr = (self.base_addr + offset as u64) as *const u32;
+            let ptr = (self.mapped_base_addr + offset as u64) as *const u32;
             read_volatile(ptr)
         }
     }
@@ -51,7 +55,7 @@ impl LocalApic {
     #[inline]
     unsafe fn write_reg(&self, offset: usize, value: u32) {
         unsafe {
-            let ptr = (self.base_addr + offset as u64) as *mut u32;
+            let ptr = (self.mapped_base_addr + offset as u64) as *mut u32;
             write_volatile(ptr, value);
         }
     }
@@ -65,10 +69,10 @@ impl LocalApic {
             // 1. Read IA32_APIC_BASE MSR and ensure global APIC enable bit is set
             let apic_base_msr = cpu::rdmsr(IA32_APIC_BASE_MSR);
             let msr_base = apic_base_msr & IA32_APIC_BASE_MSR_ADDR_MASK;
-            if self.base_addr == 0 {
+            if self.physical_base_addr == 0 {
                 return Err("APIC base address was not supplied by ACPI MADT");
             }
-            if msr_base != 0 && msr_base != self.base_addr {
+            if msr_base != 0 && msr_base != self.physical_base_addr {
                 return Err("ACPI LAPIC base disagrees with IA32_APIC_BASE");
             }
 
@@ -114,7 +118,8 @@ impl LocalApic {
     }
 
     pub fn set_base_address(&mut self, address: u64) {
-        self.base_addr = address;
+        self.physical_base_addr = address;
+        self.mapped_base_addr = crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(address)).0;
     }
 
     pub fn eoi(&self) {
@@ -132,7 +137,7 @@ impl LocalApic {
     }
 
     pub fn base_address(&self) -> u64 {
-        self.base_addr
+        self.physical_base_addr
     }
 }
 

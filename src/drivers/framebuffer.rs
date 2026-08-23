@@ -6,7 +6,7 @@ use core::fmt::{self, Write};
 use core::ptr::write_volatile;
 
 pub struct GopWriter {
-    base_addr: u64,
+    mapped_base_addr: u64,
     width: usize,
     height: usize,
     stride: usize,
@@ -22,7 +22,7 @@ unsafe impl Send for GopWriter {}
 impl GopWriter {
     pub const fn empty() -> Self {
         Self {
-            base_addr: 0,
+            mapped_base_addr: 0,
             width: 0,
             height: 0,
             stride: 0,
@@ -35,7 +35,8 @@ impl GopWriter {
     }
 
     pub fn init(&mut self, info: FramebufferInfo) {
-        self.base_addr = info.base_addr;
+        self.mapped_base_addr =
+            crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(info.base_addr)).0;
         self.width = info.width;
         self.height = info.height;
         self.stride = info.stride;
@@ -48,7 +49,7 @@ impl GopWriter {
     }
 
     pub fn is_active(&self) -> bool {
-        self.base_addr != 0 && self.width > 0 && self.height > 0
+        self.mapped_base_addr != 0 && self.width > 0 && self.height > 0
     }
 
     pub fn cols(&self) -> usize {
@@ -106,7 +107,7 @@ impl GopWriter {
         if x < self.width && y < self.height {
             let offset = (y * self.stride + x) * 4;
             unsafe {
-                let pixel_ptr = (self.base_addr + offset as u64) as *mut u32;
+                let pixel_ptr = (self.mapped_base_addr + offset as u64) as *mut u32;
                 write_volatile(pixel_ptr, color);
             }
         }
@@ -165,8 +166,8 @@ impl GopWriter {
                 let src_offset = ((y + FONT_HEIGHT) * self.stride) * 4;
                 let dst_offset = (y * self.stride) * 4;
                 unsafe {
-                    let src = (self.base_addr + src_offset as u64) as *const u8;
-                    let dst = (self.base_addr + dst_offset as u64) as *mut u8;
+                    let src = (self.mapped_base_addr + src_offset as u64) as *const u8;
+                    let dst = (self.mapped_base_addr + dst_offset as u64) as *mut u8;
                     // Copy one full scanline (stride × 4 bytes) at once
                     core::ptr::copy_nonoverlapping(src, dst, bytes_per_row);
                 }
@@ -177,7 +178,7 @@ impl GopWriter {
             for y in clear_start_y..self.height {
                 let row_offset = (y * self.stride) * 4;
                 unsafe {
-                    let row_ptr = (self.base_addr + row_offset as u64) as *mut u32;
+                    let row_ptr = (self.mapped_base_addr + row_offset as u64) as *mut u32;
                     // Fill the entire scanline with background colour
                     for x in 0..self.width {
                         core::ptr::write_volatile(row_ptr.add(x), self.bg_color);

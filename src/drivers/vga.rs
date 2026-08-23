@@ -89,6 +89,11 @@ impl Writer {
         }
     }
 
+    pub fn set_buffer_address(&mut self, physical_address: u64) {
+        self.buffer =
+            crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(physical_address)).0 as *mut Buffer;
+    }
+
     pub fn set_color(&mut self, color: ColorCode) {
         self.color_code = color;
     }

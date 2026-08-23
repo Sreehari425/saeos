@@ -19,6 +19,25 @@ use boot::boot_info::{BootInfo, BootMode, DisplayMode};
 use core::panic::PanicInfo;
 use drivers::vga::Color;
 
+#[cfg(not(target_os = "uefi"))]
+unsafe extern "C" {
+    static _kernel_start: u8;
+    static _kernel_end: u8;
+}
+
+#[cfg(not(target_os = "uefi"))]
+fn kernel_physical_bounds() -> (u64, u64) {
+    (
+        (&raw const _kernel_start) as u64,
+        (&raw const _kernel_end) as u64,
+    )
+}
+
+#[cfg(target_os = "uefi")]
+const fn kernel_physical_bounds() -> (u64, u64) {
+    (0, 0)
+}
+
 /// BIOS entrypoint called from `boot.asm` with the Multiboot 1 info pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
@@ -28,14 +47,15 @@ pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
         memory_map = mb_info.usable_memory_map();
     }
 
+    let (kernel_physical_start, kernel_physical_end) = kernel_physical_bounds();
     let boot_info = BootInfo {
         display: DisplayMode::VgaText {
             buffer_addr: 0xb8000,
         },
         boot_mode: BootMode::Bios,
         memory_map,
-        kernel_physical_start: 0x100000,
-        kernel_physical_end: 0x100000 + 16 * 1024 * 1024,
+        kernel_physical_start,
+        kernel_physical_end,
         rsdp_addr: acpi::find_rsdp_bios(),
     };
 

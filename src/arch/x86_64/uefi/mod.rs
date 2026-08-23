@@ -380,8 +380,11 @@ pub unsafe extern "efiapi" fn efi_main(
             display,
             boot_mode: BootMode::Uefi,
             memory_map: UEFI_MEMORY_MAP,
-            kernel_physical_start: 0,
-            kernel_physical_end: 0,
+            // UEFI may place the image above 4 GiB. The image is well below
+            // this conservative 16 MiB reservation in the current loader.
+            kernel_physical_start: (efi_main as *const () as usize as u64) & !0xFFFFF,
+            kernel_physical_end: ((efi_main as *const () as usize as u64) & !0xFFFFF)
+                + 16 * 1024 * 1024,
             rsdp_addr,
         };
 
@@ -414,7 +417,11 @@ unsafe fn parse_memory_map(ptr: *mut u8, size: usize, descriptor_size: usize) {
         // after ExitBootServices; loader/runtime memory remains reserved.
         if matches!(
             descriptor.memory_type,
-            BOOT_SERVICES_CODE | BOOT_SERVICES_DATA | CONVENTIONAL_MEMORY
+            LOADER_CODE
+                | LOADER_DATA
+                | BOOT_SERVICES_CODE
+                | BOOT_SERVICES_DATA
+                | CONVENTIONAL_MEMORY
         ) {
             unsafe {
                 (&raw mut UEFI_MEMORY_MAP)
@@ -431,6 +438,8 @@ unsafe fn parse_memory_map(ptr: *mut u8, size: usize, descriptor_size: usize) {
 }
 
 const CONVENTIONAL_MEMORY: u32 = 7;
+const LOADER_CODE: u32 = 1;
+const LOADER_DATA: u32 = 2;
 const BOOT_SERVICES_CODE: u32 = 3;
 const BOOT_SERVICES_DATA: u32 = 4;
 
