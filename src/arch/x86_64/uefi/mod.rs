@@ -1,6 +1,7 @@
 pub mod proto;
 
 use crate::boot::boot_info::{BootInfo, DisplayMode, FramebufferInfo, PixelFormat};
+use crate::arch::x86_64::acpi;
 use proto::{
     EfiGraphicsOutputProtocol, EfiHandle, EfiStatus, EfiSystemTable,
     EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, EFI_SUCCESS,
@@ -215,6 +216,11 @@ pub unsafe extern "efiapi" fn efi_main(
 
         let st = &*system_table;
 
+        let rsdp_addr = acpi::find_rsdp_uefi(
+            st.configuration_table,
+            st.number_of_table_entries,
+        );
+
         if st.boot_services.is_null() {
             serial_str("[UEFI] ERROR: boot_services is null\n");
             return 1;
@@ -375,7 +381,7 @@ pub unsafe extern "efiapi" fn efi_main(
         let boot_info = BootInfo {
             display,
             total_memory_mb: 256,
-            rsdp_addr: None,
+            rsdp_addr,
         };
 
         crate::kernel_main(&boot_info);

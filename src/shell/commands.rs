@@ -3,6 +3,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::interrupt_controller::{self, ControllerKind};
 use crate::collections::hasher::BuildIdentityHasher;
 use crate::collections::{ChainedMap, HashSet, Map, OpenAddressMap, Set, StaticMap};
@@ -96,25 +97,44 @@ pub fn execute(cmd: &str) {
             println!("---------------------------------------------");
         }
         "apic" | "status" => {
-            let ctrl = interrupt_controller::CONTROLLER.lock();
+            // Snapshot controller state before printing. Printing can take
+            // time while interrupts are enabled, and the keyboard interrupt
+            // handler also needs CONTROLLER to send its EOI. Holding this
+            // lock across println! would deadlock if a key arrived then.
+            // The interrupt handler also reads CONTROLLER for EOI, so mask
+            // interrupts for the short snapshot window as well.
+            cpu::cli();
+            let snapshot = {
+                let ctrl = interrupt_controller::CONTROLLER.lock();
+                (
+                    ctrl.mode,
+                    ctrl.lapic.base_address(),
+                    ctrl.lapic.id(),
+                    ctrl.lapic.version(),
+                    ctrl.ioapic.base_address(),
+                    ctrl.ioapic.id(),
+                    ctrl.ioapic.max_redirection_entries(),
+                )
+            };
+            cpu::sti();
+
+            let (mode, lapic_base, lapic_id, lapic_version, ioapic_base, ioapic_id, max_irqs) =
+                snapshot;
+
             console::set_color(Color::LightCyan, Color::Black);
             println!("--- Interrupt Controller Diagnostics ---");
-            match ctrl.mode {
+            match mode {
                 ControllerKind::Apic => {
                     console::set_color(Color::LightGreen, Color::Black);
                     println!("Mode:          APIC (Local APIC + I/O APIC) [ACTIVE]");
                     console::set_color(Color::White, Color::Black);
                     println!(
                         "Local APIC:    Base={:#x}, ID={}, Version={:#x}",
-                        ctrl.lapic.base_address(),
-                        ctrl.lapic.id(),
-                        ctrl.lapic.version()
+                        lapic_base, lapic_id, lapic_version
                     );
                     println!(
                         "I/O APIC:      Base={:#x}, ID={}, Max IRQs={}",
-                        ctrl.ioapic.base_address(),
-                        ctrl.ioapic.id(),
-                        ctrl.ioapic.max_redirection_entries()
+                        ioapic_base, ioapic_id, max_irqs
                     );
                     println!("Legacy 8259:   Masked (Disabled)");
                 }

@@ -1,7 +1,5 @@
 use core::ptr::{read_volatile, write_volatile};
 
-pub const DEFAULT_IOAPIC_BASE: u64 = 0xFEC0_0000;
-
 const IOREGSEL: usize = 0x00;
 const IOWIN: usize = 0x10;
 
@@ -20,7 +18,7 @@ pub struct IoApic {
 impl IoApic {
     pub const fn new() -> Self {
         Self {
-            base_addr: DEFAULT_IOAPIC_BASE,
+            base_addr: 0,
         }
     }
 
@@ -61,10 +59,28 @@ impl IoApic {
     }
 
     pub fn set_redirection(&mut self, irq: u8, vector: u8, dest_apic_id: u8, masked: bool) {
+        self.set_redirection_with_flags(irq, vector, dest_apic_id, 0, masked);
+    }
+
+    fn set_redirection_with_flags(
+        &mut self,
+        irq: u8,
+        vector: u8,
+        dest_apic_id: u8,
+        flags: u16,
+        masked: bool,
+    ) {
         let reg_low = IOAPIC_REDTBL_BASE + (irq as u32) * 2;
         let reg_high = reg_low + 1;
 
         let mut low: u32 = vector as u32;
+        // MADT flags: bits 0..1 polarity, bits 2..3 trigger mode.
+        if flags & 0x3 == 0x3 {
+            low |= 1 << 13; // active low
+        }
+        if flags & 0xC == 0xC {
+            low |= 1 << 15; // level triggered
+        }
         if masked {
             low |= REDTBL_MASKED;
         }
@@ -77,23 +93,76 @@ impl IoApic {
         }
     }
 
-    pub fn init(&mut self, dest_apic_id: u8) -> Result<(), &'static str> {
+    pub fn set_base_address(&mut self, address: u64) {
+        self.base_addr = address;
+    }
+
+    pub fn init(
+        &mut self,
+        dest_apic_id: u8,
+        gsi_base: u32,
+        timer_gsi: u32,
+        timer_flags: u16,
+        keyboard_gsi: u32,
+        keyboard_flags: u16,
+    ) -> Result<(), &'static str> {
         let max_entries = self.max_redirection_entries();
         if max_entries == 0 || max_entries > 240 {
             return Err("Invalid IOAPIC max redirection entries detected");
         }
 
+        let timer_index = timer_gsi.checked_sub(gsi_base).ok_or("Invalid timer GSI")?;
+        let keyboard_index = keyboard_gsi.checked_sub(gsi_base).ok_or("Invalid keyboard GSI")?;
+        if timer_index >= max_entries || keyboard_index >= max_entries {
+            return Err("MADT GSI is outside the selected IOAPIC range");
+        }
+
         // 1. Mask all redirection entries initially
         for irq in 0..max_entries as u8 {
-            self.set_redirection(irq, 0x20 + irq, dest_apic_id, true);
+            self.set_redirection(irq, 0xFF, dest_apic_id, true);
         }
 
         // 2. Unmask and route IRQ 0 (Timer) to Vector 0x20 (32)
-        self.set_redirection(0, 0x20, dest_apic_id, false);
+        self.set_redirection_with_flags(
+            timer_index as u8,
+            0x20,
+            dest_apic_id,
+            timer_flags,
+            false,
+        );
 
         // 3. Unmask and route IRQ 1 (Keyboard) to Vector 0x21 (33)
-        self.set_redirection(1, 0x21, dest_apic_id, false);
+        self.set_redirection_with_flags(
+            keyboard_index as u8,
+            0x21,
+            dest_apic_id,
+            keyboard_flags,
+            false,
+        );
 
+        Ok(())
+    }
+
+    pub fn init_single(
+        &mut self,
+        dest_apic_id: u8,
+        gsi_base: u32,
+        gsi: u32,
+        vector: u8,
+        flags: u16,
+    ) -> Result<(), &'static str> {
+        let max_entries = self.max_redirection_entries();
+        if max_entries == 0 || max_entries > 240 {
+            return Err("Invalid IOAPIC max redirection entries detected");
+        }
+        let index = gsi.checked_sub(gsi_base).ok_or("Invalid GSI")?;
+        if index >= max_entries {
+            return Err("MADT GSI is outside the selected IOAPIC range");
+        }
+        for irq in 0..max_entries as u8 {
+            self.set_redirection(irq, 0xFF, dest_apic_id, true);
+        }
+        self.set_redirection_with_flags(index as u8, vector, dest_apic_id, flags, false);
         Ok(())
     }
 }

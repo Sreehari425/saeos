@@ -1,8 +1,6 @@
 use crate::arch::x86_64::cpu;
 use core::ptr::{read_volatile, write_volatile};
 
-pub const DEFAULT_LAPIC_BASE: u64 = 0xFEE0_0000;
-
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
 const IA32_APIC_BASE_MSR_ENABLE: u64 = 1 << 11;
 const IA32_APIC_BASE_MSR_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -35,7 +33,7 @@ pub struct LocalApic {
 impl LocalApic {
     pub const fn new() -> Self {
         Self {
-            base_addr: DEFAULT_LAPIC_BASE,
+            base_addr: 0,
         }
     }
 
@@ -68,11 +66,13 @@ impl LocalApic {
         unsafe {
             // 1. Read IA32_APIC_BASE MSR and ensure global APIC enable bit is set
             let apic_base_msr = cpu::rdmsr(IA32_APIC_BASE_MSR);
-            let base = apic_base_msr & IA32_APIC_BASE_MSR_ADDR_MASK;
-            if base == 0 {
-                return Err("APIC base address from MSR is null");
+            let msr_base = apic_base_msr & IA32_APIC_BASE_MSR_ADDR_MASK;
+            if self.base_addr == 0 {
+                return Err("APIC base address was not supplied by ACPI MADT");
             }
-            self.base_addr = base;
+            if msr_base != 0 && msr_base != self.base_addr {
+                return Err("ACPI LAPIC base disagrees with IA32_APIC_BASE");
+            }
 
             // Ensure APIC global enable bit (bit 11) is set
             if (apic_base_msr & IA32_APIC_BASE_MSR_ENABLE) == 0 {
@@ -107,6 +107,10 @@ impl LocalApic {
         }
 
         Ok(())
+    }
+
+    pub fn set_base_address(&mut self, address: u64) {
+        self.base_addr = address;
     }
 
     pub fn eoi(&self) {

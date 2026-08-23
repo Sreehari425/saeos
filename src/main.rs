@@ -13,6 +13,7 @@ pub mod shell;
 pub mod sync;
 
 use arch::x86_64::cpu;
+use arch::x86_64::acpi;
 use arch::x86_64::interrupt_controller::ControllerKind;
 use boot::boot_info::{BootInfo, DisplayMode};
 use core::panic::PanicInfo;
@@ -34,7 +35,7 @@ pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
             buffer_addr: 0xb8000,
         },
         total_memory_mb,
-        rsdp_addr: None,
+        rsdp_addr: acpi::find_rsdp_bios(),
     };
 
     kernel_main(&boot_info);
@@ -46,6 +47,20 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     // have initialized the UART already, but initializing it here keeps the
     // BIOS path deterministic as well.
     drivers::serial::init();
+
+    let acpi_topology = match boot_info.rsdp_addr {
+        Some(address) => match unsafe { acpi::parse_rsdp(address) } {
+            Ok(topology) => Some(topology),
+            Err(error) => {
+                serial_println!("[ACPI] MADT discovery failed: {:?}", error);
+                None
+            }
+        },
+        None => {
+            serial_println!("[ACPI] RSDP not found; using legacy PIC fallback.");
+            None
+        }
+    };
 
     // 1. Initialize Adaptive Console (VGA Text Buffer or GOP Truecolor Framebuffer)
     drivers::console::init(boot_info.display);
@@ -71,7 +86,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     }
 
     // 2. Initialize Architecture (GDT/TSS with IST, IDT, and Interrupt Controller)
-    let mode = arch::x86_64::init();
+    let mode = arch::x86_64::init(acpi_topology.as_ref());
     drivers::console::set_color(Color::LightGreen, Color::Black);
     println!("[OK] GDT & TSS with IST loaded.");
     println!("[OK] IDT loaded (256 vectors).");
@@ -79,7 +94,17 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     match mode {
         ControllerKind::Apic => {
             drivers::console::set_color(Color::LightGreen, Color::Black);
-            println!("[OK] APIC active (LAPIC @ 0xFEE00000, IOAPIC @ 0xFEC00000).");
+            let (lapic_base, ioapic_base) = {
+                let controller = arch::x86_64::interrupt_controller::CONTROLLER.lock();
+                (
+                    controller.lapic.base_address(),
+                    controller.ioapic.base_address(),
+                )
+            };
+            println!(
+                "[OK] APIC active (LAPIC @ {:#x}, IOAPIC @ {:#x}).",
+                lapic_base, ioapic_base
+            );
             println!("[OK] 8259 Legacy PIC masked and disabled.");
         }
         ControllerKind::LegacyPic => {

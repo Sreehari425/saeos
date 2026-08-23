@@ -11,7 +11,7 @@ use core::fmt::Write;
 const BUFFER_CAPACITY: usize = 80;
 
 pub fn run() -> ! {
-    println!("SaeOS Interactive Shell (APIC Enabled)");
+    println!("SaeOS Interactive Shell");
     println!("Type 'help' for commands, or type anything to echo.\n");
 
     print_prompt();
