@@ -81,6 +81,7 @@ impl Allocator {
                 start = start.max(PAGE_SIZE);
                 if !self.is_reserved(start, start + PAGE_SIZE) {
                     self.cursor_address = start + PAGE_SIZE;
+                    self.reserve(start, start + PAGE_SIZE);
                     return Some(PhysFrame(start));
                 }
                 start += PAGE_SIZE;
@@ -144,6 +145,7 @@ pub fn alloc_frame_at_or_above(minimum: PhysAddr) -> Option<PhysFrame> {
                 .next_multiple_of(PAGE_SIZE);
             while start.saturating_add(PAGE_SIZE) <= region.end() {
                 if !allocator.is_reserved(start, start + PAGE_SIZE) {
+                    allocator.reserve(start, start + PAGE_SIZE);
                     return Some(PhysFrame(start));
                 }
                 start += PAGE_SIZE;
@@ -171,6 +173,7 @@ pub(crate) fn alloc_frame_below(maximum: PhysAddr) -> Option<PhysFrame> {
             while start.saturating_add(PAGE_SIZE) <= end {
                 if !allocator.is_reserved(start, start + PAGE_SIZE) {
                     allocator.low_cursor_address = start + PAGE_SIZE;
+                    allocator.reserve(start, start + PAGE_SIZE);
                     return Some(PhysFrame(start));
                 }
                 start += PAGE_SIZE;

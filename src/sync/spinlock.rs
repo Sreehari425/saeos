@@ -38,6 +38,10 @@ impl<T> SpinMutex<T> {
             data: unsafe { &mut *self.data.get() },
         }
     }
+
+    pub fn reset(&self) {
+        self.lock.store(false, Ordering::Relaxed);
+    }
 }
 
 impl<'a, T> Deref for MutexGuard<'a, T> {

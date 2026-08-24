@@ -8,7 +8,7 @@ fn main() {
 
     let target = env::var("TARGET").unwrap_or_default();
 
-    if !target.contains("uefi") {
+    if target == "x86_64-unknown-none" {
         // 1. Assemble boot.asm with nasm into OUT_DIR
         let status = Command::new("nasm")
             .args(["-f", "elf64", "src/arch/x86_64/boot.asm", "-o"])

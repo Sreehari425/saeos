@@ -1,5 +1,7 @@
 global _start
 extern kernel_main_bios
+extern _bss_start
+extern _bss_end
 
 section .multiboot
 align 4
@@ -31,8 +33,20 @@ gdt64:
 section .text
 bits 32
 _start:
+    mov esi, ebx                 ; Preserve Multiboot info while clearing .bss
+    mov ebp, eax                 ; Preserve Multiboot magic while clearing .bss
+
+    ; BIOS/Multiboot does not guarantee that the kernel's .bss is zeroed.
+    ; Rust statics (including spinlocks and page-table state) require it.
+    mov edi, _bss_start
+    mov ecx, _bss_end
+    sub ecx, edi
+    xor eax, eax
+    rep stosb
+
     mov esp, stack_top
-    mov edi, ebx                 ; Save Multiboot info pointer in edi (becomes rdi in 64-bit)
+    mov edi, esi                 ; Save Multiboot info pointer in edi (becomes rdi in 64-bit)
+    mov eax, ebp                 ; Restore Multiboot magic
 
     ; Check Multiboot magic
     cmp eax, 0x2BADB002

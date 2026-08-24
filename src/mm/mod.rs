@@ -1,5 +1,6 @@
 pub mod frame;
 pub mod heap;
+pub mod mapping_model;
 pub mod multiboot;
 pub mod paging;
 
@@ -37,11 +38,15 @@ pub fn init_heap() {
 
 pub fn init(boot_info: &crate::boot::BootInfo) {
     init_boot_memory(boot_info);
-    paging::init(
+    paging::init_with_mode(
         boot_info.kernel_physical_start,
         boot_info.kernel_physical_end,
+        boot_info.boot_mode == crate::boot::boot_info::BootMode::Bios,
     );
     paging::reserve_page_tables();
+    if let Err(error) = mapping_model::plan_memory_map(&boot_info.memory_map, true, true) {
+        crate::serial_println!("Memory: mapping policy self-check failed: {:?}", error);
+    }
     if let Some(rsdp) = boot_info.rsdp_addr {
         frame::reserve_range(PhysAddr(rsdp & !4095), PhysAddr((rsdp & !4095) + 4096));
     }
@@ -70,6 +75,7 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         }
     }
     map_framebuffer(boot_info.display);
+    memory_self_check(boot_info);
     if let Some(frame) = frame::alloc_frame_at_or_above(PhysAddr(4 * 1024 * 1024 * 1024)) {
         let address = paging::phys_to_virt(PhysAddr(frame.0)).0 as *mut u64;
         unsafe {
@@ -96,7 +102,85 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
     );
 }
 
+fn memory_self_check(boot_info: &crate::boot::BootInfo) {
+    let Some(low_frame) = frame::alloc_frame() else {
+        crate::serial_println!("Memory: unable to allocate low diagnostic frame.");
+        return;
+    };
+    let low_virtual = if paging::prefer_identity_mmio() {
+        paging::identity(PhysAddr(low_frame.0))
+    } else {
+        paging::phys_to_virt(PhysAddr(low_frame.0))
+    };
+    let low_address = low_virtual.0 as *mut u64;
+    let marker = 0x0053_4145_4f4c_4f57_u64;
+    unsafe {
+        low_address.write_volatile(marker);
+        if low_address.read_volatile() == marker
+            && paging::virt_to_phys(low_virtual) == Some(PhysAddr(low_frame.0))
+        {
+            crate::serial_println!("Memory: low frame access and address round-trip verified.");
+        } else {
+            crate::serial_println!("Memory: low frame diagnostic failed.");
+        }
+    }
+    frame::free_frame(low_frame);
+
+    let holes_ok = boot_info.memory_map.regions[..boot_info.memory_map.count]
+        .iter()
+        .filter(|region| region.kind != crate::boot::PhysicalMemoryKind::Usable)
+        .all(|region| !mapping_model::usable_region_contains(&boot_info.memory_map, region.start));
+    if holes_ok {
+        crate::serial_println!("Memory: reserved holes excluded from usable direct-map coverage.");
+    } else {
+        crate::serial_println!("Memory: reserved-hole coverage check failed.");
+    }
+
+    if let Some(frame) = frame::alloc_frame() {
+        let mut address_space = match paging::AddressSpace::new() {
+            Ok(space) => space,
+            Err(error) => {
+                crate::serial_println!("Memory: address-space self-check unavailable: {:?}", error);
+                frame::free_frame(frame);
+                return;
+            }
+        };
+        let result = address_space
+            .map_user_page(
+                VirtAddr(0x4000_0000),
+                frame,
+                paging::UserPageFlags::USER_READ,
+            )
+            .and_then(|_| address_space.unmap_user_page(VirtAddr(0x4000_0000)));
+        match result {
+            Ok(unmapped) if unmapped == frame => {
+                crate::serial_println!(
+                    "Memory: kernel address-space user mapping self-check passed (root {:#x}).",
+                    address_space.root_frame().0
+                );
+                frame::free_frame(unmapped);
+            }
+            Ok(unmapped) => {
+                crate::serial_println!(
+                    "Memory: address-space returned unexpected frame {:#x}.",
+                    unmapped.0
+                );
+                frame::free_frame(unmapped);
+            }
+            Err(error) => {
+                crate::serial_println!("Memory: address-space self-check failed: {:?}", error);
+                frame::free_frame(frame);
+            }
+        }
+    }
+}
+
 fn map_framebuffer(display: crate::boot::DisplayMode) {
+    // BIOS keeps the bootloader's writable identity map for VGA/MMIO holes.
+    // Do not split the bootstrap huge page just to remap 0xb8000.
+    if paging::prefer_identity_mmio() {
+        return;
+    }
     let Some((base, size)) = (match display {
         crate::boot::DisplayMode::VgaText { buffer_addr } => Some((buffer_addr as u64, 4000)),
         crate::boot::DisplayMode::GopFramebuffer(info) => Some((info.base_addr, info.size as u64)),

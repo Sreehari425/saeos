@@ -20,6 +20,7 @@ static CONSOLE_STATE: SpinMutex<ConsoleState> = SpinMutex::new(ConsoleState {
 });
 
 pub fn init(display_mode: DisplayMode) {
+    CONSOLE_STATE.reset();
     let mut state = CONSOLE_STATE.lock();
     match display_mode {
         DisplayMode::VgaText { buffer_addr } => {
