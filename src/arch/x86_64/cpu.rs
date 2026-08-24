@@ -22,6 +22,15 @@ pub fn cli() {
 }
 
 #[inline]
+pub fn interrupts_enabled() -> bool {
+    let flags: u64;
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", out(reg) flags, options(nomem, preserves_flags));
+    }
+    flags & (1 << 9) != 0
+}
+
+#[inline]
 pub fn pause() {
     core::hint::spin_loop();
 }
@@ -150,4 +159,22 @@ pub unsafe fn wrmsr(msr: u32, val: u64) {
 #[inline]
 pub fn cpuid(eax: u32) -> core::arch::x86_64::CpuidResult {
     core::arch::x86_64::__cpuid(eax)
+}
+
+/// Enable execution-disable page-table bits when the processor supports them.
+/// Firmware commonly leaves this enabled, but the BIOS path must establish it
+/// explicitly before the kernel installs mappings containing NX.
+pub fn enable_nxe() {
+    let extended_max = cpuid(0x8000_0000).eax;
+    if extended_max < 0x8000_0001 || cpuid(0x8000_0001).edx & (1 << 20) == 0 {
+        return;
+    }
+    unsafe {
+        const EFER: u32 = 0xc000_0080;
+        const NXE: u64 = 1 << 11;
+        let efer = rdmsr(EFER);
+        if efer & NXE == 0 {
+            wrmsr(EFER, efer | NXE);
+        }
+    }
 }

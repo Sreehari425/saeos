@@ -109,6 +109,14 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
 
     drivers::console::set_color(Color::LightGreen, Color::Black);
     println!("[OK] Available RAM: {} MiB.", boot_info.total_memory_mb());
+    println!(
+        "[OK] Highest physical address: {:#x}.",
+        boot_info.memory_map.regions[..boot_info.memory_map.count]
+            .iter()
+            .map(|region| region.end())
+            .max()
+            .unwrap_or(0)
+    );
 
     match boot_info.display {
         DisplayMode::VgaText { buffer_addr } => {

@@ -42,6 +42,10 @@ impl<T> SpinMutex<T> {
     pub fn reset(&self) {
         self.lock.store(false, Ordering::Relaxed);
     }
+
+    pub fn is_locked(&self) -> bool {
+        self.lock.load(Ordering::Acquire)
+    }
 }
 
 impl<'a, T> Deref for MutexGuard<'a, T> {

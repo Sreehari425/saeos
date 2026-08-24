@@ -3,6 +3,7 @@ pub mod heap;
 pub mod mapping_model;
 pub mod multiboot;
 pub mod paging;
+pub mod selftest;
 
 pub use frame::{
     PhysAddr, PhysFrame, VirtAddr, alloc_frame, alloc_frame_at_or_above, free_frame, reserve_range,
@@ -17,6 +18,10 @@ pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) {
         PhysAddr(boot_info.kernel_physical_start),
         PhysAddr(boot_info.kernel_physical_end),
     );
+    frame::reserve_range(
+        PhysAddr(heap_start() as u64),
+        PhysAddr(heap_start() as u64 + HEAP_SIZE as u64),
+    );
 }
 
 pub fn init_paging() {
@@ -29,15 +34,38 @@ pub fn activate_higher_half() {
 }
 
 pub fn init_heap() {
-    frame::reserve_range(
-        PhysAddr(heap_start() as u64),
-        PhysAddr(heap_start() as u64 + HEAP_SIZE as u64),
-    );
     heap::init();
+    if !heap::validate() {
+        crate::serial_println!(
+            "Memory: heap allocator integrity failed after initialization: {}.",
+            heap::validate_reason()
+        );
+    }
 }
 
 pub fn init(boot_info: &crate::boot::BootInfo) {
     init_boot_memory(boot_info);
+    crate::serial_println!(
+        "Memory: kernel range {:#x}..{:#x}; heap range {:#x}..{:#x}.",
+        boot_info.kernel_physical_start,
+        boot_info.kernel_physical_end,
+        heap_start(),
+        heap_start() + HEAP_SIZE
+    );
+    for region in boot_info.memory_map.regions[..boot_info.memory_map.count].iter() {
+        let heap_start_u64 = heap_start() as u64;
+        let heap_end_u64 = heap_start_u64 + HEAP_SIZE as u64;
+        if region.end() >= heap_start_u64.saturating_sub(0x10000)
+            && region.start <= heap_end_u64.saturating_add(0x10000)
+        {
+            crate::serial_println!(
+                "Memory: nearby {:?} region {:#x}..{:#x}.",
+                region.kind,
+                region.start,
+                region.end()
+            );
+        }
+    }
     paging::init_with_mode(
         boot_info.kernel_physical_start,
         boot_info.kernel_physical_end,

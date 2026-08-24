@@ -9,6 +9,8 @@ use crate::collections::hasher::BuildIdentityHasher;
 use crate::collections::{ChainedMap, HashSet, Map, OpenAddressMap, Set, StaticMap};
 use crate::drivers::console;
 use crate::drivers::vga::Color;
+use crate::mm::paging;
+use crate::mm::selftest::{self, Status};
 use crate::mm::{HEAP_SIZE, heap_start};
 use crate::println;
 
@@ -21,6 +23,7 @@ pub fn execute(cmd: &str) {
             println!("  clear   - Clear the console screen");
             println!("  apic    - Display APIC & interrupt controller status");
             println!("  mem     - Test Kernel Heap & in-tree trait-driven Collections");
+            println!("  selftest - Run live memory and heap diagnostics");
             println!("  <text>  - Echoes your input back to the screen");
         }
         "clear" => {
@@ -115,6 +118,31 @@ pub fn execute(cmd: &str) {
             console::set_color(Color::LightGreen, Color::Black);
             println!("\n[OK] All trait-driven collections and memory operations passed!");
             println!("---------------------------------------------");
+        }
+        "selftest" | "mmtest" => {
+            console::set_color(Color::LightCyan, Color::Black);
+            println!("--- Memory and Heap Self-Test ---");
+            println!(
+                "Boot mode: {}",
+                if paging::prefer_identity_mmio() {
+                    "BIOS"
+                } else {
+                    "UEFI"
+                }
+            );
+            let report = selftest::run();
+            for line in report.lines.iter() {
+                let label = match line.status {
+                    Status::Pass => "PASS",
+                    Status::Fail => "FAIL",
+                    Status::Skip => "SKIP",
+                };
+                println!("{}: {}", label, line.name);
+            }
+            println!(
+                "Selftest: {} passed, {} failed, {} skipped.",
+                report.passed, report.failed, report.skipped
+            );
         }
         "apic" | "status" => {
             // Snapshot controller state before printing. Printing can take

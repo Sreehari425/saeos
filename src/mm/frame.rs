@@ -6,6 +6,13 @@ const LOW_TABLE_MIN: u64 = 1024 * 1024;
 // pages, plus the boot image, ACPI, framebuffer, and heap ranges.
 const MAX_RESERVED: usize = 16384;
 const MAX_RECYCLED: usize = 256;
+const MAX_PERMANENT_RANGES: usize = 64;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReservationKind {
+    Permanent,
+    Allocated,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -21,7 +28,10 @@ pub struct PhysFrame(pub u64);
 struct Allocator {
     map: PhysicalMemoryMap,
     reserved: [PhysicalMemoryRegion; MAX_RESERVED],
+    reservation_kind: [ReservationKind; MAX_RESERVED],
     reserved_count: usize,
+    permanent: [PhysicalMemoryRegion; MAX_PERMANENT_RANGES],
+    permanent_count: usize,
     recycled: [PhysFrame; MAX_RECYCLED],
     recycled_count: usize,
     cursor: usize,
@@ -33,7 +43,10 @@ impl Allocator {
         Self {
             map: PhysicalMemoryMap::empty(),
             reserved: [PhysicalMemoryRegion::EMPTY; MAX_RESERVED],
+            reservation_kind: [ReservationKind::Permanent; MAX_RESERVED],
             reserved_count: 0,
+            permanent: [PhysicalMemoryRegion::EMPTY; MAX_PERMANENT_RANGES],
+            permanent_count: 0,
             recycled: [PhysFrame(0); MAX_RECYCLED],
             recycled_count: 0,
             cursor: 0,
@@ -41,13 +54,25 @@ impl Allocator {
             low_cursor_address: LOW_TABLE_MIN,
         }
     }
-    fn reserve(&mut self, start: u64, end: u64) -> bool {
+    fn reserve(&mut self, start: u64, end: u64, kind: ReservationKind) -> bool {
+        if kind == ReservationKind::Permanent
+            && self.permanent_count < MAX_PERMANENT_RANGES
+            && start < end
+        {
+            self.permanent[self.permanent_count] = PhysicalMemoryRegion {
+                start,
+                length: end - start,
+                kind: PhysicalMemoryKind::Reserved,
+            };
+            self.permanent_count += 1;
+        }
         if start < end && self.reserved_count < MAX_RESERVED {
             self.reserved[self.reserved_count] = PhysicalMemoryRegion {
                 start,
                 length: end - start,
                 kind: PhysicalMemoryKind::Reserved,
             };
+            self.reservation_kind[self.reserved_count] = kind;
             self.reserved_count += 1;
             true
         } else {
@@ -55,14 +80,44 @@ impl Allocator {
         }
     }
     fn is_reserved(&self, start: u64, end: u64) -> bool {
-        self.reserved[..self.reserved_count]
+        self.permanent[..self.permanent_count]
+            .iter()
+            .any(|r| start < r.end() && end > r.start)
+            || self.reserved[..self.reserved_count]
+                .iter()
+                .any(|r| start < r.end() && end > r.start)
+    }
+    fn is_permanent(&self, start: u64, end: u64) -> bool {
+        self.permanent[..self.permanent_count]
             .iter()
             .any(|r| start < r.end() && end > r.start)
     }
+    fn release_frame_reservation(&mut self, frame: PhysFrame) {
+        let start = frame.0;
+        let end = start + PAGE_SIZE;
+        for index in (0..self.reserved_count).rev() {
+            let reservation = self.reserved[index];
+            if self.reservation_kind[index] == ReservationKind::Allocated
+                && reservation.start == start
+                && reservation.end() == end
+            {
+                self.reserved_count -= 1;
+                self.reserved[index] = self.reserved[self.reserved_count];
+                self.reservation_kind[index] = self.reservation_kind[self.reserved_count];
+                break;
+            }
+        }
+    }
     fn alloc(&mut self) -> Option<PhysFrame> {
-        if self.recycled_count != 0 {
+        while self.recycled_count != 0 {
             self.recycled_count -= 1;
-            return Some(self.recycled[self.recycled_count]);
+            let frame = self.recycled[self.recycled_count];
+            if !self.is_reserved(frame.0, frame.0 + PAGE_SIZE) {
+                if self.reserve(frame.0, frame.0 + PAGE_SIZE, ReservationKind::Allocated) {
+                    return Some(frame);
+                }
+                return None;
+            }
         }
         while self.cursor < self.map.count {
             let region = self.map.regions[self.cursor];
@@ -81,7 +136,7 @@ impl Allocator {
                 start = start.max(PAGE_SIZE);
                 if !self.is_reserved(start, start + PAGE_SIZE) {
                     self.cursor_address = start + PAGE_SIZE;
-                    self.reserve(start, start + PAGE_SIZE);
+                    self.reserve(start, start + PAGE_SIZE, ReservationKind::Allocated);
                     return Some(PhysFrame(start));
                 }
                 start += PAGE_SIZE;
@@ -104,10 +159,28 @@ impl Allocator {
             let mut start = region.start.max(PAGE_SIZE).next_multiple_of(PAGE_SIZE);
             while start.saturating_add(PAGE_SIZE) <= region.end() && start < maximum {
                 if !self.is_reserved(start, start + PAGE_SIZE) {
-                    self.reserve(start, start + PAGE_SIZE);
+                    self.reserve(start, start + PAGE_SIZE, ReservationKind::Allocated);
                     return Some(PhysFrame(start));
                 }
                 start += PAGE_SIZE;
+            }
+        }
+        None
+    }
+
+    fn take_recycled_in_range(&mut self, minimum: u64, maximum: u64) -> Option<PhysFrame> {
+        for index in (0..self.recycled_count).rev() {
+            let frame = self.recycled[index];
+            if frame.0 >= minimum
+                && frame.0 < maximum
+                && !self.is_reserved(frame.0, frame.0 + PAGE_SIZE)
+            {
+                self.recycled_count -= 1;
+                self.recycled[index] = self.recycled[self.recycled_count];
+                if self.reserve(frame.0, frame.0 + PAGE_SIZE, ReservationKind::Allocated) {
+                    return Some(frame);
+                }
+                return None;
             }
         }
         None
@@ -122,6 +195,7 @@ pub fn init(map: PhysicalMemoryMap) {
         // safe while the BIOS bootstrap identity map is still active.
         ALLOCATOR.map = map;
         ALLOCATOR.reserved_count = 0;
+        ALLOCATOR.permanent_count = 0;
         ALLOCATOR.recycled_count = 0;
         ALLOCATOR.cursor = 0;
         ALLOCATOR.cursor_address = 0;
@@ -134,6 +208,9 @@ pub fn alloc_frame() -> Option<PhysFrame> {
 pub fn alloc_frame_at_or_above(minimum: PhysAddr) -> Option<PhysFrame> {
     unsafe {
         let allocator = (&raw mut ALLOCATOR).as_mut().unwrap();
+        if let Some(frame) = allocator.take_recycled_in_range(minimum.0, u64::MAX) {
+            return Some(frame);
+        }
         for region in allocator.map.regions[..allocator.map.count].iter() {
             if region.kind != PhysicalMemoryKind::Usable {
                 continue;
@@ -145,7 +222,7 @@ pub fn alloc_frame_at_or_above(minimum: PhysAddr) -> Option<PhysFrame> {
                 .next_multiple_of(PAGE_SIZE);
             while start.saturating_add(PAGE_SIZE) <= region.end() {
                 if !allocator.is_reserved(start, start + PAGE_SIZE) {
-                    allocator.reserve(start, start + PAGE_SIZE);
+                    allocator.reserve(start, start + PAGE_SIZE, ReservationKind::Allocated);
                     return Some(PhysFrame(start));
                 }
                 start += PAGE_SIZE;
@@ -160,6 +237,9 @@ pub fn alloc_frame_at_or_above(minimum: PhysAddr) -> Option<PhysFrame> {
 pub(crate) fn alloc_frame_below(maximum: PhysAddr) -> Option<PhysFrame> {
     unsafe {
         let allocator = (&raw mut ALLOCATOR).as_mut().unwrap();
+        if let Some(frame) = allocator.take_recycled_in_range(0, maximum.0) {
+            return Some(frame);
+        }
         for region in allocator.map.regions[..allocator.map.count].iter() {
             if region.kind != PhysicalMemoryKind::Usable {
                 continue;
@@ -173,7 +253,7 @@ pub(crate) fn alloc_frame_below(maximum: PhysAddr) -> Option<PhysFrame> {
             while start.saturating_add(PAGE_SIZE) <= end {
                 if !allocator.is_reserved(start, start + PAGE_SIZE) {
                     allocator.low_cursor_address = start + PAGE_SIZE;
-                    allocator.reserve(start, start + PAGE_SIZE);
+                    allocator.reserve(start, start + PAGE_SIZE, ReservationKind::Allocated);
                     return Some(PhysFrame(start));
                 }
                 start += PAGE_SIZE;
@@ -193,7 +273,10 @@ impl FrameAllocator for Allocator {
         self.alloc_with_max(max_address)
     }
     fn deallocate_frame(&mut self, frame: PhysFrame) {
-        if self.recycled_count < MAX_RECYCLED {
+        self.release_frame_reservation(frame);
+        if self.recycled_count < MAX_RECYCLED
+            && !self.recycled[..self.recycled_count].contains(&frame)
+        {
             self.recycled[self.recycled_count] = frame;
             self.recycled_count += 1;
         }
@@ -202,7 +285,13 @@ impl FrameAllocator for Allocator {
 pub fn free_frame(frame: PhysFrame) {
     unsafe {
         let allocator = (&raw mut ALLOCATOR).as_mut().unwrap();
-        if allocator.recycled_count < MAX_RECYCLED {
+        if allocator.is_permanent(frame.0, frame.0 + PAGE_SIZE) {
+            return;
+        }
+        allocator.release_frame_reservation(frame);
+        if allocator.recycled_count < MAX_RECYCLED
+            && !allocator.recycled[..allocator.recycled_count].contains(&frame)
+        {
             allocator.recycled[allocator.recycled_count] = frame;
             allocator.recycled_count += 1;
         }
@@ -213,11 +302,17 @@ pub(crate) fn try_reserve_range(start: PhysAddr, end: PhysAddr) -> bool {
         (&raw mut ALLOCATOR)
             .as_mut()
             .unwrap()
-            .reserve(start.0, end.0)
+            .reserve(start.0, end.0, ReservationKind::Permanent)
     }
 }
 pub fn reserve_range(start: PhysAddr, end: PhysAddr) {
-    let _ = try_reserve_range(start, end);
+    if start.0 < end.0 && !try_reserve_range(start, end) {
+        crate::serial_println!(
+            "Memory: fatal reservation failure for {:#x}..{:#x}.",
+            start.0,
+            end.0
+        );
+    }
 }
 pub fn memory_map() -> PhysicalMemoryMap {
     unsafe { ALLOCATOR.map }

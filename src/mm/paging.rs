@@ -51,6 +51,10 @@ impl UserPageFlags {
     pub(crate) const USER_EXECUTE: Self = Self(1 << 2);
     pub(crate) const USER_NO_EXECUTE: Self = Self(1 << 3);
 
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
     const fn contains(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
@@ -90,6 +94,23 @@ pub(crate) enum AddressSpaceError {
 /// shared, while all lower-half entries belong exclusively to this root.
 pub(crate) struct AddressSpace {
     root: PhysFrame,
+}
+
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        // PML4 entries 0..=255 are private to this address space.  The
+        // higher-half entries are copied from PML4 and must never be freed.
+        unsafe {
+            let root = &mut *table_ptr(self.root);
+            for entry in root.0[..256].iter_mut() {
+                if *entry & PRESENT != 0 {
+                    free_table_tree(PhysFrame(*entry & ADDRESS_MASK), 3);
+                    *entry = 0;
+                }
+            }
+        }
+        frame::free_frame(self.root);
+    }
 }
 
 impl AddressSpace {
@@ -179,6 +200,54 @@ impl AddressSpace {
             Ok(physical)
         }
     }
+
+    pub(crate) fn page_entry(&self, virtual_address: VirtAddr) -> Result<u64, AddressSpaceError> {
+        if virtual_address.0 & (PAGE_SIZE - 1) != 0 {
+            return Err(AddressSpaceError::Unaligned);
+        }
+        if virtual_address.0 >= (1 << 47) {
+            return if virtual_address.0 >= KERNEL_VIRT_BASE {
+                Err(AddressSpaceError::KernelAddress)
+            } else {
+                Err(AddressSpaceError::Noncanonical)
+            };
+        }
+        unsafe {
+            let pml4 = &*table_ptr(self.root);
+            let pdpt = table_from_entry(pml4.0[((virtual_address.0 >> 39) & 0x1ff) as usize])?;
+            let pd = table_from_entry(pdpt.0[((virtual_address.0 >> 30) & 0x1ff) as usize])?;
+            let pt = table_from_entry(pd.0[((virtual_address.0 >> 21) & 0x1ff) as usize])?;
+            let entry = pt.0[((virtual_address.0 >> 12) & 0x1ff) as usize];
+            if entry & PRESENT == 0 {
+                Err(AddressSpaceError::NotMapped)
+            } else {
+                Ok(entry)
+            }
+        }
+    }
+}
+
+unsafe fn table_from_entry(entry: u64) -> Result<&'static PageTable, AddressSpaceError> {
+    if entry & PRESENT == 0 {
+        Err(AddressSpaceError::NotMapped)
+    } else if entry & HUGE != 0 {
+        Err(AddressSpaceError::HugePage)
+    } else {
+        Ok(unsafe { &*table_ptr(PhysFrame(entry & ADDRESS_MASK)) })
+    }
+}
+
+unsafe fn free_table_tree(frame: PhysFrame, levels_below: usize) {
+    if levels_below != 0 {
+        let table = unsafe { &mut *table_ptr(frame) };
+        for entry in table.0.iter_mut() {
+            if levels_below > 1 && *entry & PRESENT != 0 && *entry & HUGE == 0 {
+                unsafe { free_table_tree(PhysFrame(*entry & ADDRESS_MASK), levels_below - 1) };
+            }
+            *entry = 0;
+        }
+    }
+    frame::free_frame(frame);
 }
 
 fn table_ptr(frame: PhysFrame) -> *mut PageTable {
@@ -268,6 +337,7 @@ pub fn init(kernel_start: u64, kernel_end: u64) {
 
 pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
     let map = frame::memory_map();
+    crate::arch::x86_64::cpu::enable_nxe();
     unsafe {
         BIOS_BOOT = bios_boot;
     }
@@ -344,6 +414,27 @@ pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
                     error
                 );
             }
+        }
+    }
+    // The heap is embedded in the kernel .bss, so BIOS includes it inside the
+    // kernel image reservation above.  It must nevertheless remain writable;
+    // otherwise heap initialization writes through a read-only kernel mapping.
+    let heap_start = crate::mm::heap::heap_start() as u64;
+    let heap_end = heap_start.saturating_add(crate::mm::heap::HEAP_SIZE as u64);
+    for direct in [false, true] {
+        if let Err(error) = map_range(
+            heap_start,
+            heap_end,
+            direct,
+            crate::boot::PhysicalMemoryKind::Usable,
+            gigabyte_pages,
+        ) {
+            crate::serial_println!(
+                "Memory: heap writable mapping failed for {:#x}..{:#x}: {}",
+                heap_start,
+                heap_end,
+                error
+            );
         }
     }
     // Preserve the writable low-memory transition window for firmware data
