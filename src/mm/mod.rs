@@ -165,14 +165,6 @@ fn memory_self_check(boot_info: &crate::boot::BootInfo) {
     }
 
     if let Some(frame) = frame::alloc_frame() {
-        // Skip AddressSpace test if heap is not yet initialized to avoid corruption
-        let heap_initialized = crate::mm::heap::validate();
-        if !heap_initialized {
-            crate::serial_println!("Memory: skipping address-space self-check (heap not initialized).");
-            frame::free_frame(frame);
-            return;
-        }
-        
         let mut address_space = match paging::AddressSpace::new() {
             Ok(space) => space,
             Err(error) => {
