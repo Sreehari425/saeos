@@ -36,6 +36,13 @@ pub const EFI_ACPI_20_TABLE_GUID: EfiGuid = EfiGuid {
     data4: [0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81],
 };
 
+pub const EFI_LOADED_IMAGE_PROTOCOL_GUID: EfiGuid = EfiGuid {
+    data1: 0x5B1B31A1,
+    data2: 0x9562,
+    data3: 0x11D2,
+    data4: [0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B],
+};
+
 #[repr(C)]
 pub struct EfiTableHeader {
     pub signature: u64,
@@ -139,6 +146,23 @@ pub struct EfiBootServices {
         registration: *mut (),
         interface: *mut *mut (),
     ) -> EfiStatus,
+}
+
+#[repr(C)]
+pub struct EfiLoadedImageProtocol {
+    pub revision: u32,
+    pub parent_handle: EfiHandle,
+    pub system_table: *mut EfiSystemTable,
+    pub device_handle: EfiHandle,
+    pub file_path: *mut (),
+    pub reserved: *mut (),
+    pub load_options_size: u32,
+    pub load_options: *mut (),
+    pub image_base: *mut (),
+    pub image_size: u64,
+    pub image_code_type: u32,
+    pub image_data_type: u32,
+    pub unload: usize,
 }
 
 #[repr(C)]

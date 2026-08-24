@@ -24,22 +24,34 @@ pub enum DisplayMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalMemoryKind {
+    Usable,
+    Reserved,
+    AcpiReclaimable,
+    AcpiNvs,
+    Runtime,
+    Mmio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalMemoryRegion {
     pub start: u64,
     pub length: u64,
+    pub kind: PhysicalMemoryKind,
 }
 
 impl PhysicalMemoryRegion {
     pub const EMPTY: Self = Self {
         start: 0,
         length: 0,
+        kind: PhysicalMemoryKind::Reserved,
     };
     pub const fn end(self) -> u64 {
         self.start.saturating_add(self.length)
     }
 }
 
-pub const MAX_MEMORY_REGIONS: usize = 64;
+pub const MAX_MEMORY_REGIONS: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicalMemoryMap {
@@ -60,6 +72,26 @@ impl PhysicalMemoryMap {
             self.count += 1;
         }
     }
+
+    pub fn push_merged(&mut self, region: PhysicalMemoryRegion) {
+        if region.length == 0 {
+            return;
+        }
+        if self.count != 0 {
+            let previous = &mut self.regions[self.count - 1];
+            if previous.kind == region.kind && previous.end() == region.start {
+                previous.length = previous.length.saturating_add(region.length);
+                return;
+            }
+        }
+        self.push(region);
+    }
+
+    pub fn usable(&self) -> impl Iterator<Item = &PhysicalMemoryRegion> {
+        self.regions[..self.count]
+            .iter()
+            .filter(|r| r.kind == PhysicalMemoryKind::Usable)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +108,8 @@ pub struct BootInfo {
     pub kernel_physical_start: u64,
     pub kernel_physical_end: u64,
     pub rsdp_addr: Option<u64>,
+    pub memory_map_descriptor_count: usize,
+    pub memory_map_discarded: usize,
 }
 
 impl BootInfo {
@@ -89,14 +123,12 @@ impl BootInfo {
             kernel_physical_start: 0,
             kernel_physical_end: 0,
             rsdp_addr: None,
+            memory_map_descriptor_count: 0,
+            memory_map_discarded: 0,
         }
     }
 
     pub fn total_memory_mb(&self) -> u64 {
-        self.memory_map.regions[..self.memory_map.count]
-            .iter()
-            .map(|r| r.length)
-            .sum::<u64>()
-            / (1024 * 1024)
+        self.memory_map.usable().map(|r| r.length).sum::<u64>() / (1024 * 1024)
     }
 }

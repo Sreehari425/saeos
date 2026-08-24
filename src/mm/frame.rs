@@ -1,7 +1,9 @@
-use crate::boot::boot_info::{PhysicalMemoryMap, PhysicalMemoryRegion};
+use crate::boot::boot_info::{PhysicalMemoryKind, PhysicalMemoryMap, PhysicalMemoryRegion};
 
 pub const PAGE_SIZE: u64 = 4096;
-const MAX_RESERVED: usize = 256;
+// A 512 GiB four-level direct map needs one page-directory frame per GiB
+// (for each identity/direct-map root), in addition to ordinary reservations.
+const MAX_RESERVED: usize = 4096;
 const MAX_RECYCLED: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +43,7 @@ impl Allocator {
             self.reserved[self.reserved_count] = PhysicalMemoryRegion {
                 start,
                 length: end - start,
+                kind: PhysicalMemoryKind::Reserved,
             };
             self.reserved_count += 1;
         }
@@ -57,6 +60,11 @@ impl Allocator {
         }
         while self.cursor < self.map.count {
             let region = self.map.regions[self.cursor];
+            if region.kind != PhysicalMemoryKind::Usable {
+                self.cursor += 1;
+                self.cursor_address = 0;
+                continue;
+            }
             let minimum = if self.cursor_address == 0 {
                 region.start
             } else {
@@ -76,16 +84,40 @@ impl Allocator {
         }
         None
     }
+
+    fn alloc_with_max(&mut self, max_address: Option<PhysAddr>) -> Option<PhysFrame> {
+        if max_address.is_none() {
+            return self.alloc();
+        }
+        let maximum = max_address.unwrap().0;
+        for region in self.map.regions[..self.map.count].iter() {
+            if region.kind != PhysicalMemoryKind::Usable {
+                continue;
+            }
+            let mut start = region.start.max(PAGE_SIZE).next_multiple_of(PAGE_SIZE);
+            while start.saturating_add(PAGE_SIZE) <= region.end() && start < maximum {
+                if !self.is_reserved(start, start + PAGE_SIZE) {
+                    self.reserve(start, start + PAGE_SIZE);
+                    return Some(PhysFrame(start));
+                }
+                start += PAGE_SIZE;
+            }
+        }
+        None
+    }
 }
 
 static mut ALLOCATOR: Allocator = Allocator::empty();
 
 pub fn init(map: PhysicalMemoryMap) {
     unsafe {
-        ALLOCATOR = Allocator {
-            map,
-            ..Allocator::empty()
-        };
+        // Keep initialization as a sequence of small stores. This is also
+        // safe while the BIOS bootstrap identity map is still active.
+        ALLOCATOR.map = map;
+        ALLOCATOR.reserved_count = 0;
+        ALLOCATOR.recycled_count = 0;
+        ALLOCATOR.cursor = 0;
+        ALLOCATOR.cursor_address = 0;
     }
 }
 pub fn alloc_frame() -> Option<PhysFrame> {
@@ -95,6 +127,9 @@ pub fn alloc_frame_at_or_above(minimum: PhysAddr) -> Option<PhysFrame> {
     unsafe {
         let allocator = (&raw mut ALLOCATOR).as_mut().unwrap();
         for region in allocator.map.regions[..allocator.map.count].iter() {
+            if region.kind != PhysicalMemoryKind::Usable {
+                continue;
+            }
             let mut start = region
                 .start
                 .max(minimum.0)
@@ -108,6 +143,23 @@ pub fn alloc_frame_at_or_above(minimum: PhysAddr) -> Option<PhysFrame> {
             }
         }
         None
+    }
+}
+
+pub trait FrameAllocator {
+    fn allocate_frame(&mut self, max_address: Option<PhysAddr>) -> Option<PhysFrame>;
+    fn deallocate_frame(&mut self, frame: PhysFrame);
+}
+
+impl FrameAllocator for Allocator {
+    fn allocate_frame(&mut self, max_address: Option<PhysAddr>) -> Option<PhysFrame> {
+        self.alloc_with_max(max_address)
+    }
+    fn deallocate_frame(&mut self, frame: PhysFrame) {
+        if self.recycled_count < MAX_RECYCLED {
+            self.recycled[self.recycled_count] = frame;
+            self.recycled_count += 1;
+        }
     }
 }
 pub fn free_frame(frame: PhysFrame) {

@@ -57,6 +57,8 @@ pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
         kernel_physical_start,
         kernel_physical_end,
         rsdp_addr: acpi::find_rsdp_bios(),
+        memory_map_descriptor_count: memory_map.count,
+        memory_map_discarded: 0,
     };
 
     kernel_main(&boot_info);

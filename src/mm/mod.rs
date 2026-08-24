@@ -52,6 +52,7 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         ),
     }
     activate_higher_half();
+    map_framebuffer(boot_info.display);
     if let Some(frame) = frame::alloc_frame_at_or_above(PhysAddr(4 * 1024 * 1024 * 1024)) {
         let address = paging::phys_to_virt(PhysAddr(frame.0)).0 as *mut u64;
         unsafe {
@@ -73,7 +74,38 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
             .iter()
             .map(|region| region.end())
             .max()
-            .unwrap_or(0),
+            .unwrap_or(0)
+            .min(512 * 1024 * 1024 * 1024),
         paging::KERNEL_VIRT_BASE
     );
+}
+
+fn map_framebuffer(display: crate::boot::DisplayMode) {
+    let Some((base, size)) = (match display {
+        crate::boot::DisplayMode::VgaText { .. } => None,
+        crate::boot::DisplayMode::GopFramebuffer(info) => Some((info.base_addr, info.size as u64)),
+    }) else {
+        return;
+    };
+    let start = base & !(frame::PAGE_SIZE - 1);
+    let Some(end) = base
+        .checked_add(size)
+        .map(|value| value.next_multiple_of(frame::PAGE_SIZE))
+    else {
+        return;
+    };
+    let mut physical = start;
+    while physical < end {
+        if paging::map_page(
+            paging::phys_to_virt(PhysAddr(physical)),
+            PhysAddr(physical),
+            paging::PageFlags::MMIO,
+        )
+        .is_err()
+        {
+            crate::serial_println!("Memory: unable to map framebuffer page at {:#x}.", physical);
+            break;
+        }
+        physical += frame::PAGE_SIZE;
+    }
 }

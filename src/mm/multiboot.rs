@@ -2,7 +2,7 @@
 
 pub const MULTIBOOT_MEMORY_AVAILABLE: u32 = 1;
 pub const MULTIBOOT_MEMORY_RESERVED: u32 = 2;
-use crate::boot::boot_info::{PhysicalMemoryMap, PhysicalMemoryRegion};
+use crate::boot::boot_info::{PhysicalMemoryKind, PhysicalMemoryMap, PhysicalMemoryRegion};
 
 #[repr(C)]
 pub struct MultibootInfo {
@@ -56,6 +56,7 @@ impl MultibootInfo {
                 map.push(PhysicalMemoryRegion {
                     start: entry.base_addr,
                     length: entry.length,
+                    kind: PhysicalMemoryKind::Usable,
                 });
             }
             let step = entry.size.saturating_add(4);

@@ -2,12 +2,12 @@ pub mod proto;
 
 use crate::arch::x86_64::acpi;
 use crate::boot::boot_info::{
-    BootInfo, BootMode, DisplayMode, FramebufferInfo, PhysicalMemoryMap, PhysicalMemoryRegion,
-    PixelFormat,
+    BootInfo, BootMode, DisplayMode, FramebufferInfo, MAX_MEMORY_REGIONS, PhysicalMemoryKind,
+    PhysicalMemoryMap, PhysicalMemoryRegion, PixelFormat,
 };
 use proto::{
-    EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, EFI_SUCCESS, EfiGraphicsOutputProtocol, EfiHandle,
-    EfiStatus, EfiSystemTable,
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, EFI_LOADED_IMAGE_PROTOCOL_GUID, EFI_SUCCESS,
+    EfiGraphicsOutputProtocol, EfiHandle, EfiLoadedImageProtocol, EfiStatus, EfiSystemTable,
 };
 
 // Static handle buffer — enough for up to 64 GOP handles (8 bytes each on x86_64)
@@ -18,6 +18,8 @@ static mut HANDLE_BUF: [u8; HANDLE_BUF_SIZE] = [0u8; HANDLE_BUF_SIZE];
 const MMAP_BUFFER_SIZE: usize = 32768;
 static mut MMAP_BUFFER: [u8; MMAP_BUFFER_SIZE] = [0u8; MMAP_BUFFER_SIZE];
 static mut UEFI_MEMORY_MAP: PhysicalMemoryMap = PhysicalMemoryMap::empty();
+static mut UEFI_DESCRIPTOR_COUNT: usize = 0;
+static mut UEFI_DISCARDED: usize = 0;
 
 // ----------------------------------------------------------------
 // Minimal inline serial writer for pre-kernel debug (COM1 = 0x3F8)
@@ -44,6 +46,20 @@ unsafe fn serial_str(s: &str) {
         }
         unsafe { serial_putc(b) };
     }
+}
+
+unsafe fn serial_hex(mut value: u64) {
+    let mut digits = [b'0'; 16];
+    for digit in digits.iter_mut().rev() {
+        let nibble = (value & 0xf) as u8;
+        *digit = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        };
+        value >>= 4;
+    }
+    unsafe { serial_str(core::str::from_utf8_unchecked(&digits)) };
 }
 
 // ----------------------------------------------------------------
@@ -232,6 +248,36 @@ pub unsafe extern "efiapi" fn efi_main(
 
         let bs = &*st.boot_services;
 
+        // The loaded-image protocol is the authoritative image extent. It
+        // avoids reserving an arbitrary region around one function symbol.
+        let mut image_base = 0u64;
+        let mut image_end = 0u64;
+        let open_protocol: unsafe extern "efiapi" fn(
+            EfiHandle,
+            *const proto::EfiGuid,
+            *mut *mut (),
+            EfiHandle,
+            EfiHandle,
+            u32,
+            *mut usize,
+        ) -> EfiStatus = core::mem::transmute(bs.open_protocol);
+        let mut image_iface: *mut () = core::ptr::null_mut();
+        if open_protocol(
+            image_handle,
+            &EFI_LOADED_IMAGE_PROTOCOL_GUID,
+            &mut image_iface,
+            image_handle,
+            core::ptr::null_mut(),
+            1,
+            core::ptr::null_mut(),
+        ) == EFI_SUCCESS
+            && !image_iface.is_null()
+        {
+            let image = &*(image_iface as *const EfiLoadedImageProtocol);
+            image_base = image.image_base as u64;
+            image_end = image_base.saturating_add(image.image_size);
+        }
+
         // ----------------------------------------------------------------
         // Step 1: Try GOP via LocateHandle (ByProtocol)
         // ----------------------------------------------------------------
@@ -327,7 +373,12 @@ pub unsafe extern "efiapi" fn efi_main(
             return mmap_status;
         }
 
-        parse_memory_map(mmap_ptr, memory_map_size, descriptor_size);
+        parse_memory_map(
+            mmap_ptr,
+            memory_map_size,
+            descriptor_size,
+            descriptor_version,
+        );
 
         let mut exit_status = (bs.exit_boot_services)(image_handle, map_key);
         if exit_status != EFI_SUCCESS {
@@ -339,7 +390,7 @@ pub unsafe extern "efiapi" fn efi_main(
                 &mut descriptor_size,
                 &mut descriptor_version,
             );
-            parse_memory_map(mmap_ptr, retry_size, descriptor_size);
+            parse_memory_map(mmap_ptr, retry_size, descriptor_size, descriptor_version);
             exit_status = (bs.exit_boot_services)(image_handle, map_key);
             if exit_status != EFI_SUCCESS {
                 serial_str("[UEFI] ExitBootServices failed\n");
@@ -361,7 +412,19 @@ pub unsafe extern "efiapi" fn efi_main(
             bochs
         });
 
-        serial_str("[UEFI] Transferring to kernel_main.\n");
+        {
+            let map = core::ptr::read(&raw const UEFI_MEMORY_MAP);
+            serial_str("[UEFI] descriptors=");
+            serial_hex(UEFI_DESCRIPTOR_COUNT as u64);
+            serial_str(" discarded=");
+            serial_hex(UEFI_DISCARDED as u64);
+            serial_str(" usable_mib=");
+            let usable: u64 = map.usable().map(|r| r.length).sum();
+            serial_hex(usable / (1024 * 1024));
+            serial_str(" highest=");
+            serial_hex(map.usable().map(|r| r.end()).max().unwrap_or(0));
+            serial_str("\n[UEFI] Transferring to kernel_main.\n");
+        }
 
         // ----------------------------------------------------------------
         // Step 5: Build BootInfo and hand off
@@ -380,12 +443,11 @@ pub unsafe extern "efiapi" fn efi_main(
             display,
             boot_mode: BootMode::Uefi,
             memory_map: UEFI_MEMORY_MAP,
-            // UEFI may place the image above 4 GiB. The image is well below
-            // this conservative 16 MiB reservation in the current loader.
-            kernel_physical_start: (efi_main as *const () as usize as u64) & !0xFFFFF,
-            kernel_physical_end: ((efi_main as *const () as usize as u64) & !0xFFFFF)
-                + 16 * 1024 * 1024,
+            kernel_physical_start: image_base,
+            kernel_physical_end: image_end,
             rsdp_addr,
+            memory_map_descriptor_count: UEFI_DESCRIPTOR_COUNT,
+            memory_map_discarded: UEFI_DISCARDED,
         };
 
         crate::kernel_main(&boot_info);
@@ -403,37 +465,69 @@ struct EfiMemoryDescriptor {
     attribute: u64,
 }
 
-unsafe fn parse_memory_map(ptr: *mut u8, size: usize, descriptor_size: usize) {
-    if descriptor_size < core::mem::size_of::<EfiMemoryDescriptor>() {
+unsafe fn parse_memory_map(
+    ptr: *mut u8,
+    size: usize,
+    descriptor_size: usize,
+    descriptor_version: u32,
+) {
+    let minimum = core::mem::size_of::<EfiMemoryDescriptor>();
+    if descriptor_size < minimum || !descriptor_size.is_multiple_of(8) || descriptor_version == 0 {
+        unsafe {
+            UEFI_DISCARDED = UEFI_DISCARDED.saturating_add(1);
+        }
         return;
     }
     unsafe {
         UEFI_MEMORY_MAP = PhysicalMemoryMap::empty();
+        UEFI_DESCRIPTOR_COUNT = 0;
+        UEFI_DISCARDED = 0;
     }
     let mut offset = 0;
-    while offset + core::mem::size_of::<EfiMemoryDescriptor>() <= size {
+    while offset <= size && size - offset >= minimum {
         let descriptor = unsafe { &*(ptr.add(offset) as *const EfiMemoryDescriptor) };
-        // EfiConventionalMemory and EfiBootServicesCode/Data become usable
-        // after ExitBootServices; loader/runtime memory remains reserved.
-        if matches!(
-            descriptor.memory_type,
-            LOADER_CODE
-                | LOADER_DATA
-                | BOOT_SERVICES_CODE
-                | BOOT_SERVICES_DATA
-                | CONVENTIONAL_MEMORY
-        ) {
+        let Some(length) = descriptor.number_of_pages.checked_mul(4096) else {
             unsafe {
-                (&raw mut UEFI_MEMORY_MAP)
-                    .as_mut()
-                    .unwrap()
-                    .push(PhysicalMemoryRegion {
-                        start: descriptor.physical_start,
-                        length: descriptor.number_of_pages * 4096,
-                    });
+                UEFI_DISCARDED += 1;
+            }
+            break;
+        };
+        let Some(end) = descriptor.physical_start.checked_add(length) else {
+            unsafe {
+                UEFI_DISCARDED += 1;
+            }
+            break;
+        };
+        let kind = match descriptor.memory_type {
+            CONVENTIONAL_MEMORY | LOADER_CODE | LOADER_DATA | BOOT_SERVICES_CODE
+            | BOOT_SERVICES_DATA => PhysicalMemoryKind::Usable,
+            ACPI_RECLAIM => PhysicalMemoryKind::AcpiReclaimable,
+            ACPI_NVS => PhysicalMemoryKind::AcpiNvs,
+            RUNTIME_CODE | RUNTIME_DATA => PhysicalMemoryKind::Runtime,
+            MMIO | MMIO_PORT_SPACE => PhysicalMemoryKind::Mmio,
+            _ => PhysicalMemoryKind::Reserved,
+        };
+        unsafe {
+            UEFI_DESCRIPTOR_COUNT += 1;
+            (&raw mut UEFI_MEMORY_MAP)
+                .as_mut()
+                .unwrap()
+                .push_merged(PhysicalMemoryRegion {
+                    start: descriptor.physical_start,
+                    length: end - descriptor.physical_start,
+                    kind,
+                });
+            if UEFI_MEMORY_MAP.count == MAX_MEMORY_REGIONS {
+                UEFI_DISCARDED += 1;
             }
         }
-        offset += descriptor_size;
+        let Some(next) = offset.checked_add(descriptor_size) else {
+            break;
+        };
+        if next <= offset {
+            break;
+        }
+        offset = next;
     }
 }
 
@@ -442,6 +536,12 @@ const LOADER_CODE: u32 = 1;
 const LOADER_DATA: u32 = 2;
 const BOOT_SERVICES_CODE: u32 = 3;
 const BOOT_SERVICES_DATA: u32 = 4;
+const ACPI_RECLAIM: u32 = 9;
+const ACPI_NVS: u32 = 10;
+const MMIO: u32 = 11;
+const MMIO_PORT_SPACE: u32 = 12;
+const RUNTIME_CODE: u32 = 5;
+const RUNTIME_DATA: u32 = 6;
 
 /// Extract `FramebufferInfo` from a GOP pointer, returning `None` if GOP is null or unusable.
 ///
