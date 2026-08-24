@@ -22,7 +22,11 @@ static mut PML4: PageTable = PageTable([0; 512]);
 // while allocator-backed table frames are being initialized.
 static mut BOOTSTRAP_PML4: PageTable = PageTable([0; 512]);
 static mut BOOTSTRAP_PDPT: PageTable = PageTable([0; 512]);
-static mut BOOTSTRAP_PD: [PageTable; 4] = [PageTable([0; 512]); 4];
+// UEFI may relocate the loaded image above 4 GiB while the final tables are
+// being built. Cover that image in the temporary identity map.
+const BOOTSTRAP_PD_COUNT: usize = 16;
+static mut BOOTSTRAP_PD: [PageTable; BOOTSTRAP_PD_COUNT] =
+    [PageTable([0; 512]); BOOTSTRAP_PD_COUNT];
 static mut ACTIVE: bool = false;
 static mut BIOS_BOOT: bool = false;
 
@@ -75,7 +79,7 @@ unsafe fn install_bootstrap_identity_map() {
         BOOTSTRAP_PDPT.0 = [0; 512];
         BOOTSTRAP_PML4.0[0] = (&raw const BOOTSTRAP_PDPT) as u64 | PRESENT | WRITABLE;
         let bootstrap_pd = &raw mut BOOTSTRAP_PD as *mut PageTable;
-        for index in 0..4 {
+        for index in 0..BOOTSTRAP_PD_COUNT {
             let pd = &mut *bootstrap_pd.add(index);
             pd.0 = [0; 512];
             BOOTSTRAP_PDPT.0[index] = (pd as *mut PageTable as u64) | PRESENT | WRITABLE;
@@ -107,7 +111,7 @@ pub fn init(kernel_start: u64, kernel_end: u64) {
     }
     unsafe {
         let bootstrap_pd = &raw const BOOTSTRAP_PD as *const PageTable;
-        for index in 0..4 {
+        for index in 0..BOOTSTRAP_PD_COUNT {
             let address = bootstrap_pd.add(index) as u64;
             frame::reserve_range(PhysAddr(address), PhysAddr(address + PAGE_SIZE));
         }
