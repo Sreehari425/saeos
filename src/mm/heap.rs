@@ -63,14 +63,12 @@ impl LinkedListAllocator {
     /// # Safety
     /// The caller must ensure that the given memory region is valid, writable,
     /// and not used elsewhere.
-    pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) {
+    pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) -> bool {
         // Do not depend on firmware/bootloader BSS semantics. BIOS startup
         // clears the image BSS, but the allocator must also be self-contained
         // when initialized and must never retain a stale sentinel link.
         self.head = ListNode::new(0);
-        unsafe {
-            let _ = self.add_free_region(heap_start, heap_size);
-        }
+        unsafe { self.add_free_region(heap_start, heap_size) }
     }
 
     /// Adds a free memory chunk to the allocator free list, merging adjacent regions.
@@ -187,10 +185,8 @@ impl LockedHeap {
     ///
     /// # Safety
     /// Must only be called once with valid, mapped physical memory.
-    pub unsafe fn init(&self, heap_start: usize, heap_size: usize) {
-        unsafe {
-            self.0.lock().init(heap_start, heap_size);
-        }
+    pub unsafe fn init(&self, heap_start: usize, heap_size: usize) -> bool {
+        unsafe { self.0.lock().init(heap_start, heap_size) }
     }
 }
 
@@ -313,7 +309,11 @@ pub(crate) fn validate_reason() -> &'static str {
 }
 
 pub fn init() {
-    unsafe {
-        ALLOCATOR.init(heap_start(), HEAP_SIZE);
+    let initialized = unsafe { ALLOCATOR.init(heap_start(), HEAP_SIZE) };
+    if !initialized || !validate() {
+        crate::serial_println!(
+            "Memory: fatal heap initialization failure: {}.",
+            validate_reason()
+        );
     }
 }

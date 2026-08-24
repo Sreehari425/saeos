@@ -256,9 +256,32 @@ fn table_ptr(frame: PhysFrame) -> *mut PageTable {
     // page-table edits safe while a new direct-map branch is being installed.
     frame.0 as *mut PageTable
 }
+fn overlaps_heap(frame: PhysFrame) -> bool {
+    let heap_start = crate::mm::heap::heap_start() as u64;
+    let heap_end = heap_start.saturating_add(crate::mm::heap::HEAP_SIZE as u64);
+    let frame_start = frame.0;
+    let frame_end = frame_start + PAGE_SIZE;
+    frame_start < heap_end && frame_end > heap_start
+}
+
 fn alloc_table() -> Option<PhysFrame> {
     // Until the final CR3 is active, table memory must be reachable through
-    // the small writable bootstrap identity map.
+    // the small writable bootstrap identity map. Avoid allocating frames that
+    // overlap with the heap to prevent corruption during AddressSpace operations.
+    let max_attempts = 100;
+    for _ in 0..max_attempts {
+        let frame = frame::alloc_frame_below(PhysAddr(4 * 1024 * 1024 * 1024))?;
+        if !overlaps_heap(frame) {
+            unsafe {
+                (*table_ptr(frame)).0 = [0; 512];
+            }
+            return Some(frame);
+        }
+        // Frame overlaps with heap, free it and try again
+        frame::free_frame(frame);
+    }
+    // If we can't find a non-overlapping frame after many attempts, fall back to any frame
+    // This should rarely happen and indicates a memory pressure issue
     let frame = frame::alloc_frame_below(PhysAddr(4 * 1024 * 1024 * 1024))?;
     unsafe {
         (*table_ptr(frame)).0 = [0; 512];
