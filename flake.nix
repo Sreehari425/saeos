@@ -79,7 +79,8 @@
             exec qemu-system-x86_64 \
               -kernel ${bios}/saeos.bin \
               -serial stdio \
-              "$@"
+              -no-reboot \
+                "$@"
           '';
         };
 
