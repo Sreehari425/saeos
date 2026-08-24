@@ -119,7 +119,17 @@ impl LocalApic {
 
     pub fn set_base_address(&mut self, address: u64) {
         self.physical_base_addr = address;
-        self.mapped_base_addr = crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(address)).0;
+        let page = address & !0xfff;
+        let _ = crate::mm::paging::map_page(
+            crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(page)),
+            crate::mm::PhysAddr(page),
+            crate::mm::paging::PageFlags::MMIO,
+        );
+        self.mapped_base_addr = if crate::mm::paging::prefer_identity_mmio() {
+            crate::mm::paging::identity(crate::mm::PhysAddr(address)).0
+        } else {
+            crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(address)).0
+        };
     }
 
     pub fn eoi(&self) {

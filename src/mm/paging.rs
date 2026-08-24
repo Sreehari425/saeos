@@ -9,7 +9,9 @@ const GIGABYTE: u64 = 1 << 30;
 const TWO_MIB: u64 = 1 << 21;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
-const MAX_PHYS: u64 = 512 * 1024 * 1024 * 1024;
+// PML4 slots 256..511 occupy the canonical upper-half window: 128 TiB.
+const DIRECT_MAP_LIMIT: u64 = 1 << 47;
+const IDENTITY_MAP_LIMIT: u64 = 1 << 47;
 
 #[repr(C, align(4096))]
 #[derive(Clone, Copy)]
@@ -22,6 +24,7 @@ static mut BOOTSTRAP_PML4: PageTable = PageTable([0; 512]);
 static mut BOOTSTRAP_PDPT: PageTable = PageTable([0; 512]);
 static mut BOOTSTRAP_PD: [PageTable; 4] = [PageTable([0; 512]); 4];
 static mut ACTIVE: bool = false;
+static mut BIOS_BOOT: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageFlags(pub u64);
@@ -33,16 +36,18 @@ impl PageFlags {
 }
 
 fn table_ptr(frame: PhysFrame) -> *mut PageTable {
-    let address = if is_active() {
-        phys_to_virt(PhysAddr(frame.0)).0
-    } else {
-        frame.0
-    };
-    address as *mut PageTable
+    // Table frames are allocated from usable memory and are present in the
+    // identity transition map. Keeping this access identity-based also makes
+    // page-table edits safe while a new direct-map branch is being installed.
+    frame.0 as *mut PageTable
 }
 fn alloc_table() -> Option<PhysFrame> {
-    let frame = frame::alloc_frame_at_or_above(PhysAddr(PAGE_SIZE))?;
-    frame::reserve_range(PhysAddr(frame.0), PhysAddr(frame.0 + PAGE_SIZE));
+    // Until the final CR3 is active, table memory must be reachable through
+    // the small writable bootstrap identity map.
+    let frame = frame::alloc_frame_below(PhysAddr(4 * 1024 * 1024 * 1024))?;
+    if !frame::try_reserve_range(PhysAddr(frame.0), PhysAddr(frame.0 + PAGE_SIZE)) {
+        return None;
+    }
     unsafe {
         (*table_ptr(frame)).0 = [0; 512];
     }
@@ -83,14 +88,11 @@ unsafe fn install_bootstrap_identity_map() {
     }
 }
 
-pub fn init() {
+pub fn init(kernel_start: u64, kernel_end: u64) {
     let map = frame::memory_map();
-    let highest = map.regions[..map.count]
-        .iter()
-        .map(|r| r.end())
-        .max()
-        .unwrap_or(4 * 1024 * 1024 * 1024)
-        .clamp(4 * 1024 * 1024 * 1024, MAX_PHYS);
+    unsafe {
+        BIOS_BOOT = kernel_start != 0 || kernel_end != 0;
+    }
     unsafe {
         PML4.0 = [0; 512];
     }
@@ -114,27 +116,175 @@ pub fn init() {
         PhysAddr((&raw const PML4) as u64),
         PhysAddr((&raw const PML4) as u64 + PAGE_SIZE),
     );
-    for root in [0usize, 256usize] {
-        let pdpt = child(&raw mut PML4, root);
-        let Some(pdpt) = pdpt else { return };
-        for gig in 0..highest.div_ceil(GIGABYTE) as usize {
-            let physical = gig as u64 * GIGABYTE;
-            if physical + GIGABYTE <= highest {
-                pdpt.0[gig] = physical | PRESENT | WRITABLE | HUGE;
-            } else {
-                let Some(pd) = child(pdpt as *mut PageTable, gig) else {
-                    return;
-                };
-                for two_mb in 0..512 {
-                    let physical = physical + two_mb as u64 * TWO_MIB;
-                    if physical >= highest {
-                        break;
-                    }
-                    pd.0[two_mb] = physical | PRESENT | WRITABLE | HUGE;
-                }
+    let gigabyte_pages = supports_1g_pages();
+    for region in map.regions[..map.count].iter() {
+        if !maps_in_direct_map(region.kind) {
+            continue;
+        }
+        if let Err(error) = map_range(
+            region.start,
+            region.end(),
+            false,
+            region.kind,
+            gigabyte_pages,
+        ) {
+            crate::serial_println!(
+                "Memory: identity-map construction failed for {:#x}..{:#x}: {}",
+                region.start,
+                region.end(),
+                error
+            );
+        }
+        if let Err(error) = map_range(
+            region.start,
+            region.end(),
+            true,
+            region.kind,
+            gigabyte_pages,
+        ) {
+            crate::serial_println!(
+                "Memory: direct-map construction failed for {:#x}..{:#x}: {}",
+                region.start,
+                region.end(),
+                error
+            );
+        }
+    }
+    if kernel_start < kernel_end {
+        for direct in [false, true] {
+            if let Err(error) = map_range(
+                kernel_start,
+                kernel_end,
+                direct,
+                crate::boot::PhysicalMemoryKind::Reserved,
+                gigabyte_pages,
+            ) {
+                crate::serial_println!(
+                    "Memory: kernel mapping failed for {:#x}..{:#x}: {}",
+                    kernel_start,
+                    kernel_end,
+                    error
+                );
             }
         }
     }
+    // Preserve the writable low-memory transition window for firmware data
+    // and late page-table allocations. The higher-half map remains sparse.
+    unsafe {
+        PML4.0[0] = (&raw const BOOTSTRAP_PDPT) as u64 | PRESENT | WRITABLE;
+    }
+}
+
+fn maps_in_direct_map(kind: crate::boot::PhysicalMemoryKind) -> bool {
+    matches!(
+        kind,
+        crate::boot::PhysicalMemoryKind::Usable
+            | crate::boot::PhysicalMemoryKind::AcpiReclaimable
+            | crate::boot::PhysicalMemoryKind::AcpiNvs
+            | crate::boot::PhysicalMemoryKind::Runtime
+            | crate::boot::PhysicalMemoryKind::Mmio
+    )
+}
+
+fn pml4_index(physical: u64, direct: bool) -> Option<usize> {
+    let limit = if direct {
+        DIRECT_MAP_LIMIT
+    } else {
+        IDENTITY_MAP_LIMIT
+    };
+    if physical >= limit {
+        return None;
+    }
+    Some((((physical >> 39) as usize) + if direct { 256 } else { 0 }) & 0x1ff)
+}
+
+fn supports_1g_pages() -> bool {
+    (core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 26)) != 0
+}
+
+fn map_range(
+    start: u64,
+    end: u64,
+    direct: bool,
+    kind: crate::boot::PhysicalMemoryKind,
+    gigabyte_pages: bool,
+) -> Result<(), &'static str> {
+    if start >= end {
+        return Ok(());
+    }
+    if end
+        > if direct {
+            DIRECT_MAP_LIMIT
+        } else {
+            IDENTITY_MAP_LIMIT
+        }
+    {
+        return Err("physical range exceeds four-level canonical coverage");
+    }
+    let mut physical = start;
+    let flags = if kind == crate::boot::PhysicalMemoryKind::Reserved {
+        PageFlags::KERNEL_TEXT
+    } else if kind == crate::boot::PhysicalMemoryKind::Mmio {
+        PageFlags::MMIO
+    } else {
+        PageFlags::WRITABLE
+    };
+    while physical < end {
+        let remaining = end - physical;
+        let size = if kind != crate::boot::PhysicalMemoryKind::Mmio
+            && gigabyte_pages
+            && physical.is_multiple_of(GIGABYTE)
+            && remaining >= GIGABYTE
+        {
+            GIGABYTE
+        } else if kind != crate::boot::PhysicalMemoryKind::Mmio
+            && physical.is_multiple_of(TWO_MIB)
+            && remaining >= TWO_MIB
+        {
+            TWO_MIB
+        } else {
+            PAGE_SIZE
+        };
+        map_leaf(
+            VirtAddr(if direct {
+                KERNEL_VIRT_BASE + physical
+            } else {
+                physical
+            }),
+            PhysAddr(physical),
+            size,
+            flags,
+        )?;
+        physical += size;
+    }
+    Ok(())
+}
+
+fn map_leaf(
+    virtual_address: VirtAddr,
+    physical: PhysAddr,
+    size: u64,
+    flags: PageFlags,
+) -> Result<(), &'static str> {
+    if size == PAGE_SIZE {
+        return map_page(virtual_address, physical, flags);
+    }
+    let normalized = if virtual_address.0 >= KERNEL_VIRT_BASE {
+        virtual_address.0 - KERNEL_VIRT_BASE
+    } else {
+        virtual_address.0
+    };
+    let root = pml4_index(normalized, virtual_address.0 >= KERNEL_VIRT_BASE)
+        .ok_or("physical range exceeds four-level canonical coverage")?;
+    let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
+    let pdpt = child(&raw mut PML4, root).ok_or("out of page-table frames")?;
+    if size == GIGABYTE {
+        pdpt.0[pdpt_index] = physical.0 | PRESENT | WRITABLE | HUGE;
+    } else {
+        let pd = child(pdpt as *mut PageTable, pdpt_index).ok_or("out of page-table frames")?;
+        pd.0[((normalized >> 21) & 0x1ff) as usize] = physical.0 | PRESENT | WRITABLE | HUGE;
+    }
+    Ok(())
 }
 
 #[inline]
@@ -147,9 +297,9 @@ pub fn phys_to_virt(p: PhysAddr) -> VirtAddr {
 }
 #[inline]
 pub fn virt_to_phys(v: VirtAddr) -> Option<PhysAddr> {
-    if (KERNEL_VIRT_BASE..KERNEL_VIRT_BASE + MAX_PHYS).contains(&v.0) {
+    if v.0 >= KERNEL_VIRT_BASE && v.0 - KERNEL_VIRT_BASE < DIRECT_MAP_LIMIT {
         Some(PhysAddr(v.0 - KERNEL_VIRT_BASE))
-    } else if v.0 < MAX_PHYS {
+    } else if v.0 < IDENTITY_MAP_LIMIT {
         Some(PhysAddr(v.0))
     } else {
         None
@@ -173,10 +323,16 @@ pub fn map_page(
     } else {
         virtual_address.0
     };
-    if normalized >= MAX_PHYS {
+    let limit = if virtual_address.0 >= KERNEL_VIRT_BASE {
+        DIRECT_MAP_LIMIT
+    } else {
+        IDENTITY_MAP_LIMIT
+    };
+    if normalized >= limit {
         return Err("address outside direct map");
     }
-    let pml4_index = ((normalized >> 39) & 0x1ff) as usize;
+    let pml4_index = pml4_index(normalized, virtual_address.0 >= KERNEL_VIRT_BASE)
+        .ok_or("address outside canonical paging coverage")?;
     let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
     let pd_index = ((normalized >> 21) & 0x1ff) as usize;
     let pt_index = ((normalized >> 12) & 0x1ff) as usize;
@@ -215,6 +371,9 @@ pub fn activate() {
 }
 pub fn is_active() -> bool {
     unsafe { ACTIVE }
+}
+pub fn prefer_identity_mmio() -> bool {
+    unsafe { BIOS_BOOT }
 }
 pub fn page_table_frame() -> PhysFrame {
     PhysFrame((&raw const PML4) as u64)

@@ -19,7 +19,7 @@ pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) {
 }
 
 pub fn init_paging() {
-    paging::init();
+    paging::init(0, 0);
     paging::reserve_page_tables();
 }
 
@@ -37,7 +37,11 @@ pub fn init_heap() {
 
 pub fn init(boot_info: &crate::boot::BootInfo) {
     init_boot_memory(boot_info);
-    init_paging();
+    paging::init(
+        boot_info.kernel_physical_start,
+        boot_info.kernel_physical_end,
+    );
+    paging::reserve_page_tables();
     if let Some(rsdp) = boot_info.rsdp_addr {
         frame::reserve_range(PhysAddr(rsdp & !4095), PhysAddr((rsdp & !4095) + 4096));
     }
@@ -50,8 +54,21 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
             PhysAddr(info.base_addr),
             PhysAddr(info.base_addr.saturating_add(info.size as u64)),
         ),
-    }
+    };
     activate_higher_half();
+    if let Some(rsdp) = boot_info.rsdp_addr {
+        let start = rsdp & !(frame::PAGE_SIZE - 1);
+        let end = rsdp.saturating_add(36).next_multiple_of(frame::PAGE_SIZE);
+        let mut physical = start;
+        while physical < end {
+            let _ = paging::map_page(
+                paging::phys_to_virt(PhysAddr(physical)),
+                PhysAddr(physical),
+                paging::PageFlags::READ_ONLY,
+            );
+            physical += frame::PAGE_SIZE;
+        }
+    }
     map_framebuffer(boot_info.display);
     if let Some(frame) = frame::alloc_frame_at_or_above(PhysAddr(4 * 1024 * 1024 * 1024)) {
         let address = paging::phys_to_virt(PhysAddr(frame.0)).0 as *mut u64;
@@ -74,15 +91,14 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
             .iter()
             .map(|region| region.end())
             .max()
-            .unwrap_or(0)
-            .min(512 * 1024 * 1024 * 1024),
+            .unwrap_or(0),
         paging::KERNEL_VIRT_BASE
     );
 }
 
 fn map_framebuffer(display: crate::boot::DisplayMode) {
     let Some((base, size)) = (match display {
-        crate::boot::DisplayMode::VgaText { .. } => None,
+        crate::boot::DisplayMode::VgaText { buffer_addr } => Some((buffer_addr as u64, 4000)),
         crate::boot::DisplayMode::GopFramebuffer(info) => Some((info.base_addr, info.size as u64)),
     }) else {
         return;

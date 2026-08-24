@@ -71,9 +71,20 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     // BIOS path deterministic as well.
     drivers::serial::init();
 
+    // BIOS still has the boot assembly's writable identity map here, so parse
+    // firmware tables before replacing CR3 with the sparse final map. UEFI
+    // performs this after mm initialization because firmware paging is gone.
+    let bios_acpi = if boot_info.boot_mode == BootMode::Bios {
+        boot_info
+            .rsdp_addr
+            .and_then(|address| unsafe { acpi::parse_rsdp(address).ok() })
+    } else {
+        None
+    };
+
     mm::init(boot_info);
 
-    let acpi_topology = match boot_info.rsdp_addr {
+    let acpi_topology = bios_acpi.or_else(|| match boot_info.rsdp_addr {
         Some(address) => match unsafe { acpi::parse_rsdp(address) } {
             Ok(topology) => Some(topology),
             Err(error) => {
@@ -85,7 +96,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
             serial_println!("[ACPI] RSDP not found; using legacy PIC fallback.");
             None
         }
-    };
+    });
 
     // 1. Initialize Adaptive Console (VGA Text Buffer or GOP Truecolor Framebuffer)
     drivers::console::init(boot_info.display);
