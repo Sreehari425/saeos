@@ -1,5 +1,5 @@
 //! Kernel-owned page tables. Table pages are ordinary physical frames.
-use super::frame::{self, PAGE_SIZE, PhysAddr, PhysFrame, VirtAddr};
+use super::frame::{self, PhysAddr, PhysFrame, VirtAddr, PAGE_SIZE};
 
 pub const KERNEL_VIRT_BASE: u64 = 0xffff_8000_0000_0000;
 const PRESENT: u64 = 1;
@@ -251,13 +251,17 @@ unsafe fn free_table_tree(frame: PhysFrame, levels_below: usize) {
 }
 
 fn table_ptr(frame: PhysFrame) -> *mut PageTable {
-    // Table frames are allocated from usable memory and are present in the
-    // identity transition map. Keeping this access identity-based also makes
-    // page-table edits safe while a new direct-map branch is being installed.
-    frame.0 as *mut PageTable
+    // Before the higher-half map is active, table frames are only reachable
+    // through the bootstrap identity window. Afterwards prefer the direct map
+    // so page-table edits do not depend on the mutable BIOS bootstrap PDPT.
+    if unsafe { ACTIVE } {
+        phys_to_virt(PhysAddr(frame.0)).0 as *mut PageTable
+    } else {
+        frame.0 as *mut PageTable
+    }
 }
 fn overlaps_heap(frame: PhysFrame) -> bool {
-    let heap_start = crate::mm::heap::heap_start() as u64;
+    let heap_start = crate::mm::heap::heap_phys_start();
     let heap_end = heap_start.saturating_add(crate::mm::heap::HEAP_SIZE as u64);
     let frame_start = frame.0;
     let frame_end = frame_start + PAGE_SIZE;
@@ -265,9 +269,9 @@ fn overlaps_heap(frame: PhysFrame) -> bool {
 }
 
 fn alloc_table() -> Option<PhysFrame> {
-    // Until the final CR3 is active, table memory must be reachable through
-    // the small writable bootstrap identity map. Avoid allocating frames that
-    // overlap with the heap to prevent corruption during AddressSpace operations.
+    // Never zero a heap-overlapping frame: that corrupts the freelist. If the
+    // permanent heap reservation is intact this loop finds a usable frame;
+    // otherwise surface OutOfFrames instead of silently smashing the heap.
     let max_attempts = 100;
     for _ in 0..max_attempts {
         let frame = frame::alloc_frame_below(PhysAddr(4 * 1024 * 1024 * 1024))?;
@@ -277,16 +281,9 @@ fn alloc_table() -> Option<PhysFrame> {
             }
             return Some(frame);
         }
-        // Frame overlaps with heap, free it and try again
         frame::free_frame(frame);
     }
-    // If we can't find a non-overlapping frame after many attempts, fall back to any frame
-    // This should rarely happen and indicates a memory pressure issue
-    let frame = frame::alloc_frame_below(PhysAddr(4 * 1024 * 1024 * 1024))?;
-    unsafe {
-        (*table_ptr(frame)).0 = [0; 512];
-    }
-    Some(frame)
+    None
 }
 fn child(table: *mut PageTable, index: usize) -> Option<&'static mut PageTable> {
     unsafe {
@@ -442,7 +439,7 @@ pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
     // The heap is embedded in the kernel .bss, so BIOS includes it inside the
     // kernel image reservation above.  It must nevertheless remain writable;
     // otherwise heap initialization writes through a read-only kernel mapping.
-    let heap_start = crate::mm::heap::heap_start() as u64;
+    let heap_start = crate::mm::heap::heap_phys_start();
     let heap_end = heap_start.saturating_add(crate::mm::heap::HEAP_SIZE as u64);
     for direct in [false, true] {
         if let Err(error) = map_range(
@@ -460,8 +457,9 @@ pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
             );
         }
     }
-    // Preserve the writable low-memory transition window for firmware data
-    // and late page-table allocations. The higher-half map remains sparse.
+    // Keep the bootstrap identity window for BIOS VGA/APIC MMIO holes only.
+    // Heap freelist traffic and dynamic page-table edits must use the direct
+    // map after activate(); do not back those with this mutable PDPT.
     unsafe {
         PML4.0[0] = (&raw const BOOTSTRAP_PDPT) as u64 | PRESENT | WRITABLE;
     }

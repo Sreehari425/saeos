@@ -75,6 +75,62 @@ pub fn identity_virtual_address(physical: u64) -> Option<u64> {
     }
 }
 
+fn leaf_page(
+    physical: u64,
+    remaining: u64,
+    kind: PhysicalMemoryKind,
+    gigabyte_pages: bool,
+) -> (u64, PageSize) {
+    if kind != PhysicalMemoryKind::Mmio
+        && gigabyte_pages
+        && physical.is_multiple_of(GIGABYTE)
+        && remaining >= GIGABYTE
+    {
+        (GIGABYTE, PageSize::OneGiB)
+    } else if kind != PhysicalMemoryKind::Mmio
+        && physical.is_multiple_of(TWO_MIB)
+        && remaining >= TWO_MIB
+    {
+        (TWO_MIB, PageSize::TwoMiB)
+    } else {
+        (PAGE_SIZE, PageSize::FourKiB)
+    }
+}
+
+fn walk_range(
+    start: u64,
+    end: u64,
+    direct: bool,
+    kind: PhysicalMemoryKind,
+    gigabyte_pages: bool,
+    mut visit: impl FnMut(MappingChunk) -> Result<(), MappingError>,
+) -> Result<(), MappingError> {
+    if start >= end {
+        return Err(MappingError::EmptyRange);
+    }
+    if end > FOUR_LEVEL_LIMIT {
+        return Err(MappingError::NonCanonicalRange);
+    }
+    let mut physical = start;
+    while physical < end {
+        let remaining = end - physical;
+        let (size, page_size) = leaf_page(physical, remaining, kind, gigabyte_pages);
+        let virtual_start = if direct {
+            direct_virtual_address(physical).ok_or(MappingError::NonCanonicalRange)?
+        } else {
+            identity_virtual_address(physical).ok_or(MappingError::NonCanonicalRange)?
+        };
+        visit(MappingChunk {
+            physical_start: physical,
+            virtual_start,
+            size,
+            page_size,
+        })?;
+        physical += size;
+    }
+    Ok(())
+}
+
 pub fn plan_range(
     start: u64,
     end: u64,
@@ -82,48 +138,52 @@ pub fn plan_range(
     kind: PhysicalMemoryKind,
     gigabyte_pages: bool,
 ) -> Result<MappingPlan, MappingError> {
-    if start >= end {
-        return Err(MappingError::EmptyRange);
-    }
-    if end > FOUR_LEVEL_LIMIT {
-        return Err(MappingError::NonCanonicalRange);
-    }
-
     let mut plan = MappingPlan::empty();
-    let mut physical = start;
-    while physical < end {
-        let remaining = end - physical;
-        let (size, page_size) = if kind != PhysicalMemoryKind::Mmio
-            && gigabyte_pages
-            && physical.is_multiple_of(GIGABYTE)
-            && remaining >= GIGABYTE
-        {
-            (GIGABYTE, PageSize::OneGiB)
-        } else if kind != PhysicalMemoryKind::Mmio
-            && physical.is_multiple_of(TWO_MIB)
-            && remaining >= TWO_MIB
-        {
-            (TWO_MIB, PageSize::TwoMiB)
-        } else {
-            (PAGE_SIZE, PageSize::FourKiB)
-        };
+    walk_range(start, end, direct, kind, gigabyte_pages, |chunk| {
         if plan.count == MAX_CHUNKS {
             return Err(MappingError::TooManyChunks);
         }
-        plan.chunks[plan.count] = MappingChunk {
-            physical_start: physical,
-            virtual_start: if direct {
-                direct_virtual_address(physical).ok_or(MappingError::NonCanonicalRange)?
-            } else {
-                identity_virtual_address(physical).ok_or(MappingError::NonCanonicalRange)?
-            },
-            size,
-            page_size,
-        };
+        plan.chunks[plan.count] = chunk;
         plan.count += 1;
-        physical += size;
-    }
+        Ok(())
+    })?;
     Ok(plan)
+}
+
+/// Policy check that does not materialize a 128 KiB chunk table on the stack.
+pub fn check_memory_map(
+    map: &PhysicalMemoryMap,
+    direct: bool,
+    gigabyte_pages: bool,
+) -> Result<(), MappingError> {
+    let mut count = 0usize;
+    for region in map.regions[..map.count].iter().filter(|region| {
+        matches!(
+            region.kind,
+            PhysicalMemoryKind::Usable
+                | PhysicalMemoryKind::AcpiReclaimable
+                | PhysicalMemoryKind::AcpiNvs
+                | PhysicalMemoryKind::Runtime
+                | PhysicalMemoryKind::Mmio
+        )
+    }) {
+        walk_range(
+            region.start,
+            region.end(),
+            direct,
+            region.kind,
+            gigabyte_pages,
+            |_| {
+                count += 1;
+                if count > MAX_CHUNKS {
+                    Err(MappingError::TooManyChunks)
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+    }
+    Ok(())
 }
 
 pub fn plan_memory_map(
@@ -142,20 +202,21 @@ pub fn plan_memory_map(
                 | PhysicalMemoryKind::Mmio
         )
     }) {
-        let plan = plan_range(
+        walk_range(
             region.start,
             region.end(),
             direct,
             region.kind,
             gigabyte_pages,
+            |chunk| {
+                if combined.count == MAX_CHUNKS {
+                    return Err(MappingError::TooManyChunks);
+                }
+                combined.chunks[combined.count] = chunk;
+                combined.count += 1;
+                Ok(())
+            },
         )?;
-        for chunk in plan.iter() {
-            if combined.count == MAX_CHUNKS {
-                return Err(MappingError::TooManyChunks);
-            }
-            combined.chunks[combined.count] = *chunk;
-            combined.count += 1;
-        }
     }
     Ok(combined)
 }
@@ -200,11 +261,10 @@ mod tests {
         map.push(region(513 * GIGABYTE, GIGABYTE, PhysicalMemoryKind::Usable));
         let plan = plan_memory_map(&map, true, true).unwrap();
         assert!(plan.iter().any(|chunk| chunk.page_size == PageSize::OneGiB));
-        assert!(
-            plan.iter()
-                .all(|chunk| chunk.physical_start < 512 * GIGABYTE
-                    || chunk.physical_start >= 513 * GIGABYTE)
-        );
+        assert!(plan
+            .iter()
+            .all(|chunk| chunk.physical_start < 512 * GIGABYTE
+                || chunk.physical_start >= 513 * GIGABYTE));
     }
 
     #[test]
@@ -218,10 +278,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.count, 512);
-        assert!(
-            plan.iter()
-                .all(|chunk| chunk.page_size == PageSize::FourKiB)
-        );
+        assert!(plan
+            .iter()
+            .all(|chunk| chunk.page_size == PageSize::FourKiB));
     }
 
     #[test]

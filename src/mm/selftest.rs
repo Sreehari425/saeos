@@ -140,15 +140,27 @@ fn executable_user_test(space: Option<&mut paging::AddressSpace>) -> Status {
         let _ = space.unmap_user_page(address);
     }
     frame::free_frame(frame);
-    if valid { Status::Pass } else { Status::Fail }
+    if valid {
+        Status::Pass
+    } else {
+        Status::Fail
+    }
 }
 
 fn heap_test() -> (&'static str, Status) {
     if !crate::mm::heap::validate() {
+        crate::serial_println!(
+            "Selftest: heap integrity before allocation: {}.",
+            crate::mm::heap::validate_reason()
+        );
         return ("heap allocator integrity before allocation", Status::Fail);
     }
     let boxed_ptr = unsafe { alloc(Layout::new::<u64>()) as *mut u64 };
     if boxed_ptr.is_null() {
+        crate::serial_println!(
+            "Selftest: heap Box allocation returned null ({})",
+            crate::mm::heap::validate_reason()
+        );
         return ("heap Box allocation", Status::Fail);
     }
     unsafe { boxed_ptr.write(0x5a) };
@@ -170,6 +182,10 @@ fn heap_test() -> (&'static str, Status) {
     if passed && crate::mm::heap::validate() {
         ("heap Box, Vec, and formatted string", Status::Pass)
     } else {
+        crate::serial_println!(
+            "Selftest: heap integrity after smoke test: {}.",
+            crate::mm::heap::validate_reason()
+        );
         ("heap allocator integrity after smoke test", Status::Fail)
     }
 }
@@ -214,7 +230,11 @@ pub fn run() -> Report {
                 unsafe { address.write_volatile(marker) };
                 let passed = unsafe { address.read_volatile() == marker };
                 frame::free_frame(frame);
-                if passed { Status::Pass } else { Status::Fail }
+                if passed {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                }
             }
             None => Status::Fail,
         },
@@ -243,7 +263,11 @@ pub fn run() -> Report {
                             == Some(frame::PhysAddr(frame.0))
                 };
                 frame::free_frame(frame);
-                if passed { Status::Pass } else { Status::Fail }
+                if passed {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                }
             }
             None => Status::Skip,
         },
@@ -268,7 +292,7 @@ pub fn run() -> Report {
     });
 
     report.record(4, "direct-map policy and canonical addresses", {
-        let policy = mapping_model::plan_memory_map(&map, true, true).is_ok();
+        let policy = mapping_model::check_memory_map(&map, true, true).is_ok();
         let canonical = mapping_model::direct_virtual_address(1 << 47).is_none()
             && mapping_model::identity_virtual_address(1 << 47).is_none();
         if policy && canonical {
@@ -279,6 +303,7 @@ pub fn run() -> Report {
     });
 
     let heap_before_tables = crate::mm::heap::validate();
+    let heap_before_reason = crate::mm::heap::validate_reason();
     let mut address_space = paging::AddressSpace::new().ok();
     report.record(
         5,
@@ -314,7 +339,11 @@ pub fn run() -> Report {
                     Ok(returned_frame) => frame::free_frame(returned_frame),
                     Err(_) => frame::free_frame(user_frame),
                 }
-                if passed { Status::Pass } else { Status::Fail }
+                if passed {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                }
             }
             (_, Some(user_frame)) => {
                 frame::free_frame(user_frame);
@@ -344,23 +373,24 @@ pub fn run() -> Report {
 
     drop(address_space);
     let heap_after_tables = crate::mm::heap::validate();
-    
-    // In BIOS mode, heap validation may fail due to bootstrap identity map
-    // corruption during boot, but the heap itself works fine (as shown by mem command).
-    // Skip the heap test in BIOS mode if validation fails.
-    let is_bios = paging::prefer_identity_mmio();
-    let (heap_name, heap_status) = if (!heap_before_tables || !heap_after_tables) && is_bios {
+    let heap_after_reason = crate::mm::heap::validate_reason();
+
+    let (heap_name, heap_status) = if !heap_before_tables {
+        crate::serial_println!(
+            "Selftest: heap integrity before page-table tests: {}.",
+            heap_before_reason
+        );
         (
-            "heap allocator (BIOS bootstrap corruption - skipped)",
-            Status::Skip,
+            "heap allocator integrity before page-table tests",
+            Status::Fail,
         )
-    } else if !heap_before_tables || !heap_after_tables {
+    } else if !heap_after_tables {
+        crate::serial_println!(
+            "Selftest: heap integrity after address-space cleanup: {}.",
+            heap_after_reason
+        );
         (
-            if !heap_before_tables {
-                "heap allocator integrity before page-table tests"
-            } else {
-                "heap allocator integrity after address-space cleanup"
-            },
+            "heap allocator integrity after address-space cleanup",
             Status::Fail,
         )
     } else {

@@ -8,7 +8,7 @@ pub mod selftest;
 pub use frame::{
     PhysAddr, PhysFrame, VirtAddr, alloc_frame, alloc_frame_at_or_above, free_frame, reserve_range,
 };
-pub use heap::{HEAP_SIZE, heap_start};
+pub use heap::{HEAP_SIZE, heap_phys_start, heap_start, heap_virt_start};
 pub use multiboot::MultibootInfo;
 
 pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) {
@@ -18,9 +18,10 @@ pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) {
         PhysAddr(boot_info.kernel_physical_start),
         PhysAddr(boot_info.kernel_physical_end),
     );
+    let heap_phys = heap_phys_start();
     frame::reserve_range(
-        PhysAddr(heap_start() as u64),
-        PhysAddr(heap_start() as u64 + HEAP_SIZE as u64),
+        PhysAddr(heap_phys),
+        PhysAddr(heap_phys + HEAP_SIZE as u64),
     );
 }
 
@@ -49,11 +50,11 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         "Memory: kernel range {:#x}..{:#x}; heap range {:#x}..{:#x}.",
         boot_info.kernel_physical_start,
         boot_info.kernel_physical_end,
-        heap_start(),
-        heap_start() + HEAP_SIZE
+        heap_phys_start(),
+        heap_phys_start() + HEAP_SIZE as u64
     );
     for region in boot_info.memory_map.regions[..boot_info.memory_map.count].iter() {
-        let heap_start_u64 = heap_start() as u64;
+        let heap_start_u64 = heap_phys_start();
         let heap_end_u64 = heap_start_u64 + HEAP_SIZE as u64;
         if region.end() >= heap_start_u64.saturating_sub(0x10000)
             && region.start <= heap_end_u64.saturating_add(0x10000)
@@ -72,7 +73,7 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         boot_info.boot_mode == crate::boot::boot_info::BootMode::Bios,
     );
     paging::reserve_page_tables();
-    if let Err(error) = mapping_model::plan_memory_map(&boot_info.memory_map, true, true) {
+    if let Err(error) = mapping_model::check_memory_map(&boot_info.memory_map, true, true) {
         crate::serial_println!("Memory: mapping policy self-check failed: {:?}", error);
     }
     if let Some(rsdp) = boot_info.rsdp_addr {

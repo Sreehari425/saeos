@@ -18,7 +18,7 @@ p3_table:
 p2_table:
     resb 4096 * 4                 ; 4 Page Directories to map 4 GiB
 stack_bottom:
-    resb 65536                    ; 64 KB stack
+    resb 524288                   ; 512 KB stack (mapping-plan diagnostics need ~128 KB)
 stack_top:
 
 section .rodata

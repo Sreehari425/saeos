@@ -24,18 +24,22 @@ impl<T> SpinMutex<T> {
         }
     }
 
-    pub fn lock(&self) -> MutexGuard<'_, T> {
-        while self
-            .lock
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-        }
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        self.lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| MutexGuard {
+                lock: &self.lock,
+                data: unsafe { &mut *self.data.get() },
+            })
+    }
 
-        MutexGuard {
-            lock: &self.lock,
-            data: unsafe { &mut *self.data.get() },
+    pub fn lock(&self) -> MutexGuard<'_, T> {
+        loop {
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
+            core::hint::spin_loop();
         }
     }
 

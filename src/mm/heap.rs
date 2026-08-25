@@ -2,6 +2,7 @@ use crate::sync::SpinMutex;
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::{align_of, size_of};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// The kernel heap: a static byte array in .bss.
 ///
@@ -14,16 +15,36 @@ pub const HEAP_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 struct HeapStorage([u8; HEAP_SIZE]);
 
 static mut HEAP_STORAGE: HeapStorage = HeapStorage([0u8; HEAP_SIZE]);
+static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Returns the runtime start address of the embedded heap storage.
+/// Physical / load address of the embedded heap storage (for reservations).
 #[inline]
-pub fn heap_start() -> usize {
+pub fn heap_phys_start() -> u64 {
     // SAFETY: we only read the address, never the contents at this point.
-    core::ptr::addr_of!(HEAP_STORAGE) as usize
+    core::ptr::addr_of!(HEAP_STORAGE) as u64
 }
 
-// Keep HEAP_START as a 0 sentinel; real address is from heap_start() above.
-// Kept for backward-compat with any callers that just want "the start for display".
+/// Virtual address used by the freelist after higher-half activate.
+///
+/// Before paging is active this equals the physical load address; afterwards
+/// it is the direct-map alias so freelist traffic does not depend on the
+/// mutable BIOS bootstrap identity map.
+#[inline]
+pub fn heap_virt_start() -> usize {
+    let phys = heap_phys_start();
+    if crate::mm::paging::is_active() {
+        (crate::mm::paging::KERNEL_VIRT_BASE + phys) as usize
+    } else {
+        phys as usize
+    }
+}
+
+/// Display / shell helper: prefer the virtual base the allocator uses.
+#[inline]
+pub fn heap_start() -> usize {
+    heap_virt_start()
+}
+
 pub fn heap_start_display() -> usize {
     heap_start()
 }
@@ -232,49 +253,47 @@ fn align_up(addr: usize, align: usize) -> usize {
 pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 pub(crate) fn validate() -> bool {
-    if ALLOCATOR.0.is_locked() {
+    let Some(allocator) = ALLOCATOR.0.try_lock() else {
         return false;
-    }
-    let valid = {
-        let allocator = ALLOCATOR.0.lock();
-        let start = heap_start();
-        let Some(end) = start.checked_add(HEAP_SIZE) else {
+    };
+    let start = heap_virt_start();
+    let Some(end) = start.checked_add(HEAP_SIZE) else {
+        return false;
+    };
+    let mut previous_end = start;
+    let mut count = 0;
+    let mut node = allocator.head.next.as_deref();
+    while let Some(current) = node {
+        count += 1;
+        if count > HEAP_SIZE / size_of::<ListNode>() + 1 {
+            return false;
+        }
+        let node_start = current.start_addr();
+        let Some(node_end) = node_start.checked_add(current.size) else {
             return false;
         };
-        let mut previous_end = start;
-        let mut count = 0;
-        let mut node = allocator.head.next.as_deref();
-        while let Some(current) = node {
-            count += 1;
-            if count > HEAP_SIZE / size_of::<ListNode>() + 1 {
-                return false;
-            }
-            let node_start = current.start_addr();
-            let Some(node_end) = node_start.checked_add(current.size) else {
-                return false;
-            };
-            if node_start % align_of::<ListNode>() != 0
-                || current.size < size_of::<ListNode>()
-                || node_start < start
-                || node_end > end
-                || node_start < previous_end
-            {
-                return false;
-            }
-            previous_end = node_end;
-            node = current.next.as_deref();
+        if node_start % align_of::<ListNode>() != 0
+            || current.size < size_of::<ListNode>()
+            || node_start < start
+            || node_end > end
+            || node_start < previous_end
+        {
+            return false;
         }
-        true
-    };
-    !ALLOCATOR.0.is_locked() && valid
+        previous_end = node_end;
+        node = current.next.as_deref();
+    }
+    if HEAP_INITIALIZED.load(Ordering::Acquire) && count == 0 {
+        return false;
+    }
+    true
 }
 
 pub(crate) fn validate_reason() -> &'static str {
-    if ALLOCATOR.0.is_locked() {
+    let Some(allocator) = ALLOCATOR.0.try_lock() else {
         return "allocator lock held";
-    }
-    let allocator = ALLOCATOR.0.lock();
-    let start = heap_start();
+    };
+    let start = heap_virt_start();
     let Some(end) = start.checked_add(HEAP_SIZE) else {
         return "heap range overflow";
     };
@@ -305,11 +324,18 @@ pub(crate) fn validate_reason() -> &'static str {
         previous_end = node_end;
         node = current.next.as_deref();
     }
+    if HEAP_INITIALIZED.load(Ordering::Acquire) && count == 0 {
+        return "free list empty after initialization";
+    }
     "valid"
 }
 
 pub fn init() {
-    let initialized = unsafe { ALLOCATOR.init(heap_start(), HEAP_SIZE) };
+    let start = heap_virt_start();
+    let initialized = unsafe { ALLOCATOR.init(start, HEAP_SIZE) };
+    if initialized {
+        HEAP_INITIALIZED.store(true, Ordering::Release);
+    }
     if !initialized || !validate() {
         crate::serial_println!(
             "Memory: fatal heap initialization failure: {}.",
