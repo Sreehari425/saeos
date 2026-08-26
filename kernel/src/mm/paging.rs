@@ -419,12 +419,16 @@ pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
         }
     }
     if kernel_start < kernel_end {
+        // The loaded image contains both executable code and mutable linker
+        // sections (.data/.bss). Until section-aware permissions exist, map
+        // the whole image writable so mutable statics outside HEAP_STORAGE
+        // remain usable after switching away from firmware page tables.
         for direct in [false, true] {
             if let Err(error) = map_range(
                 kernel_start,
                 kernel_end,
                 direct,
-                crate::boot::PhysicalMemoryKind::Reserved,
+                crate::boot::PhysicalMemoryKind::Usable,
                 gigabyte_pages,
             ) {
                 crate::serial_println!(
