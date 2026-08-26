@@ -3,6 +3,7 @@ use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::gdt;
 use crate::arch::x86_64::interrupt_controller;
 use crate::arch::x86_64::pic;
+#[cfg(feature = "keyboard")]
 use crate::drivers::keyboard;
 use crate::println;
 use crate::serial_println;
@@ -97,6 +98,7 @@ pub fn init() {
         // 2. Hardware Interrupts (Vectors 0x20 = 32, 0x21 = 33)
         IDT.entries[pic::PIC_1_OFFSET as usize]
             .set_handler_addr(timer_interrupt_handler as *const () as u64);
+        #[cfg(feature = "keyboard")]
         IDT.entries[(pic::PIC_1_OFFSET + 1) as usize]
             .set_handler_addr(keyboard_interrupt_handler as *const () as u64);
 
@@ -198,6 +200,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET);
 }
 
+#[cfg(feature = "keyboard")]
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let scancode = unsafe { cpu::inb(0x60) };
 

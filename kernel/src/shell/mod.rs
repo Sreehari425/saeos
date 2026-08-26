@@ -6,6 +6,7 @@ use crate::drivers::keyboard;
 use crate::drivers::vga::Color;
 use crate::print;
 use crate::println;
+#[cfg(feature = "serial")]
 use core::fmt::Write;
 
 const BUFFER_CAPACITY: usize = 80;
@@ -27,6 +28,7 @@ pub fn run() -> ! {
                     if cursor > 0 {
                         cursor -= 1;
                         console::backspace();
+                        #[cfg(feature = "serial")]
                         let _ = crate::drivers::serial::SERIAL1
                             .lock()
                             .write_str("\x08 \x08");

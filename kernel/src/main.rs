@@ -172,6 +172,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     );
 
     // 4. Initialize Keyboard Controller & Enable CPU Hardware Interrupts
+    #[cfg(feature = "keyboard")]
     drivers::keyboard::init();
     cpu::sti();
     println!("[OK] CPU Interrupts enabled (sti).\n");

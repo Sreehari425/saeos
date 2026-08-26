@@ -29,8 +29,12 @@ impl InterruptController {
     pub fn init(&mut self, topology: Option<&InterruptTopology>) -> ControllerKind {
         // 1. Remap legacy PIC offsets first so no vectors collide with CPU exceptions (0..31)
         pic::init();
+        #[cfg(not(feature = "apic"))]
+        let _ = topology;
 
-        // 2. Attempt APIC initialization only from ACPI-discovered topology.
+        // 2. Attempt APIC initialization only when explicitly enabled and
+        // from ACPI-discovered topology.
+        #[cfg(feature = "apic")]
         if let Some(topology) = topology {
             let (timer_gsi, timer_flags) = topology.gsi_for_irq(0);
             let (keyboard_gsi, keyboard_flags) = topology.gsi_for_irq(1);

@@ -9,7 +9,9 @@ use crate::collections::hasher::BuildIdentityHasher;
 use crate::collections::{ChainedMap, HashSet, Map, OpenAddressMap, Set, StaticMap};
 use crate::drivers::console;
 use crate::drivers::vga::Color;
+#[cfg(feature = "mm-selftest")]
 use crate::mm::paging;
+#[cfg(feature = "mm-selftest")]
 use crate::mm::selftest::{self, Status};
 use crate::mm::{HEAP_SIZE, heap_start};
 use crate::println;
@@ -120,29 +122,34 @@ pub fn execute(cmd: &str) {
             println!("---------------------------------------------");
         }
         "selftest" | "mmtest" => {
-            console::set_color(Color::LightCyan, Color::Black);
-            println!("--- Memory and Heap Self-Test ---");
-            println!(
-                "Boot mode: {}",
-                if paging::prefer_identity_mmio() {
-                    "BIOS"
-                } else {
-                    "UEFI"
+            #[cfg(feature = "mm-selftest")]
+            {
+                console::set_color(Color::LightCyan, Color::Black);
+                println!("--- Memory and Heap Self-Test ---");
+                println!(
+                    "Boot mode: {}",
+                    if paging::prefer_identity_mmio() {
+                        "BIOS"
+                    } else {
+                        "UEFI"
+                    }
+                );
+                let report = selftest::run();
+                for line in report.lines.iter() {
+                    let label = match line.status {
+                        Status::Pass => "PASS",
+                        Status::Fail => "FAIL",
+                        Status::Skip => "SKIP",
+                    };
+                    println!("{}: {}", label, line.name);
                 }
-            );
-            let report = selftest::run();
-            for line in report.lines.iter() {
-                let label = match line.status {
-                    Status::Pass => "PASS",
-                    Status::Fail => "FAIL",
-                    Status::Skip => "SKIP",
-                };
-                println!("{}: {}", label, line.name);
+                println!(
+                    "Selftest: {} passed, {} failed, {} skipped.",
+                    report.passed, report.failed, report.skipped
+                );
             }
-            println!(
-                "Selftest: {} passed, {} failed, {} skipped.",
-                report.passed, report.failed, report.skipped
-            );
+            #[cfg(not(feature = "mm-selftest"))]
+            println!("Memory self-test is disabled in this build.");
         }
         "apic" | "status" => {
             // Snapshot controller state before printing. Printing can take

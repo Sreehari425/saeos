@@ -43,9 +43,13 @@ pub fn init() {
         cpu::outb(DATA_PIC2, ICW4_8086);
         cpu::io_wait();
 
-        // Unmask IRQ 0 (Timer) and IRQ 1 (Keyboard): 0b1111_1100 = 0xFC
-        // Keep slave masked: 0xFF
-        cpu::outb(DATA_PIC1, 0xFC);
+        // Unmask the timer, and only unmask the keyboard when it is enabled.
+        let master_mask = if cfg!(feature = "keyboard") {
+            0xFC
+        } else {
+            0xFE
+        };
+        cpu::outb(DATA_PIC1, master_mask);
         cpu::outb(DATA_PIC2, 0xFF);
         let _ = (mask1, mask2);
     }
