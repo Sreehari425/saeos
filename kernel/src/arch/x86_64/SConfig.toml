@@ -1,0 +1,13 @@
+[module]
+id = "kernel.arch.x86_64"
+name = "x86_64 Architecture"
+description = "x86_64 CPU and interrupt-controller options."
+
+[[option]]
+id = "apic"
+name = "APIC interrupt controller"
+type = "bool"
+default = true
+feature = "apic"
+help = "Enable local APIC and IOAPIC discovery when firmware tables are available."
+

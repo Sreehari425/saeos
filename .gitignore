@@ -3,3 +3,6 @@
 /build
 result
 /result
+/.config
+/.config.cargo.toml
+/defconfig.toml

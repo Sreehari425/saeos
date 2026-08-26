@@ -21,30 +21,45 @@
         pkgs = import nixpkgs { inherit system overlays; };
 
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-        cargoManifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = rustToolchain;
+          rustc = rustToolchain;
+        };
+        cargoManifest = builtins.fromTOML (builtins.readFile ./kernel/Cargo.toml);
         packageMetadata = cargoManifest.package;
 
         cargoBuild =
           target:
-          pkgs.stdenv.mkDerivation {
+          rustPlatform.buildRustPackage {
             pname = "${packageMetadata.name}-${target}";
             version = packageMetadata.version;
             src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
 
             nativeBuildInputs = with pkgs; [
-              rustToolchain
               nasm
               binutils
             ];
 
-            dontConfigure = true;
+            dontUseCargoParallelTests = true;
             dontFixup = true;
+            doCheck = false;
+            auditable = false;
 
             buildPhase = ''
               runHook preBuild
-              export CARGO_HOME="$TMPDIR/cargo-home"
-              mkdir -p "$CARGO_HOME"
-              cargo build --offline --locked --target ${target}
+              features=""
+              if [ -f .config.cargo.toml ]; then
+                features="$(
+                  sed -n 's/^[[:space:]]*"\([^"]*\)",[[:space:]]*$/\1/p' .config.cargo.toml \
+                    | paste -sd, -
+                )"
+              fi
+              feature_args=()
+              if [ -n "$features" ]; then
+                feature_args=(--features "$features")
+              fi
+              cargo build --frozen --locked -p ${packageMetadata.name} --target ${target} "''${feature_args[@]}"
               runHook postBuild
             '';
 
@@ -55,14 +70,14 @@
                 if target == "x86_64-unknown-none" then
                   ''
                     objcopy -O elf32-i386 \
-                      target/${target}/debug/saeos \
+                      target/${target}/debug/${packageMetadata.name} \
                       "$out/saeos.bin"
-                    cp target/${target}/debug/saeos "$out/saeos.elf"
+                    cp target/${target}/debug/${packageMetadata.name} "$out/saeos.elf"
                   ''
                 else
                   ''
                     mkdir -p "$out/EFI/BOOT"
-                    cp target/${target}/debug/saeos.efi "$out/EFI/BOOT/BOOTX64.EFI"
+                    cp target/${target}/debug/${packageMetadata.name}.efi "$out/EFI/BOOT/BOOTX64.EFI"
                   ''
               }
               runHook postInstall
@@ -133,8 +148,8 @@
             gdb
           ];
 
-          shellHook = ''
-            echo "🦀 Rust OS Development Environment Loaded!"
+            shellHook = ''
+            echo "Rust OS Development Environment Loaded!"
             echo "Target toolchain: $(rustc --version)"
           '';
         };

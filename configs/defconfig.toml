@@ -1,0 +1,12 @@
+[kernel.mm]
+selftest = false
+
+[kernel.drivers]
+serial = true
+framebuffer = true
+vga_text = true
+keyboard = true
+
+[kernel.arch.x86_64]
+apic = true
+

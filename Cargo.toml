@@ -1,11 +1,10 @@
-[package]
-name = "saeos"
-version = "0.1.0"
+[workspace]
+resolver = "3"
+members = [
+    "kernel",
+    "tools/ratconf",
+]
+
+[workspace.package]
 edition = "2024"
 
-[dependencies]
-
-[[bin]]
-name = "saeos"
-test = false
-bench = false

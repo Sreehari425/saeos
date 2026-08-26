@@ -261,10 +261,11 @@ mod tests {
         map.push(region(513 * GIGABYTE, GIGABYTE, PhysicalMemoryKind::Usable));
         let plan = plan_memory_map(&map, true, true).unwrap();
         assert!(plan.iter().any(|chunk| chunk.page_size == PageSize::OneGiB));
-        assert!(plan
-            .iter()
-            .all(|chunk| chunk.physical_start < 512 * GIGABYTE
-                || chunk.physical_start >= 513 * GIGABYTE));
+        assert!(
+            plan.iter()
+                .all(|chunk| chunk.physical_start < 512 * GIGABYTE
+                    || chunk.physical_start >= 513 * GIGABYTE)
+        );
     }
 
     #[test]
@@ -278,9 +279,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.count, 512);
-        assert!(plan
-            .iter()
-            .all(|chunk| chunk.page_size == PageSize::FourKiB));
+        assert!(
+            plan.iter()
+                .all(|chunk| chunk.page_size == PageSize::FourKiB)
+        );
     }
 
     #[test]

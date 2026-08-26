@@ -1,0 +1,12 @@
+[module]
+id = "kernel"
+name = "Kernel"
+
+[config]
+files = []
+children = [
+    "src/mm/SConfig.toml",
+    "src/drivers/SConfig.toml",
+    "src/arch/x86_64/SConfig.toml",
+]
+

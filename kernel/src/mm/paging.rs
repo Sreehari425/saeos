@@ -1,5 +1,5 @@
 //! Kernel-owned page tables. Table pages are ordinary physical frames.
-use super::frame::{self, PhysAddr, PhysFrame, VirtAddr, PAGE_SIZE};
+use super::frame::{self, PAGE_SIZE, PhysAddr, PhysFrame, VirtAddr};
 
 pub const KERNEL_VIRT_BASE: u64 = 0xffff_8000_0000_0000;
 const PRESENT: u64 = 1;

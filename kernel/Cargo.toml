@@ -1,0 +1,20 @@
+[package]
+name = "saeos"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+
+[features]
+default = []
+serial = []
+framebuffer = []
+vga-text = []
+keyboard = []
+mm-selftest = []
+apic = []
+
+[[bin]]
+name = "saeos"
+test = false
+bench = false

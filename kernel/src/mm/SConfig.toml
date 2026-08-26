@@ -1,0 +1,13 @@
+[module]
+id = "kernel.mm"
+name = "Memory Management"
+description = "Core physical and virtual memory options."
+
+[[option]]
+id = "selftest"
+name = "Memory self-test"
+type = "bool"
+default = false
+feature = "mm-selftest"
+help = "Run memory manager checks during boot."
+

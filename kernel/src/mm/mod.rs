@@ -19,10 +19,7 @@ pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) {
         PhysAddr(boot_info.kernel_physical_end),
     );
     let heap_phys = heap_phys_start();
-    frame::reserve_range(
-        PhysAddr(heap_phys),
-        PhysAddr(heap_phys + HEAP_SIZE as u64),
-    );
+    frame::reserve_range(PhysAddr(heap_phys), PhysAddr(heap_phys + HEAP_SIZE as u64));
 }
 
 pub fn init_paging() {

@@ -140,11 +140,7 @@ fn executable_user_test(space: Option<&mut paging::AddressSpace>) -> Status {
         let _ = space.unmap_user_page(address);
     }
     frame::free_frame(frame);
-    if valid {
-        Status::Pass
-    } else {
-        Status::Fail
-    }
+    if valid { Status::Pass } else { Status::Fail }
 }
 
 fn heap_test() -> (&'static str, Status) {
@@ -230,11 +226,7 @@ pub fn run() -> Report {
                 unsafe { address.write_volatile(marker) };
                 let passed = unsafe { address.read_volatile() == marker };
                 frame::free_frame(frame);
-                if passed {
-                    Status::Pass
-                } else {
-                    Status::Fail
-                }
+                if passed { Status::Pass } else { Status::Fail }
             }
             None => Status::Fail,
         },
@@ -263,11 +255,7 @@ pub fn run() -> Report {
                             == Some(frame::PhysAddr(frame.0))
                 };
                 frame::free_frame(frame);
-                if passed {
-                    Status::Pass
-                } else {
-                    Status::Fail
-                }
+                if passed { Status::Pass } else { Status::Fail }
             }
             None => Status::Skip,
         },
@@ -339,11 +327,7 @@ pub fn run() -> Report {
                     Ok(returned_frame) => frame::free_frame(returned_frame),
                     Err(_) => frame::free_frame(user_frame),
                 }
-                if passed {
-                    Status::Pass
-                } else {
-                    Status::Fail
-                }
+                if passed { Status::Pass } else { Status::Fail }
             }
             (_, Some(user_frame)) => {
                 frame::free_frame(user_frame);

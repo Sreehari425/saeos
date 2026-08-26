@@ -1,0 +1,20 @@
+[project]
+name = "SaeOS"
+description = "Sreehari Anil Experiment of an Operating System"
+version = "0.1.0"
+
+[workspace]
+members = [
+    "kernel",
+    "tools/ratconf",
+]
+
+[build]
+default_target = "bios"
+default_profile = "dev"
+
+[config]
+roots = [
+    "kernel/SBuild.toml",
+]
+

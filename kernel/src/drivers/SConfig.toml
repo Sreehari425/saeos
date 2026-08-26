@@ -1,0 +1,37 @@
+[module]
+id = "kernel.drivers"
+name = "Drivers"
+description = "Console and input driver options."
+
+[[option]]
+id = "serial"
+name = "Serial console"
+type = "bool"
+default = true
+feature = "serial"
+help = "Enable COM1 serial output for debugging and QEMU logs."
+
+[[option]]
+id = "framebuffer"
+name = "Framebuffer console"
+type = "bool"
+default = true
+feature = "framebuffer"
+help = "Enable GOP framebuffer console support for UEFI boots."
+
+[[option]]
+id = "vga_text"
+name = "VGA text console"
+type = "bool"
+default = true
+feature = "vga-text"
+help = "Enable the legacy VGA text console used by BIOS boots."
+
+[[option]]
+id = "keyboard"
+name = "Keyboard input"
+type = "bool"
+default = true
+feature = "keyboard"
+help = "Enable PS/2 keyboard input for the interactive shell."
+
