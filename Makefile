@@ -6,7 +6,7 @@ QEMU_ARGS ?=
 FEATURES = $(shell if [ -f .config ]; then cargo run --quiet -p ratconf -- features 2>/dev/null; fi)
 FEATURE_ARGS = $(if $(FEATURES),--features $(FEATURES),)
 
-.PHONY: all bios uefi run run-uefi check menuconfig defconfig tinyconfig olddefconfig savedefconfig
+.PHONY: all bios uefi run run-uefi run-debug run-uefi-debug check menuconfig defconfig tinyconfig olddefconfig savedefconfig
 .PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy help
 
 all: bios
@@ -22,6 +22,14 @@ run: olddefconfig
 
 run-uefi: olddefconfig
 	nix run path:.#uefi -- $(QEMU_ARGS)
+
+run-debug: olddefconfig
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
+	./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) $(QEMU_ARGS)
+
+run-uefi-debug: olddefconfig
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
+	./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(QEMU_ARGS)
 
 check: olddefconfig
 	cargo check -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
@@ -70,7 +78,7 @@ nix-gc:
 
 help:
 	@echo "SaeOS build targets:"
-	@echo "  all bios uefi run run-uefi check"
+	@echo "  all bios uefi run run-uefi run-debug run-uefi-debug check"
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\""
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
 	@echo "  clean distclean mrproper nix-gc"
