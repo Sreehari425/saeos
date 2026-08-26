@@ -2,6 +2,7 @@ RATCONF := cargo run --quiet -p ratconf --
 KERNEL := saeos
 BIOS_TARGET := x86_64-unknown-none
 UEFI_TARGET := x86_64-unknown-uefi
+QEMU_ARGS ?=
 FEATURES = $(shell if [ -f .config ]; then cargo run --quiet -p ratconf -- features 2>/dev/null; fi)
 FEATURE_ARGS = $(if $(FEATURES),--features $(FEATURES),)
 
@@ -17,10 +18,10 @@ uefi: olddefconfig
 	nix build path:.#uefi
 
 run: olddefconfig
-	nix run path:.#bios
+	nix run path:.#bios -- $(QEMU_ARGS)
 
 run-uefi: olddefconfig
-	nix run path:.#uefi
+	nix run path:.#uefi -- $(QEMU_ARGS)
 
 check: olddefconfig
 	cargo check -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
@@ -70,5 +71,6 @@ nix-gc:
 help:
 	@echo "SaeOS build targets:"
 	@echo "  all bios uefi run run-uefi check"
+	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\""
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
 	@echo "  clean distclean mrproper nix-gc"
