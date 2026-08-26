@@ -1,7 +1,10 @@
 use crate::boot::boot_info::DisplayMode;
 use crate::drivers::framebuffer::GOP_WRITER;
+#[cfg(feature = "serial")]
 use crate::drivers::serial::SERIAL1;
-use crate::drivers::vga::{self, Color, WRITER as VGA_WRITER};
+use crate::drivers::vga::Color;
+#[cfg(feature = "vga-text")]
+use crate::drivers::vga::{self, WRITER as VGA_WRITER};
 use crate::sync::SpinMutex;
 use core::fmt::{self, Write};
 
@@ -25,8 +28,13 @@ pub fn init(display_mode: DisplayMode) {
     match display_mode {
         DisplayMode::VgaText { buffer_addr } => {
             state.kind = ConsoleKind::Vga;
-            VGA_WRITER.lock().set_buffer_address(buffer_addr as u64);
-            VGA_WRITER.lock().clear_screen();
+            #[cfg(feature = "vga-text")]
+            {
+                VGA_WRITER.lock().set_buffer_address(buffer_addr as u64);
+                VGA_WRITER.lock().clear_screen();
+            }
+            #[cfg(not(feature = "vga-text"))]
+            let _ = buffer_addr;
         }
         DisplayMode::GopFramebuffer(info) => {
             state.kind = ConsoleKind::Gop;
@@ -38,7 +46,10 @@ pub fn init(display_mode: DisplayMode) {
 pub fn clear_screen() {
     let state = CONSOLE_STATE.lock();
     match state.kind {
+        #[cfg(feature = "vga-text")]
         ConsoleKind::Vga => VGA_WRITER.lock().clear_screen(),
+        #[cfg(not(feature = "vga-text"))]
+        ConsoleKind::Vga => {}
         ConsoleKind::Gop => GOP_WRITER.lock().clear_screen(),
     }
 }
@@ -46,7 +57,10 @@ pub fn clear_screen() {
 pub fn backspace() {
     let state = CONSOLE_STATE.lock();
     match state.kind {
+        #[cfg(feature = "vga-text")]
         ConsoleKind::Vga => VGA_WRITER.lock().backspace(),
+        #[cfg(not(feature = "vga-text"))]
+        ConsoleKind::Vga => {}
         ConsoleKind::Gop => GOP_WRITER.lock().backspace(),
     }
 }
@@ -54,7 +68,10 @@ pub fn backspace() {
 pub fn set_color(fg: Color, bg: Color) {
     let state = CONSOLE_STATE.lock();
     match state.kind {
+        #[cfg(feature = "vga-text")]
         ConsoleKind::Vga => vga::set_color(fg, bg),
+        #[cfg(not(feature = "vga-text"))]
+        ConsoleKind::Vga => {}
         ConsoleKind::Gop => GOP_WRITER.lock().set_color(fg, bg),
     }
 }
@@ -63,14 +80,18 @@ pub fn set_color(fg: Color, bg: Color) {
 pub fn _print(args: fmt::Arguments) {
     let state = CONSOLE_STATE.lock();
     match state.kind {
+        #[cfg(feature = "vga-text")]
         ConsoleKind::Vga => {
             VGA_WRITER.lock().write_fmt(args).unwrap();
         }
+        #[cfg(not(feature = "vga-text"))]
+        ConsoleKind::Vga => {}
         ConsoleKind::Gop => {
             GOP_WRITER.lock().write_fmt(args).unwrap();
         }
     }
     // Mirror to serial COM1 console (stdio)
+    #[cfg(feature = "serial")]
     SERIAL1.lock().write_fmt(args).unwrap();
 }
 

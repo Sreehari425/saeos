@@ -69,6 +69,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     // Both BIOS and UEFI mirror console output to COM1. UEFI firmware may
     // have initialized the UART already, but initializing it here keeps the
     // BIOS path deterministic as well.
+    #[cfg(feature = "serial")]
     drivers::serial::init();
 
     // BIOS still has the boot assembly's writable identity map here, so parse

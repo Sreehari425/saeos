@@ -59,17 +59,37 @@ pub fn init() {
 }
 
 #[doc(hidden)]
+#[cfg(feature = "serial")]
 pub fn _serial_print(args: fmt::Arguments) {
     SERIAL1.lock().write_fmt(args).unwrap();
 }
 
 #[macro_export]
+#[cfg(feature = "serial")]
 macro_rules! serial_print {
     ($($arg:tt)*) => ($crate::drivers::serial::_serial_print(format_args!($($arg)*)));
 }
 
 #[macro_export]
+#[cfg(feature = "serial")]
 macro_rules! serial_println {
     () => ($crate::serial_print!("\n"));
     ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
+}
+
+#[cfg(not(feature = "serial"))]
+#[macro_export]
+macro_rules! serial_print {
+    ($($arg:tt)*) => {{
+        let _ = core::format_args!($($arg)*);
+    }};
+}
+
+#[cfg(not(feature = "serial"))]
+#[macro_export]
+macro_rules! serial_println {
+    () => {{}};
+    ($($arg:tt)*) => {{
+        let _ = core::format_args!("{}\n", core::format_args!($($arg)*));
+    }};
 }
