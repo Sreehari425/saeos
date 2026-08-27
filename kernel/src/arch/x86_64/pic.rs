@@ -43,6 +43,16 @@ pub fn init() {
         cpu::outb(DATA_PIC2, ICW4_8086);
         cpu::io_wait();
 
+        // Keep both PICs masked until the interrupt-controller selection is
+        // complete. APIC mode must never have a live legacy IRQ0 source.
+        cpu::outb(DATA_PIC1, 0xFF);
+        cpu::outb(DATA_PIC2, 0xFF);
+        let _ = (mask1, mask2);
+    }
+}
+
+pub fn unmask_legacy_irqs() {
+    unsafe {
         // Unmask the timer, and only unmask the keyboard when it is enabled.
         let master_mask = if cfg!(feature = "keyboard") {
             0xFC
@@ -51,7 +61,6 @@ pub fn init() {
         };
         cpu::outb(DATA_PIC1, master_mask);
         cpu::outb(DATA_PIC2, 0xFF);
-        let _ = (mask1, mask2);
     }
 }
 

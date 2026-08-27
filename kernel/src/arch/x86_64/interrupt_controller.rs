@@ -104,7 +104,9 @@ impl InterruptController {
             }
         }
 
-        // 4. Fallback Path: keep 8259 PIC active with Timer & Keyboard unmasked
+        // 4. Fallback Path: keep 8259 PIC active with Timer & Keyboard
+        // unmasked. APIC mode leaves the legacy PIC fully masked.
+        pic::unmask_legacy_irqs();
         self.mode = ControllerKind::LegacyPic;
         ControllerKind::LegacyPic
     }

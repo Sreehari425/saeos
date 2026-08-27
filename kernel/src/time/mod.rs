@@ -41,8 +41,9 @@ pub struct RtcTime {
 pub fn init() {
     #[cfg(feature = "pit")]
     unsafe {
-        // Channel 0, low byte then high byte, mode 3 square wave, binary mode.
-        cpu::outb(PIT_COMMAND, 0x36);
+        // Channel 0, low byte then high byte, mode 2 rate generator, binary
+        // mode. Mode 2 gives the IOAPIC one terminal-count pulse per period.
+        cpu::outb(PIT_COMMAND, 0x34);
         cpu::outb(PIT_CHANNEL_0, PIT_DIVISOR as u8);
         cpu::outb(PIT_CHANNEL_0, (PIT_DIVISOR >> 8) as u8);
     }
