@@ -1,0 +1,20 @@
+[module]
+id = "kernel.time"
+name = "Time"
+description = "Monotonic timer and CMOS wall-clock support."
+
+[[option]]
+id = "pit"
+name = "PIT monotonic timer"
+type = "bool"
+default = true
+feature = "pit"
+help = "Enable the 1000 Hz PIT timer and monotonic uptime clock."
+
+[[option]]
+id = "rtc"
+name = "CMOS real-time clock"
+type = "bool"
+default = true
+feature = "rtc"
+help = "Enable live wall-clock reads from the CMOS RTC."

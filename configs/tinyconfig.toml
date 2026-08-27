@@ -1,3 +1,7 @@
+[kernel.time]
+pit = false
+rtc = false
+
 [kernel.mm]
 selftest = false
 
@@ -9,4 +13,3 @@ keyboard = false
 
 [kernel.arch.x86_64]
 apic = false
-

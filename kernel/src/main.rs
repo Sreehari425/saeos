@@ -11,6 +11,7 @@ pub mod drivers;
 pub mod mm;
 pub mod shell;
 pub mod sync;
+pub mod time;
 
 use arch::x86_64::acpi;
 use arch::x86_64::cpu;
@@ -138,6 +139,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
 
     // 2. Initialize Architecture (GDT/TSS with IST, IDT, and Interrupt Controller)
     let mode = arch::x86_64::init(acpi_topology.as_ref());
+    time::init();
     drivers::console::set_color(Color::LightGreen, Color::Black);
     println!("[OK] GDT & TSS with IST loaded.");
     println!("[OK] IDT loaded (256 vectors).");

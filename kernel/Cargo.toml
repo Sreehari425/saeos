@@ -13,6 +13,8 @@ vga-text = []
 keyboard = []
 mm-selftest = []
 apic = []
+pit = []
+rtc = []
 
 [[bin]]
 name = "saeos"

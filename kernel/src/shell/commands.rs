@@ -15,6 +15,7 @@ use crate::mm::paging;
 use crate::mm::selftest::{self, Status};
 use crate::mm::{HEAP_SIZE, heap_start};
 use crate::println;
+use crate::time;
 
 pub fn execute(cmd: &str) {
     match cmd {
@@ -26,6 +27,9 @@ pub fn execute(cmd: &str) {
             println!("  apic    - Display APIC & interrupt controller status");
             println!("  mem     - Test Kernel Heap & in-tree trait-driven Collections");
             println!("  selftest - Run live memory and heap diagnostics");
+            println!("  uptime  - Show monotonic milliseconds since boot");
+            println!("  date    - Show the CMOS wall-clock time");
+            println!("  sleep N - Sleep for N seconds");
             println!("  <text>  - Echoes your input back to the screen");
         }
         "clear" => {
@@ -150,6 +154,47 @@ pub fn execute(cmd: &str) {
             }
             #[cfg(not(feature = "mm-selftest"))]
             println!("Memory self-test is disabled in this build.");
+        }
+        "uptime" => match time::uptime_ms() {
+            Some(milliseconds) => println!("Uptime: {} ms.", milliseconds),
+            None => println!("Monotonic clock is disabled in this build."),
+        },
+        "date" | "time" => match time::read_rtc() {
+            Some(clock) => println!(
+                "RTC: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                clock.year, clock.month, clock.day, clock.hour, clock.minute, clock.second
+            ),
+            None => println!("RTC is disabled or unavailable in this build."),
+        },
+        "sleep" => println!("Usage: sleep <seconds>"),
+        command if command.starts_with("sleep ") => {
+            let argument = command[6..].trim();
+            match argument.parse::<u64>() {
+                Ok(seconds) => match seconds.checked_mul(1000) {
+                    Some(milliseconds) => {
+                        let started = time::uptime_ms();
+                        match time::sleep_ms(milliseconds) {
+                            Ok(()) => {
+                                let elapsed = started
+                                    .zip(time::uptime_ms())
+                                    .map(|(start, end)| end.saturating_sub(start));
+                                match elapsed {
+                                    Some(actual) => println!(
+                                        "Slept for {} seconds ({} ms measured).",
+                                        seconds, actual
+                                    ),
+                                    None => println!("Slept for {} seconds.", seconds),
+                                }
+                            }
+                            Err(time::SleepError::Disabled) => {
+                                println!("Monotonic clock is disabled in this build.")
+                            }
+                        }
+                    }
+                    None => println!("Sleep duration is too large."),
+                },
+                Err(_) => println!("Usage: sleep <seconds>"),
+            }
         }
         "apic" | "status" => {
             // Snapshot controller state before printing. Printing can take

@@ -5,8 +5,8 @@ name = "Kernel"
 [config]
 files = []
 children = [
+    "src/time/SConfig.toml",
     "src/mm/SConfig.toml",
     "src/drivers/SConfig.toml",
     "src/arch/x86_64/SConfig.toml",
 ]
-

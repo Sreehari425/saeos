@@ -197,6 +197,7 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
 
 // Hardware Interrupt Handlers
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::time::on_timer_interrupt();
     interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET);
 }
 
