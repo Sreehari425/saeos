@@ -23,7 +23,6 @@ asm-bios: olddefconfig
 	cargo rustc -p $(KERNEL) \
 		--target $(BIOS_TARGET) \
 		$(FEATURE_ARGS) \
-		--release \
 		-- \
 		--emit=asm
 
@@ -31,7 +30,6 @@ asm-uefi: olddefconfig
 	cargo rustc -p $(KERNEL) \
 		--target $(UEFI_TARGET) \
 		$(FEATURE_ARGS) \
-		--release \
 		-- \
 		--emit=asm
 
