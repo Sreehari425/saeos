@@ -17,7 +17,7 @@ name = "Framebuffer console"
 type = "bool"
 default = true
 feature = "framebuffer"
-help = "Enable GOP framebuffer console support for UEFI boots."
+help = "Enable GOP framebuffer console support for UEFI boots; disable to force VGA/text fallback."
 
 [[option]]
 id = "vga_text"
@@ -34,4 +34,3 @@ type = "bool"
 default = true
 feature = "keyboard"
 help = "Enable PS/2 keyboard input for the interactive shell."
-

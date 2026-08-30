@@ -5,13 +5,17 @@ use crate::boot::boot_info::{
     BootInfo, BootMode, DisplayMode, FramebufferInfo, MAX_MEMORY_REGIONS, PhysicalMemoryKind,
     PhysicalMemoryMap, PhysicalMemoryRegion, PixelFormat,
 };
+#[cfg(feature = "framebuffer")]
+use proto::{EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, EfiGraphicsOutputProtocol};
 use proto::{
-    EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, EFI_LOADED_IMAGE_PROTOCOL_GUID, EFI_SUCCESS,
-    EfiGraphicsOutputProtocol, EfiHandle, EfiLoadedImageProtocol, EfiStatus, EfiSystemTable,
+    EFI_LOADED_IMAGE_PROTOCOL_GUID, EFI_SUCCESS, EfiHandle, EfiLoadedImageProtocol, EfiStatus,
+    EfiSystemTable,
 };
 
 // Static handle buffer — enough for up to 64 GOP handles (8 bytes each on x86_64)
+#[cfg(feature = "framebuffer")]
 const HANDLE_BUF_SIZE: usize = 64 * 8;
+#[cfg(feature = "framebuffer")]
 static mut HANDLE_BUF: [u8; HANDLE_BUF_SIZE] = [0u8; HANDLE_BUF_SIZE];
 
 // Memory map buffer
@@ -71,18 +75,26 @@ unsafe fn serial_hex(mut value: u64) {
 //   0 = ID, 1 = XRES, 2 = YRES, 3 = BPP, 4 = ENABLE,
 //   5 = BANK, 6 = VIRT_WIDTH, 7 = VIRT_HEIGHT, 8 = X_OFFSET, 9 = Y_OFFSET
 // ----------------------------------------------------------------
+#[cfg(feature = "framebuffer")]
 const VBE_DISPI_IOPORT_INDEX: u16 = 0x01CE;
+#[cfg(feature = "framebuffer")]
 const VBE_DISPI_IOPORT_DATA: u16 = 0x01CF;
+#[cfg(feature = "framebuffer")]
 const VBE_DISPI_INDEX_ID: u16 = 0;
+#[cfg(feature = "framebuffer")]
 const VBE_DISPI_INDEX_XRES: u16 = 1;
+#[cfg(feature = "framebuffer")]
 const VBE_DISPI_INDEX_YRES: u16 = 2;
+#[cfg(feature = "framebuffer")]
 const VBE_DISPI_INDEX_BPP: u16 = 3;
+#[cfg(feature = "framebuffer")]
 const VBE_DISPI_INDEX_VIRT_WIDTH: u16 = 6;
 
 /// Read a 16-bit Bochs VBE DISPI register.
 ///
 /// # Safety
 /// Performs I/O port access.
+#[cfg(feature = "framebuffer")]
 unsafe fn vbe_read(index: u16) -> u16 {
     let val: u16;
     unsafe {
@@ -109,6 +121,7 @@ unsafe fn vbe_read(index: u16) -> u16 {
 ///
 /// # Safety
 /// Performs I/O port and memory-mapped I/O.
+#[cfg(feature = "framebuffer")]
 unsafe fn probe_bochs_vbe() -> Option<FramebufferInfo> {
     // Check VBE ID: must be 0xB0C0..0xB0C5
     let id = unsafe { vbe_read(VBE_DISPI_INDEX_ID) };
@@ -158,6 +171,7 @@ unsafe fn probe_bochs_vbe() -> Option<FramebufferInfo> {
 ///
 /// # Safety
 /// Performs I/O port access.
+#[cfg(feature = "framebuffer")]
 unsafe fn pci_read32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
     let addr: u32 = 0x8000_0000
         | ((bus as u32) << 16)
@@ -187,6 +201,7 @@ unsafe fn pci_read32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
 ///
 /// # Safety
 /// Performs PCI I/O port access.
+#[cfg(feature = "framebuffer")]
 unsafe fn probe_vga_bar0() -> Option<u32> {
     for dev in 0u8..32 {
         let vendor_device = unsafe { pci_read32(0, dev, 0, 0x00) };
@@ -278,78 +293,94 @@ pub unsafe extern "efiapi" fn efi_main(
             image_end = image_base.saturating_add(image.image_size);
         }
 
-        // ----------------------------------------------------------------
-        // Step 1: Try GOP via LocateHandle (ByProtocol)
-        // ----------------------------------------------------------------
-        let mut gop_ptr: *mut EfiGraphicsOutputProtocol = core::ptr::null_mut();
-        let mut buf_size: usize = HANDLE_BUF_SIZE;
-        let handles_ptr = core::ptr::addr_of_mut!(HANDLE_BUF) as *mut EfiHandle;
+        #[cfg(feature = "framebuffer")]
+        let fb_info = {
+            // Step 1: Try GOP via LocateHandle (ByProtocol)
+            let mut gop_ptr: *mut EfiGraphicsOutputProtocol = core::ptr::null_mut();
+            let mut buf_size: usize = HANDLE_BUF_SIZE;
+            let handles_ptr = core::ptr::addr_of_mut!(HANDLE_BUF) as *mut EfiHandle;
 
-        let locate_status = (bs.locate_handle)(
-            2, // ByProtocol
-            &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
-            core::ptr::null_mut(),
-            &mut buf_size,
-            handles_ptr,
-        );
+            let locate_status = (bs.locate_handle)(
+                2, // ByProtocol
+                &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
+                core::ptr::null_mut(),
+                &mut buf_size,
+                handles_ptr,
+            );
 
-        if locate_status == EFI_SUCCESS && buf_size > 0 {
-            let num_handles = buf_size / core::mem::size_of::<EfiHandle>();
-            let handles_slice = core::slice::from_raw_parts(handles_ptr, num_handles);
+            if locate_status == EFI_SUCCESS && buf_size > 0 {
+                let num_handles = buf_size / core::mem::size_of::<EfiHandle>();
+                let handles_slice = core::slice::from_raw_parts(handles_ptr, num_handles);
 
-            for &handle in handles_slice {
-                if handle.is_null() {
-                    continue;
-                }
-                let mut iface: *mut () = core::ptr::null_mut();
-                let hp_status =
-                    (bs.handle_protocol)(handle, &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, &mut iface);
-                if hp_status == EFI_SUCCESS && !iface.is_null() {
-                    let candidate = iface as *mut EfiGraphicsOutputProtocol;
-                    if !(*candidate).mode.is_null() && (*(*candidate).mode).frame_buffer_base != 0 {
-                        gop_ptr = candidate;
-                        break;
+                for &handle in handles_slice {
+                    if handle.is_null() {
+                        continue;
+                    }
+                    let mut iface: *mut () = core::ptr::null_mut();
+                    let hp_status =
+                        (bs.handle_protocol)(handle, &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, &mut iface);
+                    if hp_status == EFI_SUCCESS && !iface.is_null() {
+                        let candidate = iface as *mut EfiGraphicsOutputProtocol;
+                        if !(*candidate).mode.is_null()
+                            && (*(*candidate).mode).frame_buffer_base != 0
+                        {
+                            gop_ptr = candidate;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        // Step 1b: Try console_out_handle
-        if gop_ptr.is_null() && !st.console_out_handle.is_null() {
-            let mut iface: *mut () = core::ptr::null_mut();
-            let hp_status = (bs.handle_protocol)(
-                st.console_out_handle,
-                &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
-                &mut iface,
-            );
-            if hp_status == EFI_SUCCESS && !iface.is_null() {
-                let candidate = iface as *mut EfiGraphicsOutputProtocol;
-                if !(*candidate).mode.is_null() && (*(*candidate).mode).frame_buffer_base != 0 {
-                    gop_ptr = candidate;
+            // Step 1b: Try console_out_handle
+            if gop_ptr.is_null() && !st.console_out_handle.is_null() {
+                let mut iface: *mut () = core::ptr::null_mut();
+                let hp_status = (bs.handle_protocol)(
+                    st.console_out_handle,
+                    &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
+                    &mut iface,
+                );
+                if hp_status == EFI_SUCCESS && !iface.is_null() {
+                    let candidate = iface as *mut EfiGraphicsOutputProtocol;
+                    if !(*candidate).mode.is_null() && (*(*candidate).mode).frame_buffer_base != 0
+                    {
+                        gop_ptr = candidate;
+                    }
                 }
             }
-        }
 
-        // Step 1c: LocateProtocol
-        if gop_ptr.is_null() {
-            let mut iface: *mut () = core::ptr::null_mut();
-            let lp_status = (bs.locate_protocol)(
-                &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
-                core::ptr::null_mut(),
-                &mut iface,
-            );
-            if lp_status == EFI_SUCCESS && !iface.is_null() {
-                let candidate = iface as *mut EfiGraphicsOutputProtocol;
-                if !(*candidate).mode.is_null() && (*(*candidate).mode).frame_buffer_base != 0 {
-                    gop_ptr = candidate;
+            // Step 1c: LocateProtocol
+            if gop_ptr.is_null() {
+                let mut iface: *mut () = core::ptr::null_mut();
+                let lp_status = (bs.locate_protocol)(
+                    &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
+                    core::ptr::null_mut(),
+                    &mut iface,
+                );
+                if lp_status == EFI_SUCCESS && !iface.is_null() {
+                    let candidate = iface as *mut EfiGraphicsOutputProtocol;
+                    if !(*candidate).mode.is_null() && (*(*candidate).mode).frame_buffer_base != 0 {
+                        gop_ptr = candidate;
+                    }
                 }
             }
-        }
 
-        // ----------------------------------------------------------------
-        // Step 2: Extract GOP framebuffer (if found)
-        // ----------------------------------------------------------------
-        let gop_fb = extract_framebuffer(gop_ptr);
+            // Step 2: Extract GOP framebuffer (if found)
+            let gop_fb = extract_framebuffer(gop_ptr);
+
+            // Step 4: If GOP was unavailable, probe Bochs VBE hardware directly
+            // (works with QEMU's -vga std after ExitBootServices)
+            gop_fb.or_else(|| {
+                let bochs = probe_bochs_vbe();
+                if bochs.is_some() {
+                    serial_str("[UEFI] Using Bochs VBE hardware framebuffer.\n");
+                } else {
+                    serial_str("[UEFI] No framebuffer found, using VGA text fallback.\n");
+                }
+                bochs
+            })
+        };
+        #[cfg(not(feature = "framebuffer"))]
+        let fb_info: Option<FramebufferInfo> = None;
 
         // ----------------------------------------------------------------
         // Step 3: ExitBootServices
@@ -397,20 +428,6 @@ pub unsafe extern "efiapi" fn efi_main(
                 return exit_status;
             }
         }
-
-        // ----------------------------------------------------------------
-        // Step 4: If GOP was unavailable, probe Bochs VBE hardware directly
-        // (works with QEMU's -vga std after ExitBootServices)
-        // ----------------------------------------------------------------
-        let fb_info = gop_fb.or_else(|| {
-            let bochs = probe_bochs_vbe();
-            if bochs.is_some() {
-                serial_str("[UEFI] Using Bochs VBE hardware framebuffer.\n");
-            } else {
-                serial_str("[UEFI] No framebuffer found, using VGA text fallback.\n");
-            }
-            bochs
-        });
 
         {
             let map = core::ptr::read(&raw const UEFI_MEMORY_MAP);
@@ -547,6 +564,7 @@ const RUNTIME_DATA: u32 = 6;
 ///
 /// # Safety
 /// `gop_ptr` must be a valid GOP pointer or null.
+#[cfg(feature = "framebuffer")]
 unsafe fn extract_framebuffer(gop_ptr: *mut EfiGraphicsOutputProtocol) -> Option<FramebufferInfo> {
     if gop_ptr.is_null() {
         return None;

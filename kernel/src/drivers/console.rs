@@ -1,4 +1,5 @@
 use crate::boot::boot_info::DisplayMode;
+#[cfg(feature = "framebuffer")]
 use crate::drivers::framebuffer::GOP_WRITER;
 #[cfg(feature = "serial")]
 use crate::drivers::serial::SERIAL1;
@@ -11,6 +12,7 @@ use core::fmt::{self, Write};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleKind {
     Vga,
+    #[cfg(feature = "framebuffer")]
     Gop,
 }
 
@@ -37,8 +39,20 @@ pub fn init(display_mode: DisplayMode) {
             let _ = buffer_addr;
         }
         DisplayMode::GopFramebuffer(info) => {
-            state.kind = ConsoleKind::Gop;
-            GOP_WRITER.lock().init(info);
+            #[cfg(feature = "framebuffer")]
+            {
+                state.kind = ConsoleKind::Gop;
+                GOP_WRITER.lock().init(info);
+            }
+            #[cfg(not(feature = "framebuffer"))]
+            {
+                let _ = info;
+                state.kind = ConsoleKind::Vga;
+                #[cfg(feature = "vga-text")]
+                {
+                    VGA_WRITER.lock().clear_screen();
+                }
+            }
         }
     }
 }
@@ -50,6 +64,7 @@ pub fn clear_screen() {
         ConsoleKind::Vga => VGA_WRITER.lock().clear_screen(),
         #[cfg(not(feature = "vga-text"))]
         ConsoleKind::Vga => {}
+        #[cfg(feature = "framebuffer")]
         ConsoleKind::Gop => GOP_WRITER.lock().clear_screen(),
     }
 }
@@ -61,6 +76,7 @@ pub fn backspace() {
         ConsoleKind::Vga => VGA_WRITER.lock().backspace(),
         #[cfg(not(feature = "vga-text"))]
         ConsoleKind::Vga => {}
+        #[cfg(feature = "framebuffer")]
         ConsoleKind::Gop => GOP_WRITER.lock().backspace(),
     }
 }
@@ -72,6 +88,7 @@ pub fn set_color(fg: Color, bg: Color) {
         ConsoleKind::Vga => vga::set_color(fg, bg),
         #[cfg(not(feature = "vga-text"))]
         ConsoleKind::Vga => {}
+        #[cfg(feature = "framebuffer")]
         ConsoleKind::Gop => GOP_WRITER.lock().set_color(fg, bg),
     }
 }
@@ -86,6 +103,7 @@ pub fn _print(args: fmt::Arguments) {
         }
         #[cfg(not(feature = "vga-text"))]
         ConsoleKind::Vga => {}
+        #[cfg(feature = "framebuffer")]
         ConsoleKind::Gop => {
             GOP_WRITER.lock().write_fmt(args).unwrap();
         }

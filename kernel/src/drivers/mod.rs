@@ -1,5 +1,6 @@
 pub mod console;
 pub mod font;
+#[cfg(feature = "framebuffer")]
 pub mod framebuffer;
 pub mod keyboard;
 pub mod serial;
