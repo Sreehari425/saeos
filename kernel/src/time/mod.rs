@@ -57,7 +57,7 @@ pub fn on_timer_interrupt() {
 pub fn uptime_ms() -> Option<u64> {
     #[cfg(feature = "pit")]
     {
-        return Some(TICKS.load(Ordering::Relaxed).saturating_mul(1_000) / TICK_HZ as u64);
+        Some(TICKS.load(Ordering::Relaxed).saturating_mul(1_000) / TICK_HZ as u64)
     }
     #[cfg(not(feature = "pit"))]
     None
@@ -78,7 +78,7 @@ pub fn sleep_ms(milliseconds: u64) -> Result<(), SleepError> {
                 cpu::hlt();
             }
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(feature = "pit"))]
     {
