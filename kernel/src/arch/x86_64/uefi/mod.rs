@@ -18,9 +18,22 @@ const HANDLE_BUF_SIZE: usize = 64 * 8;
 #[cfg(feature = "framebuffer")]
 static mut HANDLE_BUF: [u8; HANDLE_BUF_SIZE] = [0u8; HANDLE_BUF_SIZE];
 
-// Memory map buffer
+// Memory map buffer — must be at least 8-byte aligned because
+// EfiMemoryDescriptor contains u64 fields and we cast the buffer pointer
+// directly to *const EfiMemoryDescriptor. A bare [u8; N] has alignment 1
+// and can land at any address depending on the binary layout; different
+// feature-flag combinations have been observed to produce non-8-aligned
+// addresses, triggering Rust's misaligned-pointer UB check.
 const MMAP_BUFFER_SIZE: usize = 32768;
-static mut MMAP_BUFFER: [u8; MMAP_BUFFER_SIZE] = [0u8; MMAP_BUFFER_SIZE];
+
+#[repr(C, align(8))]
+struct AlignedBuffer {
+    data: [u8; MMAP_BUFFER_SIZE],
+}
+
+static mut MMAP_BUFFER: AlignedBuffer = AlignedBuffer {
+    data: [0u8; MMAP_BUFFER_SIZE],
+};
 static mut UEFI_MEMORY_MAP: PhysicalMemoryMap = PhysicalMemoryMap::empty();
 static mut UEFI_DESCRIPTOR_COUNT: usize = 0;
 static mut UEFI_DISCARDED: usize = 0;
@@ -387,7 +400,7 @@ pub unsafe extern "efiapi" fn efi_main(
         // ----------------------------------------------------------------
         // Step 3: ExitBootServices
         // ----------------------------------------------------------------
-        let mmap_ptr = core::ptr::addr_of_mut!(MMAP_BUFFER) as *mut u8;
+        let mmap_ptr = core::ptr::addr_of_mut!(MMAP_BUFFER.data) as *mut u8;
         let mut memory_map_size = MMAP_BUFFER_SIZE;
         let mut map_key = 0usize;
         let mut descriptor_size = 0usize;
@@ -491,7 +504,7 @@ unsafe fn parse_memory_map(
     descriptor_version: u32,
 ) {
     let minimum = core::mem::size_of::<EfiMemoryDescriptor>();
-    if descriptor_size < minimum || !descriptor_size.is_multiple_of(8) || descriptor_version == 0 {
+    if descriptor_size < minimum || descriptor_version == 0 {
         unsafe {
             UEFI_DISCARDED = UEFI_DISCARDED.saturating_add(1);
         }
@@ -504,7 +517,12 @@ unsafe fn parse_memory_map(
     }
     let mut offset = 0;
     while offset <= size && size - offset >= minimum {
-        let descriptor = unsafe { &*(ptr.add(offset) as *const EfiMemoryDescriptor) };
+        // Use read_unaligned: each descriptor may be at an arbitrary byte
+        // offset inside the buffer (descriptor_size from firmware may be
+        // 40, 48, or other values not guaranteed to produce 8-aligned
+        // pointers). read_unaligned copies the bytes to the stack safely.
+        let descriptor =
+            unsafe { core::ptr::read_unaligned(ptr.add(offset) as *const EfiMemoryDescriptor) };
         let Some(length) = descriptor.number_of_pages.checked_mul(4096) else {
             unsafe {
                 UEFI_DISCARDED += 1;
