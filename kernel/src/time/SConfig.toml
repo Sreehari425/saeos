@@ -18,3 +18,20 @@ type = "bool"
 default = true
 feature = "rtc"
 help = "Enable live wall-clock reads from the CMOS RTC."
+
+[[option]]
+id = "apic_timer"
+name = "Local APIC timer"
+type = "bool"
+default = true
+feature = "apic-timer"
+help = "Enable Local APIC timer for high-precision ticks and preemption."
+
+[[option]]
+id = "tsc"
+name = "Time Stamp Counter (TSC)"
+type = "bool"
+default = true
+feature = "tsc"
+help = "Enable TSC calibration and high-resolution timing."
+

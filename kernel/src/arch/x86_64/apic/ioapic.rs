@@ -95,6 +95,18 @@ impl IoApic {
         }
     }
 
+    /// Mask only the timer redirection entry (by its table index) without
+    /// disturbing any other entries. Call this once the Local APIC Timer takes
+    /// over tick delivery so that the PIT no longer delivers Vector 0x20
+    /// interrupts in parallel.
+    pub fn mask_timer_irq(&mut self, timer_index: u8) {
+        let reg_low = IOAPIC_REDTBL_BASE + (timer_index as u32) * 2;
+        unsafe {
+            let current = self.read_reg(reg_low);
+            self.write_reg(reg_low, current | REDTBL_MASKED);
+        }
+    }
+
     pub fn set_base_address(&mut self, address: u64) {
         self.physical_base_addr = address;
         let page = address & !0xfff;

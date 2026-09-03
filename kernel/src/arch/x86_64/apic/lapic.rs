@@ -18,6 +18,9 @@ const REG_LVT_TIMER: usize = 0x320;
 const REG_LVT_LINT0: usize = 0x350;
 const REG_LVT_LINT1: usize = 0x360;
 const REG_LVT_ERROR: usize = 0x370;
+const REG_TIMER_INIT_COUNT: usize = 0x380;
+const REG_TIMER_CURR_COUNT: usize = 0x390;
+const REG_TIMER_DIV: usize = 0x3E0;
 
 // SVR Flags
 const SVR_APIC_ENABLE: u32 = 1 << 8;
@@ -25,6 +28,8 @@ pub const SPURIOUS_INTERRUPT_VECTOR: u8 = 0xFF;
 
 // LVT Flags
 const LVT_MASKED: u32 = 1 << 16;
+pub const LVT_TIMER_PERIODIC: u32 = 1 << 17;
+pub const LVT_TIMER_TSC_DEADLINE: u32 = 2 << 17;
 
 pub struct LocalApic {
     physical_base_addr: u64,
@@ -148,6 +153,51 @@ impl LocalApic {
 
     pub fn base_address(&self) -> u64 {
         self.physical_base_addr
+    }
+
+    /// Sets the timer division configuration.
+    /// Divider values are encoded as:
+    /// 1: 0b1011 (0xB), 2: 0b0000 (0x0), 4: 0b0001 (0x1), 8: 0b0010 (0x2),
+    /// 16: 0b0011 (0x3), 32: 0b1000 (0x8), 64: 0b1001 (0x9), 128: 0b1010 (0xA).
+    pub fn set_timer_divisor(&self, div_val: u32) {
+        unsafe {
+            self.write_reg(REG_TIMER_DIV, div_val);
+        }
+    }
+
+    /// Configures the LVT Timer entry.
+    pub fn set_lvt_timer(&self, vector: u8, periodic: bool, masked: bool) {
+        let mut flags = vector as u32;
+        if periodic {
+            flags |= LVT_TIMER_PERIODIC;
+        }
+        if masked {
+            flags |= LVT_MASKED;
+        }
+        unsafe {
+            self.write_reg(REG_LVT_TIMER, flags);
+        }
+    }
+
+    /// Sets the APIC Timer initial count register.
+    pub fn set_timer_initial_count(&self, count: u32) {
+        unsafe {
+            self.write_reg(REG_TIMER_INIT_COUNT, count);
+        }
+    }
+
+    /// Reads the APIC Timer current count register.
+    pub fn read_timer_current_count(&self) -> u32 {
+        unsafe { self.read_reg(REG_TIMER_CURR_COUNT) }
+    }
+
+    /// Disables and masks the APIC timer.
+    pub fn mask_timer(&self) {
+        unsafe {
+            let current = self.read_reg(REG_LVT_TIMER);
+            self.write_reg(REG_LVT_TIMER, current | LVT_MASKED);
+            self.write_reg(REG_TIMER_INIT_COUNT, 0);
+        }
     }
 }
 

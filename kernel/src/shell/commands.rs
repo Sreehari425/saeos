@@ -29,6 +29,7 @@ pub fn execute(cmd: &str) {
             println!("  selftest - Run live memory and heap diagnostics");
             println!("  uptime  - Show monotonic milliseconds since boot");
             println!("  date    - Show the CMOS wall-clock time");
+            println!("  tsc     - Display Time Stamp Counter (TSC) & calibration info");
             println!("  sleep N - Sleep for N seconds");
             println!("  <text>  - Echoes your input back to the screen");
         }
@@ -236,6 +237,19 @@ pub fn execute(cmd: &str) {
                         "I/O APIC:      Base={:#x}, ID={}, Max IRQs={}",
                         ioapic_base, ioapic_id, max_irqs
                     );
+                    #[cfg(feature = "apic-timer")]
+                    {
+                        if time::apic_timer::is_active() {
+                            println!(
+                                "APIC Timer:    Periodic [ACTIVE] ({} ticks/ms)",
+                                time::apic_timer::ticks_per_ms()
+                            );
+                        } else {
+                            println!("APIC Timer:    Disabled/Inactive");
+                        }
+                    }
+                    #[cfg(not(feature = "apic-timer"))]
+                    println!("APIC Timer:    Disabled by build configuration");
                     println!("Legacy 8259:   Masked (Disabled)");
                 }
                 ControllerKind::LegacyPic => {
@@ -246,6 +260,35 @@ pub fn execute(cmd: &str) {
                 }
             }
             println!("----------------------------------------");
+        }
+        "tsc" => {
+            #[cfg(feature = "tsc")]
+            {
+                console::set_color(Color::LightCyan, Color::Black);
+                println!("--- Time Stamp Counter (TSC) Diagnostics ---");
+                console::set_color(Color::White, Color::Black);
+                let invariant = time::tsc::is_invariant();
+                if invariant {
+                    console::set_color(Color::LightGreen, Color::Black);
+                    println!("Invariant TSC: Supported (Constant rate across P/C states)");
+                } else {
+                    console::set_color(Color::Yellow, Color::Black);
+                    println!("Invariant TSC: Not supported / Not reported by CPUID");
+                }
+                console::set_color(Color::White, Color::Black);
+                let hz = time::tsc::frequency_hz();
+                let mhz = hz / 1_000_000;
+                let remainder_khz = (hz % 1_000_000) / 1_000;
+                println!(
+                    "Calibrated:    {}.{:03} MHz ({} Hz)",
+                    mhz, remainder_khz, hz
+                );
+                let current_raw = time::tsc::read();
+                println!("Current Raw:   {} cycles", current_raw);
+                println!("--------------------------------------------");
+            }
+            #[cfg(not(feature = "tsc"))]
+            println!("TSC feature is disabled in this build.");
         }
         _ => {
             console::set_color(Color::LightGreen, Color::Black);

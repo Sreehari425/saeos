@@ -159,11 +159,37 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
                 lapic_base, ioapic_base
             );
             println!("[OK] 8259 Legacy PIC masked and disabled.");
+            #[cfg(feature = "apic-timer")]
+            {
+                if time::apic_timer::is_active() {
+                    println!(
+                        "[OK] Local APIC Timer active ({} ticks/ms).",
+                        time::apic_timer::ticks_per_ms()
+                    );
+                }
+            }
         }
         ControllerKind::LegacyPic => {
             drivers::console::set_color(Color::Yellow, Color::Black);
             println!("[WARN] APIC unavailable. Falling back to 8259 Legacy PIC.");
         }
+    }
+
+    #[cfg(feature = "tsc")]
+    {
+        drivers::console::set_color(Color::LightGreen, Color::Black);
+        let hz = time::tsc::frequency_hz();
+        let mhz = hz / 1_000_000;
+        let remainder_khz = (hz % 1_000_000) / 1_000;
+        let inv_str = if time::tsc::is_invariant() {
+            "Invariant TSC"
+        } else {
+            "Non-Invariant TSC"
+        };
+        println!(
+            "[OK] {} calibrated @ {}.{:03} MHz.",
+            inv_str, mhz, remainder_khz
+        );
     }
 
     // 3. Memory management and heap were initialized before ACPI/hardware use.

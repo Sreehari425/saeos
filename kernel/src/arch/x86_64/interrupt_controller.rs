@@ -14,6 +14,9 @@ pub struct InterruptController {
     pub ioapic: IoApic,
     pub secondary_ioapic: Option<IoApic>,
     pub mode: ControllerKind,
+    /// IOAPIC redirection table index for the timer (IRQ 0) after APIC init.
+    /// Used to mask the entry once the Local APIC Timer takes over tick delivery.
+    pub timer_irq_index: u8,
 }
 
 impl InterruptController {
@@ -23,6 +26,7 @@ impl InterruptController {
             ioapic: IoApic::new(),
             secondary_ioapic: None,
             mode: ControllerKind::LegacyPic,
+            timer_irq_index: 0,
         }
     }
 
@@ -98,6 +102,11 @@ impl InterruptController {
                     // Completely mask 8259 PIC to disable legacy IRQ routing
                     pic::mask_all();
 
+                    // Remember the IOAPIC table index for timer IRQ so that
+                    // apic_timer::init() can mask it once the LAPIC timer is live.
+                    self.timer_irq_index =
+                        timer_gsi.saturating_sub(timer_ioapic.gsi_base) as u8;
+
                     self.mode = ControllerKind::Apic;
                     return ControllerKind::Apic;
                 }
@@ -120,6 +129,13 @@ impl InterruptController {
                 pic::notify_end_of_interrupt(vector);
             }
         }
+    }
+
+    /// Mask the IOAPIC timer redirection entry so the PIT no longer delivers
+    /// Vector 0x20 interrupts once the Local APIC Timer has taken over.
+    #[cfg(feature = "apic-timer")]
+    pub fn mask_ioapic_timer(&mut self) {
+        self.ioapic.mask_timer_irq(self.timer_irq_index);
     }
 }
 

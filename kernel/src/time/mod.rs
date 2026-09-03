@@ -1,26 +1,29 @@
 //! Kernel time services.
 //!
-//! PIT ticks provide monotonic deadlines. CMOS RTC reads provide wall-clock
-//! information only; they are never used for elapsed-time calculations.
+//! PIT or Local APIC Timer ticks provide monotonic deadlines and scheduling quantum.
+//! CMOS RTC reads provide wall-clock information only; they are never used for elapsed-time calculations.
+//! TSC provides high-resolution timestamping and sub-microsecond calibration.
 
-#[cfg(feature = "pit")]
+#[cfg(feature = "apic-timer")]
+pub mod apic_timer;
+#[cfg(feature = "tsc")]
+pub mod tsc;
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "pit")]
+#[cfg(all(feature = "pit", not(feature = "apic-timer")))]
 use crate::arch::x86_64::cpu;
 
-#[cfg(feature = "pit")]
+#[cfg(all(feature = "pit", not(feature = "apic-timer")))]
 const PIT_CHANNEL_0: u16 = 0x40;
-#[cfg(feature = "pit")]
+#[cfg(all(feature = "pit", not(feature = "apic-timer")))]
 const PIT_COMMAND: u16 = 0x43;
-#[cfg(feature = "pit")]
+#[cfg(all(feature = "pit", not(feature = "apic-timer")))]
 const PIT_BASE_HZ: u32 = 1_193_182;
-#[cfg(feature = "pit")]
 pub const TICK_HZ: u32 = 1_000;
-#[cfg(feature = "pit")]
+#[cfg(all(feature = "pit", not(feature = "apic-timer")))]
 const PIT_DIVISOR: u16 = (PIT_BASE_HZ / TICK_HZ) as u16;
 
-#[cfg(feature = "pit")]
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +42,11 @@ pub struct RtcTime {
 }
 
 pub fn init() {
-    #[cfg(feature = "pit")]
+    // Program PIT Channel 0 only when the APIC Timer is NOT active.
+    // When apic-timer is enabled the LAPIC Timer drives system ticks and
+    // PIT Channel 0 must stay idle. PIT Channel 2 (used by tsc::init for
+    // calibration) is independent and is still used regardless.
+    #[cfg(all(feature = "pit", not(feature = "apic-timer")))]
     unsafe {
         // Channel 0, low byte then high byte, mode 2 rate generator, binary
         // mode. Mode 2 gives the IOAPIC one terminal-count pulse per period.
@@ -47,40 +54,47 @@ pub fn init() {
         cpu::outb(PIT_CHANNEL_0, PIT_DIVISOR as u8);
         cpu::outb(PIT_CHANNEL_0, (PIT_DIVISOR >> 8) as u8);
     }
+
+    #[cfg(feature = "tsc")]
+    tsc::init();
+
+    #[cfg(feature = "apic-timer")]
+    {
+        let _ = apic_timer::init();
+    }
 }
 
 pub fn on_timer_interrupt() {
-    #[cfg(feature = "pit")]
     TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn uptime_ms() -> Option<u64> {
-    #[cfg(feature = "pit")]
+    #[cfg(any(feature = "pit", feature = "apic-timer"))]
     {
         Some(TICKS.load(Ordering::Relaxed).saturating_mul(1_000) / TICK_HZ as u64)
     }
-    #[cfg(not(feature = "pit"))]
+    #[cfg(not(any(feature = "pit", feature = "apic-timer")))]
     None
 }
 
 pub fn sleep_ms(milliseconds: u64) -> Result<(), SleepError> {
-    #[cfg(feature = "pit")]
+    #[cfg(any(feature = "pit", feature = "apic-timer"))]
     {
         let Some(start) = uptime_ms() else {
             return Err(SleepError::Disabled);
         };
         let deadline = start.saturating_add(milliseconds);
         while uptime_ms().is_some_and(|now| now < deadline) {
-            if cpu::interrupts_enabled() {
-                cpu::hlt();
+            if crate::arch::x86_64::cpu::interrupts_enabled() {
+                crate::arch::x86_64::cpu::hlt();
             } else {
-                cpu::sti();
-                cpu::hlt();
+                crate::arch::x86_64::cpu::sti();
+                crate::arch::x86_64::cpu::hlt();
             }
         }
         Ok(())
     }
-    #[cfg(not(feature = "pit"))]
+    #[cfg(not(any(feature = "pit", feature = "apic-timer")))]
     {
         let _ = milliseconds;
         Err(SleepError::Disabled)

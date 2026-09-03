@@ -1,6 +1,8 @@
 [kernel.time]
 pit = true
 rtc = true
+apic_timer = true
+tsc = true
 
 [kernel.mm]
 selftest = false

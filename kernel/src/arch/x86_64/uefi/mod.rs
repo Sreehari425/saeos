@@ -317,8 +317,11 @@ pub unsafe extern "efiapi" fn efi_main(
                         continue;
                     }
                     let mut iface: *mut () = core::ptr::null_mut();
-                    let hp_status =
-                        (bs.handle_protocol)(handle, &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, &mut iface);
+                    let hp_status = (bs.handle_protocol)(
+                        handle,
+                        &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
+                        &mut iface,
+                    );
                     if hp_status == EFI_SUCCESS && !iface.is_null() {
                         let candidate = iface as *mut EfiGraphicsOutputProtocol;
                         if !(*candidate).mode.is_null()
@@ -341,8 +344,7 @@ pub unsafe extern "efiapi" fn efi_main(
                 );
                 if hp_status == EFI_SUCCESS && !iface.is_null() {
                     let candidate = iface as *mut EfiGraphicsOutputProtocol;
-                    if !(*candidate).mode.is_null() && (*(*candidate).mode).frame_buffer_base != 0
-                    {
+                    if !(*candidate).mode.is_null() && (*(*candidate).mode).frame_buffer_base != 0 {
                         gop_ptr = candidate;
                     }
                 }

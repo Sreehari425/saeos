@@ -178,3 +178,53 @@ pub fn enable_nxe() {
         }
     }
 }
+
+/// Reads the current value of the Processor Time Stamp Counter (TSC).
+#[inline]
+pub fn rdtsc() -> u64 {
+    unsafe {
+        let (low, high): (u32, u32);
+        core::arch::asm!(
+            "rdtsc",
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack, preserves_flags)
+        );
+        ((high as u64) << 32) | (low as u64)
+    }
+}
+
+/// Reads the Time Stamp Counter and Processor ID (RDTSCP).
+/// Returns `(tsc, aux)`.
+#[inline]
+pub fn rdtscp() -> (u64, u32) {
+    unsafe {
+        let (low, high, aux): (u32, u32, u32);
+        core::arch::asm!(
+            "rdtscp",
+            out("eax") low,
+            out("edx") high,
+            out("ecx") aux,
+            options(nomem, nostack, preserves_flags)
+        );
+        (((high as u64) << 32) | (low as u64), aux)
+    }
+}
+
+/// Returns whether the CPU supports the RDTSC instruction.
+pub fn has_rdtsc() -> bool {
+    let res = cpuid(1);
+    (res.edx & (1 << 4)) != 0
+}
+
+/// Returns whether the CPU supports Invariant TSC (constant rate across ACPI P-, C-, and T-states).
+pub fn has_invariant_tsc() -> bool {
+    let max_ext = cpuid(0x8000_0000).eax;
+    if max_ext >= 0x8000_0007 {
+        let res = cpuid(0x8000_0007);
+        // Bit 8 of EDX indicates Invariant TSC
+        (res.edx & (1 << 8)) != 0
+    } else {
+        false
+    }
+}
