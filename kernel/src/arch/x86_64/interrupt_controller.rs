@@ -104,8 +104,7 @@ impl InterruptController {
 
                     // Remember the IOAPIC table index for timer IRQ so that
                     // apic_timer::init() can mask it once the LAPIC timer is live.
-                    self.timer_irq_index =
-                        timer_gsi.saturating_sub(timer_ioapic.gsi_base) as u8;
+                    self.timer_irq_index = timer_gsi.saturating_sub(timer_ioapic.gsi_base) as u8;
 
                     self.mode = ControllerKind::Apic;
                     return ControllerKind::Apic;
