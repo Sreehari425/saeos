@@ -18,6 +18,37 @@ pub struct FramebufferInfo {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct KernelSection {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl KernelSection {
+    pub const EMPTY: Self = Self { start: 0, end: 0 };
+
+    pub const fn is_present(self) -> bool {
+        self.start < self.end
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct KernelSections {
+    pub text: KernelSection,
+    pub rodata: KernelSection,
+    pub data: KernelSection,
+    pub bss: KernelSection,
+}
+
+impl KernelSections {
+    pub const EMPTY: Self = Self {
+        text: KernelSection::EMPTY,
+        rodata: KernelSection::EMPTY,
+        data: KernelSection::EMPTY,
+        bss: KernelSection::EMPTY,
+    };
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum DisplayMode {
     VgaText { buffer_addr: usize },
     GopFramebuffer(FramebufferInfo),
@@ -107,6 +138,7 @@ pub struct BootInfo {
     pub memory_map: PhysicalMemoryMap,
     pub kernel_physical_start: u64,
     pub kernel_physical_end: u64,
+    pub kernel_sections: KernelSections,
     pub rsdp_addr: Option<u64>,
     pub memory_map_descriptor_count: usize,
     pub memory_map_discarded: usize,
@@ -122,6 +154,7 @@ impl BootInfo {
             memory_map: PhysicalMemoryMap::empty(),
             kernel_physical_start: 0,
             kernel_physical_end: 0,
+            kernel_sections: KernelSections::EMPTY,
             rsdp_addr: None,
             memory_map_descriptor_count: 0,
             memory_map_discarded: 0,

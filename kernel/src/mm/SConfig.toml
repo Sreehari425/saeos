@@ -11,3 +11,10 @@ default = false
 feature = "mm-selftest"
 help = "Run memory manager checks during boot."
 
+[[option]]
+id = "paging_debug"
+name = "Paging mapping diagnostics"
+type = "bool"
+default = false
+feature = "paging-debug"
+help = "Dump final kernel page mappings and section permissions over serial."

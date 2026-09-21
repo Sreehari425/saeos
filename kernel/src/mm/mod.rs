@@ -67,6 +67,7 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
     paging::init_with_mode(
         boot_info.kernel_physical_start,
         boot_info.kernel_physical_end,
+        boot_info.kernel_sections,
         boot_info.boot_mode == crate::boot::boot_info::BootMode::Bios,
     );
     paging::reserve_page_tables();
@@ -87,6 +88,8 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         ),
     };
     activate_higher_half();
+    #[cfg(feature = "paging-debug")]
+    paging::inspect_final_kernel_mappings(boot_info.kernel_sections);
     if let Some(rsdp) = boot_info.rsdp_addr {
         let start = rsdp & !(frame::PAGE_SIZE - 1);
         let end = rsdp.saturating_add(36).next_multiple_of(frame::PAGE_SIZE);
@@ -202,11 +205,6 @@ fn memory_self_check(boot_info: &crate::boot::BootInfo) {
 }
 
 fn map_framebuffer(display: crate::boot::DisplayMode) {
-    // BIOS keeps the bootloader's writable identity map for VGA/MMIO holes.
-    // Do not split the bootstrap huge page just to remap 0xb8000.
-    if paging::prefer_identity_mmio() {
-        return;
-    }
     let Some((base, size)) = (match display {
         crate::boot::DisplayMode::VgaText { buffer_addr } => Some((buffer_addr as u64, 4000)),
         crate::boot::DisplayMode::GopFramebuffer(info) => Some((info.base_addr, info.size as u64)),
@@ -222,13 +220,20 @@ fn map_framebuffer(display: crate::boot::DisplayMode) {
     };
     let mut physical = start;
     while physical < end {
-        if paging::map_page(
+        let mapped_direct = paging::map_page(
             paging::phys_to_virt(PhysAddr(physical)),
             PhysAddr(physical),
             paging::PageFlags::MMIO,
         )
-        .is_err()
-        {
+        .is_ok();
+        let mapped_identity = !paging::prefer_identity_mmio()
+            || paging::map_page(
+                paging::identity(PhysAddr(physical)),
+                PhysAddr(physical),
+                paging::PageFlags::MMIO,
+            )
+            .is_ok();
+        if !mapped_direct || !mapped_identity {
             crate::serial_println!("Memory: unable to map framebuffer page at {:#x}.", physical);
             break;
         }

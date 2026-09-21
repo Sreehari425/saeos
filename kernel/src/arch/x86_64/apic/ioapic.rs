@@ -115,6 +115,13 @@ impl IoApic {
             crate::mm::PhysAddr(page),
             crate::mm::paging::PageFlags::MMIO,
         );
+        if crate::mm::paging::prefer_identity_mmio() {
+            let _ = crate::mm::paging::map_page(
+                crate::mm::paging::identity(crate::mm::PhysAddr(page)),
+                crate::mm::PhysAddr(page),
+                crate::mm::paging::PageFlags::MMIO,
+            );
+        }
         self.mapped_base_addr = if crate::mm::paging::prefer_identity_mmio() {
             crate::mm::paging::identity(crate::mm::PhysAddr(address)).0
         } else {

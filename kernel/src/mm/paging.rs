@@ -1,5 +1,6 @@
 //! Kernel-owned page tables. Table pages are ordinary physical frames.
 use super::frame::{self, PAGE_SIZE, PhysAddr, PhysFrame, VirtAddr};
+use crate::boot::boot_info::KernelSections;
 
 pub const KERNEL_VIRT_BASE: u64 = 0xffff_8000_0000_0000;
 const PRESENT: u64 = 1;
@@ -9,6 +10,9 @@ const HUGE: u64 = 1 << 7;
 const GIGABYTE: u64 = 1 << 30;
 const TWO_MIB: u64 = 1 << 21;
 const NO_EXECUTE: u64 = 1 << 63;
+const PWT: u64 = 1 << 3;
+const PCD: u64 = 1 << 4;
+const LEAF_ATTRIBUTES: u64 = PRESENT | WRITABLE | USER | PWT | PCD | NO_EXECUTE;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 // PML4 slots 256..511 occupy the canonical upper-half window: 128 TiB.
 const DIRECT_MAP_LIMIT: u64 = 1 << 47;
@@ -351,11 +355,17 @@ pub fn init(kernel_start: u64, kernel_end: u64) {
     init_with_mode(
         kernel_start,
         kernel_end,
+        KernelSections::EMPTY,
         kernel_start != 0 && kernel_start < 4 * 1024 * 1024 * 1024,
     );
 }
 
-pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
+pub fn init_with_mode(
+    kernel_start: u64,
+    kernel_end: u64,
+    sections: KernelSections,
+    bios_boot: bool,
+) {
     let map = frame::memory_map();
     crate::arch::x86_64::cpu::enable_nxe();
     unsafe {
@@ -419,10 +429,8 @@ pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
         }
     }
     if kernel_start < kernel_end {
-        // The loaded image contains both executable code and mutable linker
-        // sections (.data/.bss). Until section-aware permissions exist, map
-        // the whole image writable so mutable statics outside HEAP_STORAGE
-        // remain usable after switching away from firmware page tables.
+        // Keep a writable/NX fallback for image bytes which are not described
+        // by section metadata, then override the known sections below.
         for direct in [false, true] {
             if let Err(error) = map_range(
                 kernel_start,
@@ -435,6 +443,26 @@ pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
                     "Memory: kernel mapping failed for {:#x}..{:#x}: {}",
                     kernel_start,
                     kernel_end,
+                    error
+                );
+            }
+        }
+    }
+    for (section, flags) in [
+        (sections.text, PageFlags::KERNEL_TEXT),
+        (sections.rodata, PageFlags::READ_ONLY),
+        (sections.data, PageFlags::WRITABLE),
+        (sections.bss, PageFlags::WRITABLE),
+    ] {
+        if !section.is_present() {
+            continue;
+        }
+        for direct in [false, true] {
+            if let Err(error) = map_pages(section.start, section.end, direct, flags) {
+                crate::serial_println!(
+                    "Memory: section mapping failed for {:#x}..{:#x}: {}",
+                    section.start,
+                    section.end,
                     error
                 );
             }
@@ -461,12 +489,9 @@ pub fn init_with_mode(kernel_start: u64, kernel_end: u64, bios_boot: bool) {
             );
         }
     }
-    // Keep the bootstrap identity window for BIOS VGA/APIC MMIO holes only.
-    // Heap freelist traffic and dynamic page-table edits must use the direct
-    // map after activate(); do not back those with this mutable PDPT.
-    unsafe {
-        PML4.0[0] = (&raw const BOOTSTRAP_PDPT) as u64 | PRESENT | WRITABLE;
-    }
+    // Do not restore PML4[0] to BOOTSTRAP_PDPT. The final identity mappings
+    // remain active, making the temporary permissive bootstrap aliases
+    // unreachable after CR3 activation.
 }
 
 fn maps_in_direct_map(kind: crate::boot::PhysicalMemoryKind) -> bool {
@@ -554,6 +579,35 @@ fn map_range(
     Ok(())
 }
 
+fn map_pages(start: u64, end: u64, direct: bool, flags: PageFlags) -> Result<(), &'static str> {
+    if start >= end {
+        return Ok(());
+    }
+    if end
+        > if direct {
+            DIRECT_MAP_LIMIT
+        } else {
+            IDENTITY_MAP_LIMIT
+        }
+    {
+        return Err("section range exceeds four-level canonical coverage");
+    }
+    let mut physical = start;
+    while physical < end {
+        map_page(
+            VirtAddr(if direct {
+                KERNEL_VIRT_BASE + physical
+            } else {
+                physical
+            }),
+            PhysAddr(physical),
+            flags,
+        )?;
+        physical += PAGE_SIZE;
+    }
+    Ok(())
+}
+
 fn map_leaf(
     virtual_address: VirtAddr,
     physical: PhysAddr,
@@ -573,10 +627,10 @@ fn map_leaf(
     let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
     let pdpt = child(&raw mut PML4, root).ok_or("out of page-table frames")?;
     if size == GIGABYTE {
-        pdpt.0[pdpt_index] = physical.0 | PRESENT | WRITABLE | HUGE;
+        pdpt.0[pdpt_index] = physical.0 | flags.0 | HUGE;
     } else {
         let pd = child(pdpt as *mut PageTable, pdpt_index).ok_or("out of page-table frames")?;
-        pd.0[((normalized >> 21) & 0x1ff) as usize] = physical.0 | PRESENT | WRITABLE | HUGE;
+        pd.0[((normalized >> 21) & 0x1ff) as usize] = physical.0 | flags.0 | HUGE;
     }
     Ok(())
 }
@@ -633,21 +687,25 @@ pub fn map_page(
     unsafe {
         let pdpt = child(&raw mut PML4, pml4_index).ok_or("out of page-table frames")?;
         if pdpt.0[pdpt_index] & HUGE != 0 {
-            let old = pdpt.0[pdpt_index] & 0x000f_ffff_c000_0000;
+            let old_entry = pdpt.0[pdpt_index];
+            let old = old_entry & 0x000f_ffff_c000_0000;
+            let inherited = old_entry & LEAF_ATTRIBUTES;
             let pd_frame = alloc_table().ok_or("out of page-table frames")?;
             let pd = &mut *table_ptr(pd_frame);
             for i in 0..512 {
-                pd.0[i] = (old + i as u64 * TWO_MIB) | PRESENT | WRITABLE | HUGE;
+                pd.0[i] = (old + i as u64 * TWO_MIB) | inherited | HUGE;
             }
             pdpt.0[pdpt_index] = pd_frame.0 | PRESENT | WRITABLE;
         }
         let pd = child(pdpt as *mut PageTable, pdpt_index).ok_or("out of page-table frames")?;
         if pd.0[pd_index] & HUGE != 0 {
-            let old = pd.0[pd_index] & 0x000f_ffff_ffe0_0000;
+            let old_entry = pd.0[pd_index];
+            let old = old_entry & 0x000f_ffff_ffe0_0000;
+            let inherited = old_entry & LEAF_ATTRIBUTES;
             let pt_frame = alloc_table().ok_or("out of page-table frames")?;
             let pt = &mut *table_ptr(pt_frame);
             for i in 0..512 {
-                pt.0[i] = (old + i as u64 * PAGE_SIZE) | PRESENT | WRITABLE | NO_EXECUTE;
+                pt.0[i] = (old + i as u64 * PAGE_SIZE) | inherited;
             }
             pd.0[pd_index] = pt_frame.0 | PRESENT | WRITABLE;
         }
@@ -662,6 +720,128 @@ pub fn activate() {
         core::arch::asm!("mov cr3, {}", in(reg) (&raw const PML4) as u64, options(nostack, preserves_flags));
         ACTIVE = true;
     }
+}
+
+#[cfg(feature = "paging-debug")]
+#[derive(Clone, Copy)]
+struct MappingInfo {
+    physical: u64,
+    size: u64,
+    flags: u64,
+}
+
+#[cfg(feature = "paging-debug")]
+unsafe fn inspect_mapping(virtual_address: u64) -> Option<MappingInfo> {
+    let direct = virtual_address >= KERNEL_VIRT_BASE;
+    let normalized = if direct {
+        virtual_address - KERNEL_VIRT_BASE
+    } else {
+        virtual_address
+    };
+    let pml4_index = pml4_index(normalized, direct)?;
+    let pml4_ptr = core::ptr::addr_of!(PML4);
+    let pml4 = unsafe { &*pml4_ptr };
+    let pml4_entry = pml4.0[pml4_index];
+    if pml4_entry & PRESENT == 0 {
+        return None;
+    }
+    let pdpt = unsafe { &*table_ptr(PhysFrame(pml4_entry & ADDRESS_MASK)) };
+    let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
+    let pdpt_entry = pdpt.0[pdpt_index];
+    if pdpt_entry & PRESENT == 0 {
+        return None;
+    }
+    if pdpt_entry & HUGE != 0 {
+        return Some(MappingInfo {
+            physical: (pdpt_entry & 0x000f_ffff_c000_0000) + (normalized & (GIGABYTE - 1)),
+            size: GIGABYTE,
+            flags: pdpt_entry,
+        });
+    }
+    let pd = unsafe { &*table_ptr(PhysFrame(pdpt_entry & ADDRESS_MASK)) };
+    let pd_index = ((normalized >> 21) & 0x1ff) as usize;
+    let pd_entry = pd.0[pd_index];
+    if pd_entry & PRESENT == 0 {
+        return None;
+    }
+    if pd_entry & HUGE != 0 {
+        return Some(MappingInfo {
+            physical: (pd_entry & 0x000f_ffff_ffe0_0000) + (normalized & (TWO_MIB - 1)),
+            size: TWO_MIB,
+            flags: pd_entry,
+        });
+    }
+    let pt = unsafe { &*table_ptr(PhysFrame(pd_entry & ADDRESS_MASK)) };
+    let pt_index = ((normalized >> 12) & 0x1ff) as usize;
+    let pt_entry = pt.0[pt_index];
+    if pt_entry & PRESENT == 0 {
+        return None;
+    }
+    Some(MappingInfo {
+        physical: (pt_entry & ADDRESS_MASK) + (normalized & (PAGE_SIZE - 1)),
+        size: PAGE_SIZE,
+        flags: pt_entry,
+    })
+}
+
+#[cfg(feature = "paging-debug")]
+fn permission_label(flags: u64) -> &'static str {
+    match (flags & WRITABLE != 0, flags & NO_EXECUTE != 0) {
+        (true, true) => "RW- NX",
+        (true, false) => "RWX",
+        (false, true) => "R-- NX",
+        (false, false) => "R-X",
+    }
+}
+
+#[cfg(feature = "paging-debug")]
+fn dump_mapping(section: &str, point: &str, alias: &str, virtual_address: u64) {
+    let result = unsafe { inspect_mapping(virtual_address) };
+    match result {
+        Some(info) => crate::serial_println!(
+            "[PAGING] {} {} {} virt={:#x} phys={:#x} leaf={} flags={}",
+            section,
+            point,
+            alias,
+            virtual_address,
+            info.physical,
+            info.size,
+            permission_label(info.flags)
+        ),
+        None => crate::serial_println!(
+            "[PAGING] {} {} {} virt={:#x} UNMAPPED",
+            section,
+            point,
+            alias,
+            virtual_address
+        ),
+    }
+}
+
+#[cfg(feature = "paging-debug")]
+fn dump_section(name: &str, section: crate::boot::boot_info::KernelSection) {
+    if !section.is_present() {
+        return;
+    }
+    crate::serial_println!(
+        "[PAGING] {} [{:#x}, {:#x})",
+        name,
+        section.start,
+        section.end
+    );
+    for (suffix, physical) in [("start", section.start), ("end", section.end - 1)] {
+        dump_mapping(name, suffix, "identity", physical);
+        dump_mapping(name, suffix, "higher-half", KERNEL_VIRT_BASE + physical);
+    }
+}
+
+#[cfg(feature = "paging-debug")]
+pub(crate) fn inspect_final_kernel_mappings(sections: KernelSections) {
+    crate::serial_println!("[PAGING] final CR3={:#x}", page_table_frame().0);
+    dump_section(".text", sections.text);
+    dump_section(".rodata", sections.rodata);
+    dump_section(".data", sections.data);
+    dump_section(".bss", sections.bss);
 }
 pub fn is_active() -> bool {
     unsafe { ACTIVE }

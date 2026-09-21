@@ -2,8 +2,8 @@ pub mod proto;
 
 use crate::arch::x86_64::acpi;
 use crate::boot::boot_info::{
-    BootInfo, BootMode, DisplayMode, FramebufferInfo, MAX_MEMORY_REGIONS, PhysicalMemoryKind,
-    PhysicalMemoryMap, PhysicalMemoryRegion, PixelFormat,
+    BootInfo, BootMode, DisplayMode, FramebufferInfo, KernelSection, KernelSections,
+    MAX_MEMORY_REGIONS, PhysicalMemoryKind, PhysicalMemoryMap, PhysicalMemoryRegion, PixelFormat,
 };
 #[cfg(feature = "framebuffer")]
 use proto::{EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, EfiGraphicsOutputProtocol};
@@ -280,6 +280,7 @@ pub unsafe extern "efiapi" fn efi_main(
         // avoids reserving an arbitrary region around one function symbol.
         let mut image_base = 0u64;
         let mut image_end = 0u64;
+        let mut kernel_sections = KernelSections::EMPTY;
         let open_protocol: unsafe extern "efiapi" fn(
             EfiHandle,
             *const proto::EfiGuid,
@@ -304,6 +305,7 @@ pub unsafe extern "efiapi" fn efi_main(
             let image = &*(image_iface as *const EfiLoadedImageProtocol);
             image_base = image.image_base as u64;
             image_end = image_base.saturating_add(image.image_size);
+            kernel_sections = parse_pe_sections(image_base);
         }
 
         #[cfg(feature = "framebuffer")]
@@ -477,6 +479,7 @@ pub unsafe extern "efiapi" fn efi_main(
             memory_map: UEFI_MEMORY_MAP,
             kernel_physical_start: image_base,
             kernel_physical_end: image_end,
+            kernel_sections,
             rsdp_addr,
             memory_map_descriptor_count: UEFI_DESCRIPTOR_COUNT,
             memory_map_discarded: UEFI_DISCARDED,
@@ -484,6 +487,74 @@ pub unsafe extern "efiapi" fn efi_main(
 
         crate::kernel_main(&boot_info);
     }
+}
+
+/// Read the section layout of the PE/COFF image loaded by UEFI.
+///
+/// The BIOS image gets section symbols from linker.ld; UEFI images need this
+/// small header-only parser because the firmware loads a PE/COFF image and
+/// does not expose Rust/linker symbols to the kernel.
+unsafe fn parse_pe_sections(image_base: u64) -> KernelSections {
+    if image_base == 0 {
+        return KernelSections::EMPTY;
+    }
+    let base = image_base as *const u8;
+    let read_u16 =
+        |offset: usize| unsafe { core::ptr::read_unaligned(base.add(offset) as *const u16) };
+    let read_u32 =
+        |offset: usize| unsafe { core::ptr::read_unaligned(base.add(offset) as *const u32) };
+    if read_u16(0) != 0x5a4d {
+        return KernelSections::EMPTY;
+    }
+    let pe_offset = read_u32(0x3c) as usize;
+    if read_u32(pe_offset) != 0x0000_4550 {
+        return KernelSections::EMPTY;
+    }
+    let number_of_sections = read_u16(pe_offset + 6) as usize;
+    let optional_header_size = read_u16(pe_offset + 20) as usize;
+    let section_table = pe_offset
+        .checked_add(24)
+        .and_then(|value| value.checked_add(optional_header_size));
+    let Some(mut section_table) = section_table else {
+        return KernelSections::EMPTY;
+    };
+    let mut result = KernelSections::EMPTY;
+    for _ in 0..number_of_sections {
+        let name = unsafe { core::slice::from_raw_parts(base.add(section_table), 8) };
+        let virtual_size = read_u32(section_table + 8) as u64;
+        let virtual_address = read_u32(section_table + 12) as u64;
+        let characteristics = read_u32(section_table + 36);
+        let Some(start) = image_base.checked_add(virtual_address) else {
+            break;
+        };
+        let Some(end) = start.checked_add(virtual_size) else {
+            break;
+        };
+        let section = KernelSection {
+            start: start & !(4096 - 1),
+            end: end.next_multiple_of(4096),
+        };
+        if name.starts_with(b".text") {
+            result.text = section;
+        } else if name.starts_with(b".rdata") || name.starts_with(b".rodata") {
+            result.rodata = section;
+        } else if name.starts_with(b".data") {
+            result.data = section;
+        } else if name.starts_with(b".bss") {
+            result.bss = section;
+        } else if characteristics & 0x2000_0000 != 0 && !result.text.is_present() {
+            result.text = section;
+        } else if characteristics & 0x8000_0000 != 0 && !result.data.is_present() {
+            result.data = section;
+        } else if characteristics & 0x4000_0000 != 0 && !result.rodata.is_present() {
+            result.rodata = section;
+        }
+        section_table = match section_table.checked_add(40) {
+            Some(value) => value,
+            None => break,
+        };
+    }
+    result
 }
 
 /// EFI memory descriptor layout shared by UEFI 2.x implementations.

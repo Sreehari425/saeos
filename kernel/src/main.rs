@@ -16,7 +16,9 @@ pub mod time;
 use arch::x86_64::acpi;
 use arch::x86_64::cpu;
 use arch::x86_64::interrupt_controller::ControllerKind;
-use boot::boot_info::{BootInfo, BootMode, DisplayMode};
+#[cfg(not(target_os = "uefi"))]
+use boot::boot_info::KernelSection;
+use boot::boot_info::{BootInfo, BootMode, DisplayMode, KernelSections};
 use core::panic::PanicInfo;
 use drivers::vga::Color;
 
@@ -24,6 +26,14 @@ use drivers::vga::Color;
 unsafe extern "C" {
     static _kernel_start: u8;
     static _kernel_end: u8;
+    static _text_start: u8;
+    static _text_end: u8;
+    static _rodata_start: u8;
+    static _rodata_end: u8;
+    static _data_start: u8;
+    static _data_end: u8;
+    static _bss_start: u8;
+    static _bss_end: u8;
 }
 
 #[cfg(not(target_os = "uefi"))]
@@ -34,9 +44,36 @@ fn kernel_physical_bounds() -> (u64, u64) {
     )
 }
 
+#[cfg(not(target_os = "uefi"))]
+fn kernel_sections() -> KernelSections {
+    KernelSections {
+        text: KernelSection {
+            start: (&raw const _text_start) as u64,
+            end: (&raw const _text_end) as u64,
+        },
+        rodata: KernelSection {
+            start: (&raw const _rodata_start) as u64,
+            end: (&raw const _rodata_end) as u64,
+        },
+        data: KernelSection {
+            start: (&raw const _data_start) as u64,
+            end: (&raw const _data_end) as u64,
+        },
+        bss: KernelSection {
+            start: (&raw const _bss_start) as u64,
+            end: (&raw const _bss_end) as u64,
+        },
+    }
+}
+
 #[cfg(target_os = "uefi")]
 const fn kernel_physical_bounds() -> (u64, u64) {
     (0, 0)
+}
+
+#[cfg(target_os = "uefi")]
+const fn kernel_sections() -> KernelSections {
+    KernelSections::EMPTY
 }
 
 /// BIOS entrypoint called from `boot.asm` with the Multiboot 1 info pointer.
@@ -57,6 +94,7 @@ pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
         memory_map,
         kernel_physical_start,
         kernel_physical_end,
+        kernel_sections: kernel_sections(),
         rsdp_addr: acpi::find_rsdp_bios(),
         memory_map_descriptor_count: memory_map.count,
         memory_map_discarded: 0,
