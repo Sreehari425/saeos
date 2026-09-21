@@ -175,7 +175,35 @@ fn heap_test() -> (&'static str, Status) {
     drop(text);
     drop(values);
     drop(boxed);
-    if passed && crate::mm::heap::validate() {
+    let large_layout = match Layout::from_size_align(8193, 8192) {
+        Ok(layout) => layout,
+        Err(_) => return ("heap large layout construction", Status::Fail),
+    };
+    let first = unsafe { alloc(large_layout) };
+    let second = unsafe { alloc(large_layout) };
+    let large_ok = !first.is_null()
+        && !second.is_null()
+        && (first as usize).is_multiple_of(4096)
+        && (second as usize).is_multiple_of(4096)
+        && first != second;
+    if !first.is_null() {
+        unsafe { first.write_bytes(0xa5, large_layout.size()) };
+    }
+    if !second.is_null() {
+        unsafe { second.write_bytes(0x5a, large_layout.size()) };
+    }
+    if !first.is_null() {
+        unsafe { alloc::alloc::dealloc(first, large_layout) };
+    }
+    if !second.is_null() {
+        unsafe { alloc::alloc::dealloc(second, large_layout) };
+    }
+    let reused = unsafe { alloc(large_layout) };
+    let reused_ok = !reused.is_null() && (reused as usize).is_multiple_of(4096);
+    if !reused.is_null() {
+        unsafe { alloc::alloc::dealloc(reused, large_layout) };
+    }
+    if passed && large_ok && reused_ok && crate::mm::heap::validate() {
         ("heap Box, Vec, and formatted string", Status::Pass)
     } else {
         crate::serial_println!(

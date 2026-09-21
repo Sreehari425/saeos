@@ -18,3 +18,27 @@ type = "bool"
 default = false
 feature = "paging-debug"
 help = "Dump final kernel page mappings and section permissions over serial."
+
+[[option]]
+id = "stress"
+name = "MM stress tests"
+type = "bool"
+default = false
+feature = "mm-stress"
+help = "Run repeated allocator, heap, and address-space stress checks during boot."
+
+[[option]]
+id = "lock_debug"
+name = "MM lock diagnostics"
+type = "bool"
+default = false
+feature = "mm-lock-debug"
+help = "Enable lock-order and interrupt-safe MM locking diagnostics."
+
+[[option]]
+id = "allocator_stats"
+name = "Allocator statistics"
+type = "bool"
+default = false
+feature = "mm-allocator-stats"
+help = "Report physical and heap allocator statistics during boot."

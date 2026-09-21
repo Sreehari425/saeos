@@ -6,6 +6,10 @@ tsc = true
 
 [kernel.mm]
 selftest = false
+paging_debug = false
+stress = false
+lock_debug = false
+allocator_stats = false
 
 [kernel.drivers]
 serial = true

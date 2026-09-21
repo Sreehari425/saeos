@@ -1,22 +1,113 @@
 //! Kernel-owned page tables. Table pages are ordinary physical frames.
 use super::frame::{self, PAGE_SIZE, PhysAddr, PhysFrame, VirtAddr};
 use crate::boot::boot_info::KernelSections;
+use crate::sync::IrqSpinMutex;
+use alloc::vec::Vec;
 
 pub const KERNEL_VIRT_BASE: u64 = 0xffff_8000_0000_0000;
-const PRESENT: u64 = 1;
-const WRITABLE: u64 = 1 << 1;
-const USER: u64 = 1 << 2;
-const HUGE: u64 = 1 << 7;
-const GIGABYTE: u64 = 1 << 30;
-const TWO_MIB: u64 = 1 << 21;
-const NO_EXECUTE: u64 = 1 << 63;
-const PWT: u64 = 1 << 3;
-const PCD: u64 = 1 << 4;
+pub const PRESENT: u64 = 1;
+pub const WRITABLE: u64 = 1 << 1;
+pub const USER: u64 = 1 << 2;
+pub const HUGE: u64 = 1 << 7;
+pub const GIGABYTE: u64 = 1 << 30;
+pub const TWO_MIB: u64 = 1 << 21;
+pub const NO_EXECUTE: u64 = 1 << 63;
+pub const PWT: u64 = 1 << 3;
+pub const PCD: u64 = 1 << 4;
+pub const PHYS_MASK_4K: u64 = 0x000f_ffff_ffff_f000;
+pub const PHYS_MASK_2M: u64 = 0x000f_ffff_ffe0_0000;
+pub const PHYS_MASK_1G: u64 = 0x000f_ffff_c000_0000;
+const PAT: u64 = 1 << 12;
+const PAT_4K: u64 = 1 << 7;
 const LEAF_ATTRIBUTES: u64 = PRESENT | WRITABLE | USER | PWT | PCD | NO_EXECUTE;
-const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+const ADDRESS_MASK: u64 = PHYS_MASK_4K;
 // PML4 slots 256..511 occupy the canonical upper-half window: 128 TiB.
 const DIRECT_MAP_LIMIT: u64 = 1 << 47;
 const IDENTITY_MAP_LIMIT: u64 = 1 << 47;
+
+/// TLB invalidation hooks used by address-space mutation. Inactive roots use
+/// the no-op path; the scheduler can later install shootdown behavior here.
+pub trait TlbInvalidation {
+    fn invalidate_page(&self, address: VirtAddr);
+    fn flush_address_space(&self, root: PhysFrame);
+}
+
+pub struct LocalTlb;
+impl TlbInvalidation for LocalTlb {
+    fn invalidate_page(&self, address: VirtAddr) {
+        invalidate_page(address);
+    }
+    fn flush_address_space(&self, root: PhysFrame) {
+        flush_address_space(root);
+    }
+}
+
+pub fn invalidate_page(address: VirtAddr) {
+    if unsafe { ACTIVE } {
+        unsafe {
+            core::arch::asm!("invlpg [{}]", in(reg) address.0, options(nostack, preserves_flags));
+        }
+    }
+}
+
+pub fn flush_current() {
+    if unsafe { ACTIVE } {
+        let root: u64;
+        unsafe {
+            core::arch::asm!("mov {}, cr3", out(reg) root, options(nostack, preserves_flags));
+            core::arch::asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags));
+        }
+    }
+}
+
+/// Flush `root` only when it is the currently loaded address space. This is
+/// deliberately a no-op for inactive roots; a scheduler can later replace
+/// this with an SMP shootdown implementation.
+pub fn flush_address_space(root: PhysFrame) {
+    if unsafe { ACTIVE } && page_table_frame() == root {
+        flush_current();
+    }
+}
+
+#[inline]
+pub const fn extract_1g_address(entry: u64) -> u64 {
+    entry & PHYS_MASK_1G
+}
+#[inline]
+pub const fn extract_2m_address(entry: u64) -> u64 {
+    entry & PHYS_MASK_2M
+}
+#[inline]
+pub const fn extract_4k_address(entry: u64) -> u64 {
+    entry & PHYS_MASK_4K
+}
+
+/// Translate PAT when splitting a 1 GiB leaf into 2 MiB leaves.
+#[inline]
+pub const fn pat_1g_to_2m(entry: u64) -> u64 {
+    entry & PAT
+}
+
+/// Translate PAT when splitting a 2 MiB leaf into 4 KiB leaves.
+#[inline]
+pub const fn pat_2m_to_4k(entry: u64) -> u64 {
+    if entry & PAT != 0 { PAT_4K } else { 0 }
+}
+
+#[inline]
+pub const fn inherited_leaf_flags(entry: u64, to_4k: bool) -> u64 {
+    (entry & LEAF_ATTRIBUTES)
+        | if to_4k {
+            pat_2m_to_4k(entry)
+        } else {
+            pat_1g_to_2m(entry)
+        }
+}
+
+#[inline]
+pub const fn valid_wx(flags: u64) -> bool {
+    !(flags & WRITABLE != 0 && flags & NO_EXECUTE == 0)
+}
 
 #[repr(C, align(4096))]
 #[derive(Clone, Copy)]
@@ -29,6 +120,8 @@ static mut BOOTSTRAP_PML4: PageTable = PageTable([0; 512]);
 static mut BOOTSTRAP_PDPT: PageTable = PageTable([0; 512]);
 // UEFI may relocate the loaded image above 4 GiB while the final tables are
 // being built. Cover that image in the temporary identity map.
+// The temporary identity window covers the boot-reserved allocator metadata
+// before the final direct map is installed. Each entry covers 1 GiB.
 const BOOTSTRAP_PD_COUNT: usize = 16;
 static mut BOOTSTRAP_PD: [PageTable; BOOTSTRAP_PD_COUNT] =
     [PageTable([0; 512]); BOOTSTRAP_PD_COUNT];
@@ -42,20 +135,36 @@ impl PageFlags {
     pub const READ_ONLY: Self = Self(PRESENT | NO_EXECUTE);
     pub const WRITABLE: Self = Self(PRESENT | WRITABLE | NO_EXECUTE);
     pub const MMIO: Self = Self(PRESENT | WRITABLE | NO_EXECUTE);
+    pub const USER_READ: Self = Self(PRESENT | USER | NO_EXECUTE);
+    pub const USER_READ_WRITE: Self = Self(PRESENT | USER | WRITABLE | NO_EXECUTE);
+    pub const USER_READ_EXECUTE: Self = Self(PRESENT | USER);
+
+    pub const fn with_cache(self, write_through: bool, cache_disable: bool) -> Self {
+        Self(self.0 | if write_through { PWT } else { 0 } | if cache_disable { PCD } else { 0 })
+    }
+    pub const fn is_writable(self) -> bool {
+        self.0 & WRITABLE != 0
+    }
+    pub const fn is_user(self) -> bool {
+        self.0 & USER != 0
+    }
+    pub const fn is_executable(self) -> bool {
+        self.0 & NO_EXECUTE == 0
+    }
 }
 
 /// Permissions understood by the kernel's future process/address-space
 /// layer. These are intentionally not a public userspace ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct UserPageFlags(u8);
+pub struct UserPageFlags(u8);
 
 impl UserPageFlags {
-    pub(crate) const USER_READ: Self = Self(1 << 0);
-    pub(crate) const USER_WRITE: Self = Self(1 << 1);
-    pub(crate) const USER_EXECUTE: Self = Self(1 << 2);
-    pub(crate) const USER_NO_EXECUTE: Self = Self(1 << 3);
+    pub const USER_READ: Self = Self(1 << 0);
+    pub const USER_WRITE: Self = Self(1 << 1);
+    pub const USER_EXECUTE: Self = Self(1 << 2);
+    pub const USER_NO_EXECUTE: Self = Self(1 << 3);
 
-    pub(crate) const fn union(self, other: Self) -> Self {
+    pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
@@ -83,7 +192,7 @@ impl UserPageFlags {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AddressSpaceError {
+pub enum AddressSpaceError {
     OutOfFrames,
     Unaligned,
     Noncanonical,
@@ -92,12 +201,38 @@ pub(crate) enum AddressSpaceError {
     AlreadyMapped,
     NotMapped,
     HugePage,
+    InvalidPhysicalAddress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MappingOwnership {
+    Borrowed,
+    Owned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnmappedMapping {
+    pub frame: PhysFrame,
+    pub ownership: MappingOwnership,
+    pub permissions: PageFlags,
+    pub cache_attributes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OwnedMapping {
+    virtual_address: VirtAddr,
+    frame: PhysFrame,
+}
+
+struct AddressSpaceState {
+    owned: Vec<OwnedMapping>,
 }
 
 /// A page-table root for a future process. Kernel higher-half entries are
 /// shared, while all lower-half entries belong exclusively to this root.
-pub(crate) struct AddressSpace {
+pub struct AddressSpace {
     root: PhysFrame,
+    state: IrqSpinMutex<AddressSpaceState>,
 }
 
 impl Drop for AddressSpace {
@@ -113,12 +248,19 @@ impl Drop for AddressSpace {
                 }
             }
         }
+        let owned = {
+            let mut state = self.state.lock();
+            core::mem::take(&mut state.owned)
+        };
+        for mapping in owned.iter() {
+            frame::free_frame(mapping.frame);
+        }
         frame::free_frame(self.root);
     }
 }
 
 impl AddressSpace {
-    pub(crate) fn new() -> Result<Self, AddressSpaceError> {
+    pub fn new() -> Result<Self, AddressSpaceError> {
         let root = alloc_table().ok_or(AddressSpaceError::OutOfFrames)?;
         unsafe {
             let new_root = &mut *table_ptr(root);
@@ -127,49 +269,128 @@ impl AddressSpace {
                 new_root.0[index] = (*kernel_root).0[index];
             }
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            state: IrqSpinMutex::new(AddressSpaceState { owned: Vec::new() }),
+        })
     }
 
-    pub(crate) fn root_frame(&self) -> PhysFrame {
+    pub fn root_frame(&self) -> PhysFrame {
         self.root
     }
 
-    pub(crate) fn map_user_page(
-        &mut self,
+    /// Explicitly tear down the private address space. `Drop` performs the
+    /// same cleanup for callers that rely on RAII.
+    pub fn destroy(self) -> Result<(), AddressSpaceError> {
+        drop(self);
+        Ok(())
+    }
+
+    pub fn map(
+        &self,
+        virtual_address: VirtAddr,
+        physical_frame: PhysFrame,
+        flags: PageFlags,
+    ) -> Result<(), AddressSpaceError> {
+        let _guard = self.state.lock();
+        validate_user_mapping(virtual_address, physical_frame, flags)?;
+        let result =
+            unsafe { map_page_in_root(self.root, virtual_address, physical_frame, flags.0) };
+        if result.is_ok() {
+            invalidate_page(virtual_address);
+        }
+        result
+    }
+
+    pub fn map_owned(
+        &self,
+        virtual_address: VirtAddr,
+        physical_frame: PhysFrame,
+        flags: PageFlags,
+    ) -> Result<(), AddressSpaceError> {
+        {
+            let mut state = self.state.lock();
+            state
+                .owned
+                .try_reserve(1)
+                .map_err(|_| AddressSpaceError::OutOfFrames)?;
+        }
+        self.map(virtual_address, physical_frame, flags)?;
+        let mut state = self.state.lock();
+        state.owned.push(OwnedMapping {
+            virtual_address,
+            frame: physical_frame,
+        });
+        Ok(())
+    }
+
+    pub fn unmap_mapping(
+        &self,
+        virtual_address: VirtAddr,
+    ) -> Result<UnmappedMapping, AddressSpaceError> {
+        let (frame, entry) = {
+            let _guard = self.state.lock();
+            let entry = self.page_entry_inner(virtual_address)?;
+            let frame = unsafe { unmap_page_in_root(self.root, virtual_address) }?;
+            (frame, entry)
+        };
+        invalidate_page(virtual_address);
+        let ownership = self.remove_owned(virtual_address, frame);
+        Ok(UnmappedMapping {
+            frame,
+            ownership,
+            permissions: PageFlags(entry & !ADDRESS_MASK),
+            cache_attributes: entry & (PWT | PCD),
+        })
+    }
+
+    fn remove_owned(&self, virtual_address: VirtAddr, frame: PhysFrame) -> MappingOwnership {
+        let mut state = self.state.lock();
+        if let Some(index) = state
+            .owned
+            .iter()
+            .position(|mapping| mapping.virtual_address == virtual_address)
+        {
+            let mapping = state.owned.swap_remove(index);
+            return if mapping.frame == frame {
+                MappingOwnership::Owned
+            } else {
+                MappingOwnership::Borrowed
+            };
+        }
+        MappingOwnership::Borrowed
+    }
+
+    pub fn map_user_page(
+        &self,
         virtual_address: VirtAddr,
         physical_frame: PhysFrame,
         flags: UserPageFlags,
     ) -> Result<(), AddressSpaceError> {
-        if virtual_address.0 & (PAGE_SIZE - 1) != 0 || physical_frame.0 & (PAGE_SIZE - 1) != 0 {
-            return Err(AddressSpaceError::Unaligned);
-        }
-        if virtual_address.0 >= (1 << 47) {
-            return if virtual_address.0 >= KERNEL_VIRT_BASE {
-                Err(AddressSpaceError::KernelAddress)
-            } else {
-                Err(AddressSpaceError::Noncanonical)
-            };
-        }
         if !flags.is_valid() {
             return Err(AddressSpaceError::InvalidFlags);
         }
-        unsafe { map_page_in_root(self.root, virtual_address, physical_frame, flags.hardware()) }
+        self.map(virtual_address, physical_frame, PageFlags(flags.hardware()))
     }
 
-    pub(crate) fn unmap_user_page(
-        &mut self,
+    pub fn unmap(&self, virtual_address: VirtAddr) -> Result<UnmappedMapping, AddressSpaceError> {
+        self.unmap_mapping(virtual_address)
+    }
+
+    pub fn unmap_user_page(
+        &self,
         virtual_address: VirtAddr,
     ) -> Result<PhysFrame, AddressSpaceError> {
-        if virtual_address.0 & (PAGE_SIZE - 1) != 0 {
-            return Err(AddressSpaceError::Unaligned);
-        }
-        if virtual_address.0 >= (1 << 47) {
-            return if virtual_address.0 >= KERNEL_VIRT_BASE {
-                Err(AddressSpaceError::KernelAddress)
-            } else {
-                Err(AddressSpaceError::Noncanonical)
-            };
-        }
+        self.unmap(virtual_address).map(|mapping| mapping.frame)
+    }
+
+    pub fn protect(
+        &mut self,
+        virtual_address: VirtAddr,
+        flags: PageFlags,
+    ) -> Result<(), AddressSpaceError> {
+        let _guard = self.state.lock();
+        validate_user_mapping(virtual_address, PhysFrame(0), flags)?;
         unsafe {
             let pml4 = &mut *table_ptr(self.root);
             let pdpt_entry = pml4.0[((virtual_address.0 >> 39) & 0x1ff) as usize];
@@ -199,13 +420,22 @@ impl AddressSpace {
             if *slot & PRESENT == 0 {
                 return Err(AddressSpaceError::NotMapped);
             }
-            let physical = PhysFrame(*slot & ADDRESS_MASK);
-            *slot = 0;
-            Ok(physical)
+            *slot = (*slot & ADDRESS_MASK) | flags.0;
+            invalidate_page(virtual_address);
+            Ok(())
         }
     }
 
-    pub(crate) fn page_entry(&self, virtual_address: VirtAddr) -> Result<u64, AddressSpaceError> {
+    pub fn query(&self, virtual_address: VirtAddr) -> Result<u64, AddressSpaceError> {
+        let _guard = self.state.lock();
+        self.page_entry_inner(virtual_address)
+    }
+
+    pub fn page_entry(&self, virtual_address: VirtAddr) -> Result<u64, AddressSpaceError> {
+        self.query(virtual_address)
+    }
+
+    fn page_entry_inner(&self, virtual_address: VirtAddr) -> Result<u64, AddressSpaceError> {
         if virtual_address.0 & (PAGE_SIZE - 1) != 0 {
             return Err(AddressSpaceError::Unaligned);
         }
@@ -229,6 +459,75 @@ impl AddressSpace {
             }
         }
     }
+}
+
+fn validate_user_mapping(
+    virtual_address: VirtAddr,
+    physical: PhysFrame,
+    flags: PageFlags,
+) -> Result<(), AddressSpaceError> {
+    if virtual_address.0 & (PAGE_SIZE - 1) != 0 || physical.0 & (PAGE_SIZE - 1) != 0 {
+        return Err(AddressSpaceError::Unaligned);
+    }
+    if virtual_address.0 >= (1 << 47) {
+        return if virtual_address.0 >= KERNEL_VIRT_BASE {
+            Err(AddressSpaceError::KernelAddress)
+        } else {
+            Err(AddressSpaceError::Noncanonical)
+        };
+    }
+    if !flags.is_user() {
+        return Err(AddressSpaceError::InvalidFlags);
+    }
+    if flags.is_writable() && flags.is_executable() {
+        return Err(AddressSpaceError::InvalidFlags);
+    }
+    Ok(())
+}
+
+unsafe fn unmap_page_in_root(
+    root: PhysFrame,
+    virtual_address: VirtAddr,
+) -> Result<PhysFrame, AddressSpaceError> {
+    validate_user_mapping(virtual_address, PhysFrame(0), PageFlags::USER_READ)?;
+    unsafe {
+        let pml4_index = ((virtual_address.0 >> 39) & 0x1ff) as usize;
+        let pdpt_index = ((virtual_address.0 >> 30) & 0x1ff) as usize;
+        let pd_index = ((virtual_address.0 >> 21) & 0x1ff) as usize;
+        let pml4 = &mut *table_ptr(root);
+        let pdpt_frame = PhysFrame(pml4.0[pml4_index] & ADDRESS_MASK);
+        let pdpt = table_from_entry(pml4.0[pml4_index])?;
+        let pd_frame = PhysFrame(pdpt.0[pdpt_index] & ADDRESS_MASK);
+        let pd = table_from_entry(pdpt.0[pdpt_index])?;
+        let pt_frame = PhysFrame(pd.0[pd_index] & ADDRESS_MASK);
+        let pt = table_from_entry(pd.0[pd_index])?;
+        let slot = &mut (*(pt as *const PageTable as *mut PageTable)).0
+            [((virtual_address.0 >> 12) & 0x1ff) as usize];
+        if *slot & PRESENT == 0 {
+            return Err(AddressSpaceError::NotMapped);
+        }
+        let physical = PhysFrame(*slot & ADDRESS_MASK);
+        *slot = 0;
+        if table_empty(pt) {
+            frame::free_frame(pt_frame);
+            let pd = &mut *table_ptr(pd_frame);
+            pd.0[pd_index] = 0;
+            if table_empty(pd) {
+                frame::free_frame(pd_frame);
+                let pdpt = &mut *table_ptr(pdpt_frame);
+                pdpt.0[pdpt_index] = 0;
+                if table_empty(pdpt) {
+                    frame::free_frame(pdpt_frame);
+                    pml4.0[pml4_index] = 0;
+                }
+            }
+        }
+        Ok(physical)
+    }
+}
+
+fn table_empty(table: &PageTable) -> bool {
+    table.0.iter().all(|entry| *entry & PRESENT == 0)
 }
 
 unsafe fn table_from_entry(entry: u64) -> Result<&'static PageTable, AddressSpaceError> {
@@ -299,31 +598,105 @@ fn child(table: *mut PageTable, index: usize) -> Option<&'static mut PageTable> 
     }
 }
 
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn map_page_in_root(
     root: PhysFrame,
     virtual_address: VirtAddr,
     physical: PhysFrame,
     flags: u64,
 ) -> Result<(), AddressSpaceError> {
+    let pml4_index = ((virtual_address.0 >> 39) & 0x1ff) as usize;
+    let pdpt_index = ((virtual_address.0 >> 30) & 0x1ff) as usize;
+    let pd_index = ((virtual_address.0 >> 21) & 0x1ff) as usize;
     let pml4 = unsafe { &mut *table_ptr(root) };
-    let pdpt = child(pml4, ((virtual_address.0 >> 39) & 0x1ff) as usize)
-        .ok_or(AddressSpaceError::OutOfFrames)?;
-    if pdpt.0[((virtual_address.0 >> 30) & 0x1ff) as usize] & HUGE != 0 {
+    let mut pml4_created = false;
+    let mut pdpt_created = false;
+    let mut pd_created = false;
+    if pml4.0[pml4_index] & PRESENT == 0 {
+        let frame = alloc_table().ok_or(AddressSpaceError::OutOfFrames)?;
+        pml4.0[pml4_index] = frame.0 | PRESENT | WRITABLE;
+        pml4_created = true;
+    }
+    let pdpt = &mut *table_ptr(PhysFrame(pml4.0[pml4_index] & ADDRESS_MASK));
+    if pdpt.0[pdpt_index] & HUGE != 0 {
+        rollback_tables(root, virtual_address, pml4_created, false, false);
         return Err(AddressSpaceError::HugePage);
     }
-    let pd = child(pdpt, ((virtual_address.0 >> 30) & 0x1ff) as usize)
-        .ok_or(AddressSpaceError::OutOfFrames)?;
-    if pd.0[((virtual_address.0 >> 21) & 0x1ff) as usize] & HUGE != 0 {
+    if pdpt.0[pdpt_index] & PRESENT == 0 {
+        let frame = match alloc_table() {
+            Some(frame) => frame,
+            None => {
+                rollback_tables(root, virtual_address, pml4_created, false, false);
+                return Err(AddressSpaceError::OutOfFrames);
+            }
+        };
+        pdpt.0[pdpt_index] = frame.0 | PRESENT | WRITABLE;
+        pdpt_created = true;
+    }
+    let pd = &mut *table_ptr(PhysFrame(pdpt.0[pdpt_index] & ADDRESS_MASK));
+    if pd.0[pd_index] & HUGE != 0 {
+        rollback_tables(root, virtual_address, pml4_created, pdpt_created, false);
         return Err(AddressSpaceError::HugePage);
     }
-    let pt = child(pd, ((virtual_address.0 >> 21) & 0x1ff) as usize)
-        .ok_or(AddressSpaceError::OutOfFrames)?;
-    let slot = &mut pt.0[((virtual_address.0 >> 12) & 0x1ff) as usize];
-    if *slot & PRESENT != 0 {
+    if pd.0[pd_index] & PRESENT == 0 {
+        let frame = match alloc_table() {
+            Some(frame) => frame,
+            None => {
+                rollback_tables(root, virtual_address, pml4_created, pdpt_created, false);
+                return Err(AddressSpaceError::OutOfFrames);
+            }
+        };
+        pd.0[pd_index] = frame.0 | PRESENT | WRITABLE;
+        pd_created = true;
+    }
+    let pt = &mut *table_ptr(PhysFrame(pd.0[pd_index] & ADDRESS_MASK));
+    if pt.0[((virtual_address.0 >> 12) & 0x1ff) as usize] & PRESENT != 0 {
+        rollback_tables(
+            root,
+            virtual_address,
+            pml4_created,
+            pdpt_created,
+            pd_created,
+        );
         return Err(AddressSpaceError::AlreadyMapped);
     }
+    let slot = &mut pt.0[((virtual_address.0 >> 12) & 0x1ff) as usize];
     *slot = physical.0 | flags;
     Ok(())
+}
+
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn rollback_tables(
+    root: PhysFrame,
+    virtual_address: VirtAddr,
+    pml4_created: bool,
+    pdpt_created: bool,
+    pd_created: bool,
+) {
+    let pml4_index = ((virtual_address.0 >> 39) & 0x1ff) as usize;
+    let pdpt_index = ((virtual_address.0 >> 30) & 0x1ff) as usize;
+    let pd_index = ((virtual_address.0 >> 21) & 0x1ff) as usize;
+    let pml4 = &mut *table_ptr(root);
+    if pd_created {
+        let pdpt = &mut *table_ptr(PhysFrame(pml4.0[pml4_index] & ADDRESS_MASK));
+        let pd = &mut *table_ptr(PhysFrame(pdpt.0[pdpt_index] & ADDRESS_MASK));
+        let frame = PhysFrame(pd.0[pd_index] & ADDRESS_MASK);
+        pd.0[pd_index] = 0;
+        frame::free_frame(frame);
+    }
+    if pdpt_created {
+        let pdpt = &mut *table_ptr(PhysFrame(pml4.0[pml4_index] & ADDRESS_MASK));
+        let frame = PhysFrame(pdpt.0[pdpt_index] & ADDRESS_MASK);
+        pdpt.0[pdpt_index] = 0;
+        frame::free_frame(frame);
+    }
+    if pml4_created {
+        let frame = PhysFrame(pml4.0[pml4_index] & ADDRESS_MASK);
+        frame::free_frame(frame);
+    }
+    if pml4_created {
+        pml4.0[pml4_index] = 0;
+    }
 }
 
 unsafe fn load_cr3(root: *const PageTable) {
@@ -685,11 +1058,12 @@ pub fn map_page(
     let pd_index = ((normalized >> 21) & 0x1ff) as usize;
     let pt_index = ((normalized >> 12) & 0x1ff) as usize;
     unsafe {
-        let pdpt = child(&raw mut PML4, pml4_index).ok_or("out of page-table frames")?;
+        let pdpt =
+            child(table_ptr(page_table_frame()), pml4_index).ok_or("out of page-table frames")?;
         if pdpt.0[pdpt_index] & HUGE != 0 {
             let old_entry = pdpt.0[pdpt_index];
-            let old = old_entry & 0x000f_ffff_c000_0000;
-            let inherited = old_entry & LEAF_ATTRIBUTES;
+            let old = extract_1g_address(old_entry);
+            let inherited = inherited_leaf_flags(old_entry, false);
             let pd_frame = alloc_table().ok_or("out of page-table frames")?;
             let pd = &mut *table_ptr(pd_frame);
             for i in 0..512 {
@@ -700,8 +1074,9 @@ pub fn map_page(
         let pd = child(pdpt as *mut PageTable, pdpt_index).ok_or("out of page-table frames")?;
         if pd.0[pd_index] & HUGE != 0 {
             let old_entry = pd.0[pd_index];
-            let old = old_entry & 0x000f_ffff_ffe0_0000;
-            let inherited = old_entry & LEAF_ATTRIBUTES;
+            let old = extract_2m_address(old_entry);
+            // PAT occupies bit 12 in a 2 MiB leaf and bit 7 in a 4 KiB leaf.
+            let inherited = inherited_leaf_flags(old_entry, true);
             let pt_frame = alloc_table().ok_or("out of page-table frames")?;
             let pt = &mut *table_ptr(pt_frame);
             for i in 0..512 {
@@ -715,11 +1090,42 @@ pub fn map_page(
     Ok(())
 }
 
+/// Remove a kernel page from the active root and return its physical frame.
+/// This is used by the page-backed heap; user mappings use `AddressSpace`.
+pub fn unmap_page(virtual_address: VirtAddr) -> Result<PhysAddr, &'static str> {
+    if virtual_address.0 & (PAGE_SIZE - 1) != 0 || virtual_address.0 < KERNEL_VIRT_BASE {
+        return Err("invalid kernel page address");
+    }
+    let normalized = virtual_address.0 - KERNEL_VIRT_BASE;
+    if normalized >= DIRECT_MAP_LIMIT {
+        return Err("address outside direct map window");
+    }
+    let pml4_index = pml4_index(normalized, true).ok_or("noncanonical address")?;
+    let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
+    let pd_index = ((normalized >> 21) & 0x1ff) as usize;
+    let pt_index = ((normalized >> 12) & 0x1ff) as usize;
+    unsafe {
+        let pml4 = &mut *table_ptr(PhysFrame((&raw const PML4) as u64));
+        let pdpt = table_from_entry(pml4.0[pml4_index]).map_err(|_| "page not mapped")?;
+        let pd = table_from_entry(pdpt.0[pdpt_index]).map_err(|_| "page not mapped")?;
+        let pt = table_from_entry(pd.0[pd_index]).map_err(|_| "page not mapped")?;
+        let slot = &mut (*(pt as *const PageTable as *mut PageTable)).0[pt_index];
+        if *slot & PRESENT == 0 || *slot & HUGE != 0 {
+            return Err("page not mapped");
+        }
+        let physical = PhysAddr(*slot & PHYS_MASK_4K);
+        *slot = 0;
+        invalidate_page(virtual_address);
+        Ok(physical)
+    }
+}
+
 pub fn activate() {
     unsafe {
         core::arch::asm!("mov cr3, {}", in(reg) (&raw const PML4) as u64, options(nostack, preserves_flags));
         ACTIVE = true;
     }
+    frame::activate_metadata();
 }
 
 #[cfg(feature = "paging-debug")]
@@ -753,7 +1159,7 @@ unsafe fn inspect_mapping(virtual_address: u64) -> Option<MappingInfo> {
     }
     if pdpt_entry & HUGE != 0 {
         return Some(MappingInfo {
-            physical: (pdpt_entry & 0x000f_ffff_c000_0000) + (normalized & (GIGABYTE - 1)),
+            physical: extract_1g_address(pdpt_entry) + (normalized & (GIGABYTE - 1)),
             size: GIGABYTE,
             flags: pdpt_entry,
         });
@@ -766,7 +1172,7 @@ unsafe fn inspect_mapping(virtual_address: u64) -> Option<MappingInfo> {
     }
     if pd_entry & HUGE != 0 {
         return Some(MappingInfo {
-            physical: (pd_entry & 0x000f_ffff_ffe0_0000) + (normalized & (TWO_MIB - 1)),
+            physical: extract_2m_address(pd_entry) + (normalized & (TWO_MIB - 1)),
             size: TWO_MIB,
             flags: pd_entry,
         });

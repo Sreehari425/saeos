@@ -152,6 +152,17 @@ pub fn execute(cmd: &str) {
                     "Selftest: {} passed, {} failed, {} skipped.",
                     report.passed, report.failed, report.skipped
                 );
+                #[cfg(feature = "mm-stress")]
+                for iteration in 0..8 {
+                    let stress = selftest::run();
+                    println!(
+                        "MM stress {}: {} passed, {} failed, {} skipped.",
+                        iteration + 1,
+                        stress.passed,
+                        stress.failed,
+                        stress.skipped
+                    );
+                }
             }
             #[cfg(not(feature = "mm-selftest"))]
             println!("Memory self-test is disabled in this build.");

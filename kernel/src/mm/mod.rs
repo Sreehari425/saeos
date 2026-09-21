@@ -1,3 +1,4 @@
+pub mod allocator_model;
 pub mod frame;
 pub mod heap;
 pub mod mapping_model;
@@ -11,8 +12,14 @@ pub use frame::{
 pub use heap::{HEAP_SIZE, heap_phys_start, heap_start, heap_virt_start};
 pub use multiboot::MultibootInfo;
 
-pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) {
-    frame::init(boot_info.memory_map);
+pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) -> bool {
+    if let Err(error) = frame::init(boot_info.memory_map) {
+        crate::serial_println!(
+            "Memory: allocator metadata initialization failed: {:?}.",
+            error
+        );
+        return false;
+    }
     // These regions are never handed to a future mapper or heap.
     frame::reserve_range(
         PhysAddr(boot_info.kernel_physical_start),
@@ -20,6 +27,7 @@ pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) {
     );
     let heap_phys = heap_phys_start();
     frame::reserve_range(PhysAddr(heap_phys), PhysAddr(heap_phys + HEAP_SIZE as u64));
+    true
 }
 
 pub fn init_paging() {
@@ -42,7 +50,12 @@ pub fn init_heap() {
 }
 
 pub fn init(boot_info: &crate::boot::BootInfo) {
-    init_boot_memory(boot_info);
+    if !init_boot_memory(boot_info) {
+        crate::arch::x86_64::cpu::cli();
+        loop {
+            crate::arch::x86_64::cpu::hlt();
+        }
+    }
     crate::serial_println!(
         "Memory: kernel range {:#x}..{:#x}; heap range {:#x}..{:#x}.",
         boot_info.kernel_physical_start,
@@ -78,14 +91,19 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         frame::reserve_range(PhysAddr(rsdp & !4095), PhysAddr((rsdp & !4095) + 4096));
     }
     match boot_info.display {
-        crate::boot::DisplayMode::VgaText { buffer_addr } => frame::reserve_range(
-            PhysAddr(buffer_addr as u64),
-            PhysAddr(buffer_addr as u64 + 4000),
-        ),
-        crate::boot::DisplayMode::GopFramebuffer(info) => frame::reserve_range(
-            PhysAddr(info.base_addr),
-            PhysAddr(info.base_addr.saturating_add(info.size as u64)),
-        ),
+        crate::boot::DisplayMode::VgaText { buffer_addr } => {
+            let start = (buffer_addr as u64) & !(frame::PAGE_SIZE - 1);
+            let end = (buffer_addr as u64 + 4000).next_multiple_of(frame::PAGE_SIZE);
+            frame::reserve_range(PhysAddr(start), PhysAddr(end));
+        }
+        crate::boot::DisplayMode::GopFramebuffer(info) => {
+            let start = info.base_addr & !(frame::PAGE_SIZE - 1);
+            let end = info
+                .base_addr
+                .saturating_add(info.size as u64)
+                .next_multiple_of(frame::PAGE_SIZE);
+            frame::reserve_range(PhysAddr(start), PhysAddr(end));
+        }
     };
     activate_higher_half();
     #[cfg(feature = "paging-debug")]
@@ -119,6 +137,29 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         frame::free_frame(frame);
     }
     init_heap();
+    #[cfg(feature = "mm-stress")]
+    {
+        let report = selftest::run();
+        crate::serial_println!(
+            "Memory: boot MM stress report: {} passed, {} failed, {} skipped.",
+            report.passed,
+            report.failed,
+            report.skipped
+        );
+    }
+    #[cfg(feature = "mm-allocator-stats")]
+    {
+        let stats = frame::stats();
+        crate::serial_println!(
+            "Memory: frames total={} usable={} allocated={} reserved={} free={} largest={}",
+            stats.total_frames,
+            stats.usable_frames,
+            stats.allocated_frames,
+            stats.reserved_frames,
+            stats.free_frames,
+            stats.largest_contiguous_block
+        );
+    }
     crate::serial_println!(
         "Memory: {} MiB usable, highest physical {:#x}; direct map active at {:#x}.",
         boot_info.total_memory_mb(),
@@ -166,7 +207,7 @@ fn memory_self_check(boot_info: &crate::boot::BootInfo) {
     }
 
     if let Some(frame) = frame::alloc_frame() {
-        let mut address_space = match paging::AddressSpace::new() {
+        let address_space = match paging::AddressSpace::new() {
             Ok(space) => space,
             Err(error) => {
                 crate::serial_println!("Memory: address-space self-check unavailable: {:?}", error);

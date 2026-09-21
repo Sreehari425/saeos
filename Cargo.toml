@@ -2,9 +2,9 @@
 resolver = "3"
 members = [
     "kernel",
+    "tools/mm-model",
     "tools/ratconf",
 ]
 
 [workspace.package]
 edition = "2024"
-

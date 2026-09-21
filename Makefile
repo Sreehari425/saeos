@@ -7,7 +7,7 @@ FEATURES = $(shell if [ -f .config ]; then cargo run --quiet -p ratconf -- featu
 FEATURE_ARGS = $(if $(FEATURES),--features $(FEATURES),)
 
 .PHONY: all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test mm-stress mm-stress-uefi help
 
 all: bios
 
@@ -51,6 +51,17 @@ check: olddefconfig
 	cargo check -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
 	cargo check -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
 	cargo check -p ratconf
+
+mm-test:
+	cargo test -p mm-model
+
+mm-stress:
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features serial,mm-selftest,mm-stress,mm-allocator-stats,paging-debug
+	./scripts/run-mm-stress.sh ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -m 16G -display none
+
+mm-stress-uefi:
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features serial,mm-selftest,mm-stress,mm-allocator-stats,paging-debug
+	./scripts/run-mm-stress.sh ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -m 16G -display none
 
 fmt-check:
 	cargo fmt --all -- --check
