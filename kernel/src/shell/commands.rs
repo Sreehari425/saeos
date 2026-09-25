@@ -15,6 +15,8 @@ use crate::mm::paging;
 use crate::mm::selftest::{self, Status};
 use crate::mm::{HEAP_SIZE, heap_start};
 use crate::println;
+use crate::scheduler;
+use crate::task::TaskState;
 use crate::time;
 
 pub fn execute(cmd: &str) {
@@ -27,14 +29,91 @@ pub fn execute(cmd: &str) {
             println!("  apic    - Display APIC & interrupt controller status");
             println!("  mem     - Test Kernel Heap & in-tree trait-driven Collections");
             println!("  selftest - Run live memory and heap diagnostics");
+            println!("  schedtest - Run the opt-in scheduler runtime test");
             println!("  uptime  - Show monotonic milliseconds since boot");
             println!("  date    - Show the CMOS wall-clock time");
             println!("  tsc     - Display Time Stamp Counter (TSC) & calibration info");
+            println!("  tasks   - List scheduler tasks and EEVDF state");
+            println!("  current - Show the current task and timer tick");
+            println!("  sched   - Show scheduler counters");
+            println!("  runqueue - Show runnable task IDs");
+            println!("  sleepers - Show sleeping task deadlines");
+            println!("  waitqueues - Show wait-queue diagnostics");
+            println!("  processes - Show PCB ownership");
             println!("  sleep N - Sleep for N seconds");
             println!("  <text>  - Echoes your input back to the screen");
         }
         "clear" => {
             console::clear_screen();
+        }
+        "tasks" => {
+            console::set_color(Color::LightCyan, Color::Black);
+            println!("--- Scheduler Tasks ---");
+            for task in scheduler::snapshots() {
+                let state = match task.state {
+                    TaskState::New => "new",
+                    TaskState::Ready => "ready",
+                    TaskState::Running => "running",
+                    TaskState::Blocked => "blocked",
+                    TaskState::Exited => "exited",
+                };
+                println!(
+                    "task={} name={} process={:?} state={} block={:?} vruntime={} deadline={} eligible={} lag={} enqueued={} exec={} addr={:?} resume={:?}{}",
+                    task.task_id.0,
+                    task.name,
+                    task.process_id.map(|process| process.0),
+                    state,
+                    task.block_reason,
+                    task.virtual_runtime,
+                    task.virtual_deadline,
+                    task.eligible,
+                    task.lag,
+                    task.enqueue_time,
+                    task.exec_runtime,
+                    task.address_space,
+                    task.resume_kind,
+                    if task.is_idle { " idle" } else { "" }
+                );
+            }
+        }
+        "current" => {
+            println!("current={:?} tick={}", scheduler::current(), time::ticks());
+        }
+        "sched" => {
+            let stats = scheduler::stats();
+            println!(
+                "tick={} switches={} timer_preemptions={} voluntary_yields={} woken={} reaped={} cr3_changes={}",
+                time::ticks(),
+                stats.context_switches,
+                stats.timer_preemptions,
+                stats.voluntary_yields,
+                stats.tasks_woken,
+                stats.tasks_reaped,
+                crate::mm::address_space::activation_count()
+            );
+        }
+        "runqueue" => {
+            println!("runqueue={:?}", scheduler::run_queue_snapshot());
+        }
+        "sleepers" => {
+            println!("sleepers={:?}", scheduler::sleepers_snapshot());
+        }
+        "waitqueues" => {
+            for (id, waiting) in scheduler::waitqueue_snapshots() {
+                println!("waitqueue={} waiting={}", id, waiting);
+            }
+        }
+        "processes" => {
+            for process in scheduler::process_snapshots() {
+                println!(
+                    "process={} threads={} children={} addr={:?} exit={:?}",
+                    process.id.0,
+                    process.thread_count,
+                    process.child_count,
+                    process.address_space,
+                    process.exit_status
+                );
+            }
         }
         "mem" | "alloc" => {
             console::set_color(Color::LightCyan, Color::Black);
@@ -167,6 +246,10 @@ pub fn execute(cmd: &str) {
             #[cfg(not(feature = "mm-selftest"))]
             println!("Memory self-test is disabled in this build.");
         }
+        "schedtest" => match scheduler::start_selftest() {
+            Ok(()) => println!("Scheduler runtime self-test started."),
+            Err(reason) => println!("Scheduler runtime self-test: {}.", reason),
+        },
         "uptime" => match time::uptime_ms() {
             Some(milliseconds) => println!("Uptime: {} ms.", milliseconds),
             None => println!("Monotonic clock is disabled in this build."),
@@ -185,8 +268,9 @@ pub fn execute(cmd: &str) {
                 Ok(seconds) => match seconds.checked_mul(1000) {
                     Some(milliseconds) => {
                         let started = time::uptime_ms();
-                        match time::sleep_ms(milliseconds) {
-                            Ok(()) => {
+                        if started.is_some() && scheduler::current().is_some() {
+                            scheduler::sleep_ms(milliseconds);
+                            {
                                 let elapsed = started
                                     .zip(time::uptime_ms())
                                     .map(|(start, end)| end.saturating_sub(start));
@@ -198,8 +282,12 @@ pub fn execute(cmd: &str) {
                                     None => println!("Slept for {} seconds.", seconds),
                                 }
                             }
-                            Err(time::SleepError::Disabled) => {
-                                println!("Monotonic clock is disabled in this build.")
+                        } else {
+                            match time::sleep_ms(milliseconds) {
+                                Ok(()) => println!("Slept for {} seconds.", seconds),
+                                Err(time::SleepError::Disabled) => {
+                                    println!("Monotonic clock is disabled in this build.")
+                                }
                             }
                         }
                     }

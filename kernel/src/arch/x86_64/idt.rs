@@ -1,6 +1,8 @@
 use crate::arch::x86_64::apic::lapic::SPURIOUS_INTERRUPT_VECTOR;
+use crate::arch::x86_64::context;
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::gdt;
+#[cfg(feature = "keyboard")]
 use crate::arch::x86_64::interrupt_controller;
 use crate::arch::x86_64::pic;
 #[cfg(feature = "keyboard")]
@@ -92,12 +94,16 @@ pub fn init() {
         IDT.entries[8]
             .set_handler_addr(double_fault_handler as *const () as u64)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-        IDT.entries[13].set_handler_addr(general_protection_fault_handler as *const () as u64);
-        IDT.entries[14].set_handler_addr(page_fault_handler as *const () as u64);
+        IDT.entries[13]
+            .set_handler_addr(general_protection_fault_handler as *const () as u64)
+            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+        IDT.entries[14]
+            .set_handler_addr(page_fault_handler as *const () as u64)
+            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
 
         // 2. Hardware Interrupts (Vectors 0x20 = 32, 0x21 = 33)
         IDT.entries[pic::PIC_1_OFFSET as usize]
-            .set_handler_addr(timer_interrupt_handler as *const () as u64);
+            .set_handler_addr(context::TIMER_INTERRUPT_ENTRY as *const () as u64);
         #[cfg(feature = "keyboard")]
         IDT.entries[(pic::PIC_1_OFFSET + 1) as usize]
             .set_handler_addr(keyboard_interrupt_handler as *const () as u64);
@@ -137,6 +143,12 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
         "[EXCEPTION: BREAKPOINT] RIP={:#x}",
         stack_frame.instruction_pointer
     );
+    // This kernel has no debugger breakpoint resume protocol. Returning from
+    // an unexpected INT3 can execute compiler padding or an adjacent function.
+    cpu::cli();
+    loop {
+        cpu::hlt();
+    }
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -166,9 +178,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         error_code, stack_frame
     );
     serial_println!(
-        "[EXCEPTION: GPF (err={:#x})] RIP={:#x}",
+        "[EXCEPTION: GPF (err={:#x})] RIP={:#x} current={:?}",
         error_code,
-        stack_frame.instruction_pointer
+        stack_frame.instruction_pointer,
+        crate::scheduler::current(),
     );
     loop {
         cpu::pause();
@@ -196,11 +209,6 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
 }
 
 // Hardware Interrupt Handlers
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    crate::time::on_timer_interrupt();
-    interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET);
-}
-
 #[cfg(feature = "keyboard")]
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let scancode = unsafe { cpu::inb(0x60) };

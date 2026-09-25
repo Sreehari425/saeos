@@ -1128,6 +1128,20 @@ pub fn activate() {
     frame::activate_metadata();
 }
 
+/// Load an externally owned address-space root. The address-space manager owns
+/// the root frame; this function only changes the active CPU page-table root.
+pub fn activate_root(root: PhysFrame) {
+    unsafe {
+        core::arch::asm!(
+            "mov cr3, {}",
+            in(reg) root.0,
+            options(nostack, preserves_flags)
+        );
+        ACTIVE = true;
+    }
+    frame::activate_metadata();
+}
+
 #[cfg(feature = "paging-debug")]
 #[derive(Clone, Copy)]
 struct MappingInfo {

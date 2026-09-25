@@ -1,3 +1,4 @@
+pub mod address_space;
 pub mod allocator_model;
 pub mod frame;
 pub mod heap;

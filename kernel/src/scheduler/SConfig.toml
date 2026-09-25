@@ -1,0 +1,20 @@
+[module]
+id = "kernel.scheduler"
+name = "Scheduler"
+description = "Kernel task scheduling, context switching, and scheduler validation."
+
+[[option]]
+id = "selftest"
+name = "Scheduler self-test workload"
+type = "bool"
+default = false
+feature = "scheduler-selftest"
+help = "Compile scheduler stress tasks and validation instrumentation; keep disabled until the live multi-task stack path is validated."
+
+[[option]]
+id = "debug"
+name = "Scheduler runtime diagnostics"
+type = "bool"
+default = false
+feature = "scheduler-debug"
+help = "Log scheduler dispatch, timer wake, and task exit events over serial."

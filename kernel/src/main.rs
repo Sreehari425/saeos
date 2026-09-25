@@ -9,8 +9,11 @@ pub mod boot;
 pub mod collections;
 pub mod drivers;
 pub mod mm;
+pub mod process;
+pub mod scheduler;
 pub mod shell;
 pub mod sync;
+pub mod task;
 pub mod time;
 
 use arch::x86_64::acpi;
@@ -240,11 +243,12 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     // 4. Initialize Keyboard Controller & Enable CPU Hardware Interrupts
     #[cfg(feature = "keyboard")]
     drivers::keyboard::init();
-    cpu::sti();
-    println!("[OK] CPU Interrupts enabled (sti).\n");
+    scheduler::init();
+    println!("[OK] Scheduler initialized; starting the first task.\n");
 
-    // 5. Start interactive Shell
-    shell::run();
+    // 5. Start the scheduler. The shell is now a kernel task and the idle
+    // task handles periods where no normal task is runnable.
+    scheduler::start_first_task();
 }
 
 #[panic_handler]

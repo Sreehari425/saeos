@@ -11,3 +11,9 @@ pub use model::*;
 mod heap_model;
 pub use heap_model::*;
 mod lock_model;
+#[path = "../../../kernel/src/task/mod.rs"]
+mod task;
+pub use task::*;
+#[path = "../../../kernel/src/process.rs"]
+mod process;
+pub use process::*;

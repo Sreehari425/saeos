@@ -9,6 +9,7 @@ pub mod apic_timer;
 #[cfg(feature = "tsc")]
 pub mod tsc;
 
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(all(feature = "pit", not(feature = "apic-timer")))]
@@ -25,6 +26,7 @@ pub const TICK_HZ: u32 = 1_000;
 const PIT_DIVISOR: u16 = (PIT_BASE_HZ / TICK_HZ) as u16;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+static NEED_RESCHEDULE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepError {
@@ -66,6 +68,21 @@ pub fn init() {
 
 pub fn on_timer_interrupt() {
     TICKS.fetch_add(1, Ordering::Relaxed);
+    NEED_RESCHEDULE.store(true, Ordering::Release);
+}
+
+pub fn ticks() -> u64 {
+    TICKS.load(Ordering::Acquire)
+}
+
+/// Set by the timer interrupt and consumed by the scheduler-safe interrupt
+/// exit path. The timer handler never takes the scheduler lock.
+pub fn take_reschedule_request() -> bool {
+    NEED_RESCHEDULE.swap(false, Ordering::AcqRel)
+}
+
+pub fn request_reschedule() {
+    NEED_RESCHEDULE.store(true, Ordering::Release);
 }
 
 pub fn uptime_ms() -> Option<u64> {

@@ -51,6 +51,10 @@ impl<T> IrqSpinMutex<T> {
         }
     }
 
+    pub fn is_locked(&self) -> bool {
+        self.lock.load(Ordering::Acquire)
+    }
+
     pub fn try_lock(&self) -> Option<IrqMutexGuard<'_, T>> {
         let interrupts_enabled = crate::arch::x86_64::cpu::interrupts_enabled();
         crate::arch::x86_64::cpu::cli();

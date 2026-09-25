@@ -21,6 +21,8 @@ pit = []
 rtc = []
 apic-timer = ["apic"]
 tsc = []
+scheduler-selftest = []
+scheduler-debug = []
 
 [[bin]]
 name = "saeos"
