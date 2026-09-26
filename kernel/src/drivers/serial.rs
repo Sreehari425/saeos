@@ -1,5 +1,5 @@
 use crate::arch::x86_64::cpu;
-use crate::sync::SpinMutex;
+use crate::sync::IrqSpinMutex;
 use core::fmt::{self, Write};
 
 const PORT_COM1: u16 = 0x3F8;
@@ -52,7 +52,10 @@ impl Write for SerialPort {
     }
 }
 
-pub static SERIAL1: SpinMutex<SerialPort> = SpinMutex::new(SerialPort::new(PORT_COM1));
+// Serial output can be requested by any task. Disable timer interrupts while a
+// caller owns the port so another task cannot preempt it and spin forever on
+// the same single-CPU lock.
+pub static SERIAL1: IrqSpinMutex<SerialPort> = IrqSpinMutex::new(SerialPort::new(PORT_COM1));
 
 pub fn init() {
     SERIAL1.lock().init();

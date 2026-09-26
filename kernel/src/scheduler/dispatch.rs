@@ -19,14 +19,25 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
             voluntary: 0,
         };
     }
-    let (dispatch, address_space, previous, selected, woken) = with_scheduler(|scheduler| {
+    let (dispatch, address_space) = with_scheduler(|scheduler| {
         let previous = scheduler.current();
-        let woken = scheduler.wake_expired(crate::time::ticks());
+        if let Some(current) = previous {
+            let stack = scheduler
+                .task(current)
+                .expect("current task disappeared")
+                .kernel_stack;
+            assert!(
+                stack_pointer >= stack.base && stack_pointer.saturating_add(18 * 8) <= stack.top,
+                "timer interrupt frame is outside the current task's kernel stack"
+            );
+        }
+        scheduler.wake_expired(crate::time::ticks());
         let next = scheduler.preempt(stack_pointer, 1);
         let task = scheduler.task(next).expect("selected task disappeared");
         let address_space = task.address_space;
         let resume_kind = task.resume_kind;
         let interrupt_stack_pointer = task.interrupt_stack_pointer;
+        let selected_stack = task.kernel_stack;
         let voluntary_context = &task.cpu_context as *const VoluntaryContext as u64;
         let dispatch = match resume_kind {
             ResumeKind::Interrupt => TimerDispatch {
@@ -38,6 +49,17 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
                 voluntary: 1,
             },
         };
+        let selected_context_valid = if dispatch.voluntary != 0 {
+            task.cpu_context.stack_pointer >= selected_stack.base
+                && task.cpu_context.stack_pointer <= selected_stack.top
+        } else {
+            dispatch.context_pointer >= selected_stack.base
+                && dispatch.context_pointer.saturating_add(18 * 8) <= selected_stack.top
+        };
+        assert!(
+            selected_context_valid,
+            "selected task resume context is outside its kernel stack"
+        );
         // The saved interrupt frame is one-shot. Once selected, it will be
         // consumed by iretq; a later scheduling point must save a fresh frame
         // or voluntary continuation before this task can be selected again.
@@ -47,14 +69,8 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
                 .expect("selected task disappeared")
                 .resume_kind = ResumeKind::Voluntary;
         }
-        (dispatch, address_space, previous, next, woken)
+        (dispatch, address_space)
     });
-    if woken > 0 {
-        scheduler_debug(format_args!(
-            "timer wake dispatch {:?} -> {:?}, woke {} task(s)",
-            previous, selected, woken
-        ));
-    }
     crate::mm::address_space::activate_if_changed(address_space)
         .expect("selected address space is not registered");
     dispatch
@@ -120,27 +136,12 @@ pub(super) fn switch_dispatch(dispatch: Dispatch, interrupts_were_enabled: bool)
             }
         },
         Dispatch::Interrupt(current, stack_pointer, address_space) => unsafe {
-            if context::save_context(&mut *current) {
-                if interrupts_were_enabled {
-                    cpu::sti();
-                }
-                return;
-            }
             crate::mm::address_space::activate_if_changed(address_space)
                 .expect("selected address space is not registered");
-            #[cfg(feature = "scheduler-debug")]
-            {
-                let frame = stack_pointer as *const u64;
-                scheduler_debug(format_args!(
-                    "iret handoff task={:?} frame={:#x} rip={:#x} cs={:#x} flags={:#x}",
-                    super::current(),
-                    stack_pointer,
-                    *frame.add(15),
-                    *frame.add(16),
-                    *frame.add(17),
-                ));
+            context::switch_to_interrupt_context(&mut *current, stack_pointer);
+            if interrupts_were_enabled {
+                cpu::sti();
             }
-            context::start_interrupt_context(stack_pointer)
         },
     }
 }
