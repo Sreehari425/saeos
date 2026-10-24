@@ -2,6 +2,9 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+mod alloc_counter;
+
 // Keep the host-tested model identical to the kernel's pure buddy/bitmap
 // model until the production allocator stress suite is moved into a library
 // target of its own.

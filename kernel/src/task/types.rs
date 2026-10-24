@@ -1,4 +1,7 @@
+/// Timer ticks (1 ms). Used for sleep deadlines.
 pub type Tick = u64;
+/// Nanoseconds of monotonic time. Used for CPU-time accounting and slices.
+pub type Nanos = u64;
 pub type VirtualTime = i128;
 pub type TaskEntry = fn() -> !;
 pub const DEFAULT_KERNEL_STACK_SIZE: usize = 64 * 1024;

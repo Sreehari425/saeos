@@ -8,7 +8,10 @@
 
 use crate::arch::x86_64::{cpu, interrupt_controller, qemu};
 use crate::mm::selftest::{self, Status};
+use crate::sync::IrqSpinMutex;
+use crate::task::{ExitStatus, WaitQueue};
 use crate::{drivers, scheduler, serial_println, time};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Upper bound for the scheduler self-test; it normally finishes in ~1 s.
 const SCHEDULER_TIMEOUT_MS: u64 = 30_000;
@@ -17,12 +20,16 @@ pub fn run() -> ! {
     serial_println!("boot-test: starting.");
     let mm_passed = memory_tests();
     let irq_passed = irq_lock_test();
+    let wait_passed = wait_event_test();
+    let idle_passed = idle_test();
     let scheduler_passed = scheduler_test();
-    let passed = mm_passed && irq_passed && scheduler_passed;
+    let passed = mm_passed && irq_passed && wait_passed && idle_passed && scheduler_passed;
     serial_println!(
-        "boot-test: memory={} irq-locks={} scheduler={} -> {}",
+        "boot-test: memory={} irq-locks={} wait-event={} idle={} scheduler={} -> {}",
         verdict(mm_passed),
         verdict(irq_passed),
+        verdict(wait_passed),
+        verdict(idle_passed),
         verdict(scheduler_passed),
         verdict(passed)
     );
@@ -91,6 +98,64 @@ fn irq_lock_test() -> bool {
         );
     }
     masked && restored
+}
+
+static TEST_WAIT: IrqSpinMutex<WaitQueue> =
+    IrqSpinMutex::new(WaitQueue::new(scheduler::BOOT_TEST_WAIT_ID));
+static TEST_FLAG: AtomicBool = AtomicBool::new(false);
+const WAKER_DELAY_MS: u64 = 20;
+
+fn waker_task() -> ! {
+    scheduler::sleep_ms(WAKER_DELAY_MS);
+    TEST_FLAG.store(true, Ordering::Release);
+    scheduler::wake_one(&TEST_WAIT);
+    scheduler::exit(ExitStatus(0))
+}
+
+/// `wait_event` returns at once when the condition already holds, and a
+/// waiter sleeps until another task makes it true and wakes the queue.
+fn wait_event_test() -> bool {
+    let before = scheduler::stats().context_switches;
+    scheduler::wait_event(&TEST_WAIT, || true);
+    let no_block = scheduler::stats().context_switches == before;
+
+    TEST_FLAG.store(false, Ordering::Release);
+    scheduler::spawn_kernel_task(waker_task, "boot-test-waker");
+    let start = time::ticks();
+    scheduler::wait_event(&TEST_WAIT, || TEST_FLAG.load(Ordering::Acquire));
+    let waited = time::ticks().saturating_sub(start);
+    let woke = TEST_FLAG.load(Ordering::Acquire) && waited >= WAKER_DELAY_MS;
+    if !(no_block && woke) {
+        serial_println!(
+            "boot-test: wait-event no_block={} woke={} waited={}ms",
+            no_block,
+            woke,
+            waited
+        );
+    }
+    no_block && woke
+}
+
+/// While this task sleeps, every other task (shell or reaper) is blocked on
+/// a wait queue, so the idle task must own the CPU and the timer must not
+/// keep switching. Busy-polling tasks would show up as missing idle ticks.
+fn idle_test() -> bool {
+    const IDLE_MS: u64 = 200;
+    const MAX_SWITCHES: u64 = 20;
+    // Let the waker exit and the reaper finish first.
+    scheduler::sleep_ms(10);
+    let before = scheduler::stats();
+    scheduler::sleep_ms(IDLE_MS);
+    let after = scheduler::stats();
+    let switches = after.context_switches - before.context_switches;
+    let idle_ticks = after.idle_ticks - before.idle_ticks;
+    serial_println!(
+        "boot-test: {} ms asleep: {} idle ticks, {} context switches.",
+        IDLE_MS,
+        idle_ticks,
+        switches
+    );
+    switches <= MAX_SWITCHES && idle_ticks * 10 >= IDLE_MS * 9
 }
 
 fn scheduler_test() -> bool {

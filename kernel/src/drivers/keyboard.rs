@@ -1,4 +1,5 @@
 use crate::sync::IrqSpinMutex;
+use crate::task::WaitQueue;
 
 const KEY_BUFFER_CAPACITY: usize = 128;
 
@@ -25,6 +26,10 @@ impl KeyQueue {
             self.tail = (self.tail + 1) % KEY_BUFFER_CAPACITY;
             self.count += 1;
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
     }
 
     pub fn pop(&mut self) -> Option<char> {
@@ -69,6 +74,14 @@ impl KeyboardState {
 }
 
 static KEYBOARD_STATE: IrqSpinMutex<KeyboardState> = IrqSpinMutex::new(KeyboardState::new());
+
+/// Readers sleep here until the keyboard interrupt queues a key.
+pub static KEY_WAIT: IrqSpinMutex<WaitQueue> =
+    IrqSpinMutex::new(WaitQueue::new(crate::scheduler::KEYBOARD_WAIT_ID));
+
+pub fn has_key() -> bool {
+    !KEY_QUEUE.lock().is_empty()
+}
 
 pub fn pop_key() -> Option<char> {
     KEY_QUEUE.lock().pop()
@@ -241,5 +254,6 @@ pub fn handle_scancode(scancode: u8) {
 
     if let Some(c) = char_opt {
         KEY_QUEUE.lock().push(c);
+        crate::scheduler::wake_one(&KEY_WAIT);
     }
 }

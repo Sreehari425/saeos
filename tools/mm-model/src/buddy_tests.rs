@@ -77,10 +77,15 @@ fn assert_consistent(lists: &BuddyLists, store: &mut VecStore, live: &BTreeMap<u
         .expect("buddy lists disagree with bitmap");
     let mut owned = vec![false; store.frame_count()];
     for (&start, &order) in live {
-        for frame in start..start + (1 << order) {
-            assert!(!owned[frame], "frame {frame} handed out twice");
-            owned[frame] = true;
-            assert_eq!(store.states[frame], State::Allocated);
+        let end = start + (1 << order);
+        for (offset, (taken, state)) in owned[start..end]
+            .iter_mut()
+            .zip(&store.states[start..end])
+            .enumerate()
+        {
+            assert!(!*taken, "frame {} handed out twice", start + offset);
+            *taken = true;
+            assert_eq!(*state, State::Allocated);
         }
     }
 }

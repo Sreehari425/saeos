@@ -9,17 +9,25 @@ pub struct TimerDispatch {
     pub voluntary: u64,
 }
 
+/// Saved interrupt frame: 15 general-purpose registers pushed by the entry
+/// stub plus RIP, CS, RFLAGS, RSP, SS (always pushed in long mode).
+const INTERRUPT_FRAME_BYTES: u64 = 20 * 8;
+
 #[unsafe(no_mangle)]
 pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDispatch {
+    let _irq = crate::arch::x86_64::irq::enter();
     crate::time::on_timer_interrupt();
     interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET);
-    if !crate::time::take_reschedule_request() {
-        return TimerDispatch {
-            context_pointer: stack_pointer,
-            voluntary: 0,
-        };
-    }
-    let (dispatch, address_space) = with_scheduler(|scheduler| {
+    let now = crate::time::now_ns();
+    let ticks = crate::time::ticks();
+    let selected = with_scheduler(|scheduler| {
+        scheduler.wake_expired(ticks);
+        // Always consume an explicit request, even when the tick alone
+        // already asks for a switch.
+        let requested = crate::time::take_reschedule_request();
+        if !(scheduler.tick(now) | requested) {
+            return None;
+        }
         let previous = scheduler.current();
         if let Some(current) = previous {
             let stack = scheduler
@@ -27,12 +35,12 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
                 .expect("current task disappeared")
                 .kernel_stack;
             assert!(
-                stack_pointer >= stack.base && stack_pointer.saturating_add(18 * 8) <= stack.top,
+                stack_pointer >= stack.base
+                    && stack_pointer.saturating_add(INTERRUPT_FRAME_BYTES) <= stack.top,
                 "timer interrupt frame is outside the current task's kernel stack"
             );
         }
-        scheduler.wake_expired(crate::time::ticks());
-        let next = scheduler.preempt(stack_pointer, 1);
+        let next = scheduler.preempt(stack_pointer, now);
         let task = scheduler.task(next).expect("selected task disappeared");
         let address_space = task.address_space;
         let resume_kind = task.resume_kind;
@@ -54,7 +62,10 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
                 && task.cpu_context.stack_pointer <= selected_stack.top
         } else {
             dispatch.context_pointer >= selected_stack.base
-                && dispatch.context_pointer.saturating_add(18 * 8) <= selected_stack.top
+                && dispatch
+                    .context_pointer
+                    .saturating_add(INTERRUPT_FRAME_BYTES)
+                    <= selected_stack.top
         };
         assert!(
             selected_context_valid,
@@ -69,8 +80,15 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
                 .expect("selected task disappeared")
                 .resume_kind = ResumeKind::Voluntary;
         }
-        (dispatch, address_space)
+        Some((dispatch, address_space))
     });
+    let Some((dispatch, address_space)) = selected else {
+        // Keep running the interrupted task.
+        return TimerDispatch {
+            context_pointer: stack_pointer,
+            voluntary: 0,
+        };
+    };
     crate::mm::address_space::activate_if_changed(address_space)
         .expect("selected address space is not registered");
     dispatch

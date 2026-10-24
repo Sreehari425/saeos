@@ -4,11 +4,12 @@ pub fn exit_current(status: ExitStatus) -> ! {
     // Keep the exiting stack from receiving a timer frame after its TCB has
     // become terminal and the scheduler has selected its replacement.
     cpu::cli();
+    let now = crate::time::now_ns();
     let (dispatch, process) = with_scheduler(|scheduler| {
         let current = scheduler.current().expect("exit without current task");
         let process = scheduler.task(current).and_then(|task| task.process_id);
         let next = scheduler
-            .exit_current(status)
+            .exit_current(status, now)
             .ok()
             .flatten()
             .or_else(|| scheduler.idle_task())
@@ -16,6 +17,7 @@ pub fn exit_current(status: ExitStatus) -> ! {
         (dispatch_for(scheduler, current, next), process)
     });
     scheduler_debug(format_args!("task exit status={}", status.0));
+    wake_one(&REAPER_WAIT);
     if let Some(process) = process {
         let waiters = {
             let mut table = PROCESSES.lock();

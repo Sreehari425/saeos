@@ -1,6 +1,6 @@
 use super::{
-    AddressSpaceId, BlockReason, EevdfEntity, ExitStatus, KernelStack, ProcessId, ResumeKind,
-    StackStorage, TaskEntry, TaskId, TaskState, Tick, VirtualTime, VoluntaryContext,
+    AddressSpaceId, BlockReason, EevdfEntity, ExitStatus, KernelStack, Nanos, ProcessId,
+    ResumeKind, StackStorage, TaskEntry, TaskId, TaskState, VirtualTime, VoluntaryContext,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,13 +21,14 @@ pub struct TaskSnapshot {
     pub state: TaskState,
     pub virtual_runtime: VirtualTime,
     pub virtual_deadline: VirtualTime,
-    pub exec_runtime: Tick,
+    pub exec_runtime: Nanos,
+    pub nice: i8,
     pub address_space: Option<AddressSpaceId>,
     pub is_idle: bool,
     pub resume_kind: ResumeKind,
     pub block_reason: Option<BlockReason>,
     pub exit_status: Option<ExitStatus>,
-    pub enqueue_time: Tick,
+    pub enqueue_time: Nanos,
     pub eligible: bool,
     pub lag: VirtualTime,
 }
@@ -39,6 +40,8 @@ pub struct SchedulerStats {
     pub voluntary_yields: u64,
     pub tasks_woken: u64,
     pub tasks_reaped: u64,
+    /// Timer ticks on which the idle task (or no task) held the CPU.
+    pub idle_ticks: u64,
 }
 
 pub struct TaskControlBlock {
@@ -57,6 +60,10 @@ pub struct TaskControlBlock {
     pub entry: Option<TaskEntry>,
     pub address_space: Option<AddressSpaceId>,
     pub scheduler_entity: EevdfEntity,
+    /// Time up to which this task's CPU use has been charged.
+    pub dispatched_at: Nanos,
+    /// When the task was last dispatched (round-robin slices).
+    pub slice_start: Nanos,
     pub is_idle: bool,
     pub name: &'static str,
 }
@@ -78,6 +85,8 @@ impl TaskControlBlock {
             entry: None,
             address_space: None,
             scheduler_entity: EevdfEntity::default(),
+            dispatched_at: 0,
+            slice_start: 0,
             is_idle: false,
             name,
         }

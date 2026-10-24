@@ -1,4 +1,8 @@
 //! Scheduler façade and interrupt-safe ownership boundary.
+//!
+//! Lock order: a wait queue (`IrqSpinMutex<WaitQueue>`), then `SCHEDULER`,
+//! then `PROCESSES`. All are interrupt-disabling, so the timer and keyboard
+//! handlers may take them. No lock may be held across a context switch.
 
 use crate::arch::x86_64::{context, cpu, interrupt_controller, pic};
 use crate::process::{ProcessSnapshot, ProcessTable};
@@ -22,13 +26,21 @@ pub use lifecycle::{collect_child_status, exit_current, register_child_waiter, s
 #[cfg(feature = "scheduler-selftest")]
 pub use selftest::{selftest_passed, start_selftest};
 pub use wait::exit;
-pub use wait::{block_current, block_on, sleep_ms, sleep_until, wake_all, wake_one, yield_now};
+pub use wait::{sleep_ms, sleep_until, wait_event, wake_all, wake_one, yield_now};
 
 /// The scheduler is single-CPU for now. Access is still protected by an
 /// interrupt-disabling lock so a timer IRQ cannot recursively acquire it.
 pub static SCHEDULER: IrqSpinMutex<Scheduler> = IrqSpinMutex::new(Scheduler::new());
 pub static PROCESSES: IrqSpinMutex<ProcessTable> = IrqSpinMutex::new(ProcessTable::new());
 static WAIT_QUEUE_SNAPSHOT: IrqSpinMutex<Vec<(u64, usize)>> = IrqSpinMutex::new(Vec::new());
+
+/// Wait-queue ids, for diagnostics.
+pub const REAPER_WAIT_ID: u64 = 1;
+pub const KEYBOARD_WAIT_ID: u64 = 2;
+pub const BOOT_TEST_WAIT_ID: u64 = 3;
+
+/// The reaper sleeps here; `exit_current` wakes it.
+pub static REAPER_WAIT: IrqSpinMutex<WaitQueue> = IrqSpinMutex::new(WaitQueue::new(REAPER_WAIT_ID));
 
 #[cfg(feature = "scheduler-debug")]
 fn scheduler_debug(message: core::fmt::Arguments<'_>) {
@@ -71,13 +83,21 @@ pub fn waitqueue_snapshots() -> Vec<(u64, usize)> {
     WAIT_QUEUE_SNAPSHOT.lock().clone()
 }
 
-fn record_waitqueue(queue: &WaitQueue) {
+/// Track queue lengths for the shell. Only the blocking path (task
+/// context) may add an entry; wake paths, which can run in an interrupt
+/// handler, only update existing ones so they never allocate.
+fn record_waitqueue(queue: &WaitQueue, may_insert: bool) {
     let mut snapshots = WAIT_QUEUE_SNAPSHOT.lock();
     if let Some((_, length)) = snapshots.iter_mut().find(|(id, _)| *id == queue.id) {
         *length = queue.len();
-    } else {
+    } else if may_insert {
         snapshots.push((queue.id, queue.len()));
     }
+}
+
+/// Change a task's nice value (-20..=19).
+pub fn set_nice(task: TaskId, nice: i8) -> Result<(), crate::task::SchedulerError> {
+    with_scheduler(|scheduler| scheduler.set_nice(task, nice))
 }
 
 pub fn set_address_space(
@@ -178,7 +198,8 @@ fn attach_task_to_new_process(task: TaskId) -> ProcessId {
 }
 
 pub fn start_first_task() -> ! {
-    let next = with_scheduler(|scheduler| scheduler.schedule(0).ok().flatten())
+    let now = crate::time::now_ns();
+    let next = with_scheduler(|scheduler| scheduler.schedule(now).ok().flatten())
         .expect("scheduler has no initial task");
     // Keep the context in the scheduler's stable task allocation. Copying it
     // onto this firmware-owned stack leaves the restore stub reading from a
@@ -220,16 +241,16 @@ pub fn idle_task() -> ! {
 
 pub fn reaper_task() -> ! {
     loop {
-        let reaped = with_scheduler(|scheduler| scheduler.reap_one().ok().flatten());
-        if let Some(task) = reaped {
+        wait_event(&REAPER_WAIT, || {
+            with_scheduler(|scheduler| scheduler.has_exited_tasks())
+        });
+        while let Some(task) = with_scheduler(|scheduler| scheduler.reap_one().ok().flatten()) {
             if let Some(process) = task.process_id {
                 let mut table = PROCESSES.lock();
                 let _ = table.remove_thread(process, task.task_id);
                 table.reap_if_empty(process);
             }
-        } else {
-            assert_switch_boundary_unlocked();
-            cpu::hlt();
+            // Dropping `task` here frees its stack outside every lock.
         }
     }
 }

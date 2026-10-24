@@ -5,6 +5,7 @@ pub mod cpu;
 pub mod gdt;
 pub mod idt;
 pub mod interrupt_controller;
+pub mod irq;
 pub mod pic;
 pub mod qemu;
 pub mod uefi;

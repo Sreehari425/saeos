@@ -1,6 +1,5 @@
 pub mod commands;
 
-use crate::arch::x86_64::cpu;
 use crate::drivers::console;
 use crate::drivers::keyboard;
 use crate::drivers::vga::Color;
@@ -56,8 +55,8 @@ pub fn run() -> ! {
                 _ => {}
             }
         } else {
-            // Sleep CPU until next hardware interrupt
-            cpu::hlt();
+            // Sleep until the keyboard interrupt queues a key.
+            crate::scheduler::wait_event(&keyboard::KEY_WAIT, keyboard::has_key);
         }
     }
 }

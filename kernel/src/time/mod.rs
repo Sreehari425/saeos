@@ -26,7 +26,15 @@ pub const TICK_HZ: u32 = 1_000;
 const PIT_DIVISOR: u16 = (PIT_BASE_HZ / TICK_HZ) as u16;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// An explicit reschedule request, consumed at the next timer interrupt.
+/// The tick itself no longer forces a switch; the scheduler decides.
 static NEED_RESCHEDULE: AtomicBool = AtomicBool::new(false);
+/// Whether `now_ns` reads the TSC; chosen once when time is initialized so
+/// the clock never changes source (and so never jumps).
+#[cfg(feature = "tsc")]
+static USE_TSC: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "tsc")]
+static TSC_BASE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepError {
@@ -58,7 +66,13 @@ pub fn init() {
     }
 
     #[cfg(feature = "tsc")]
-    tsc::init();
+    {
+        tsc::init();
+        if tsc::frequency_hz() != 0 {
+            TSC_BASE.store(tsc::read(), Ordering::Relaxed);
+            USE_TSC.store(true, Ordering::Release);
+        }
+    }
 
     #[cfg(feature = "apic-timer")]
     {
@@ -68,15 +82,26 @@ pub fn init() {
 
 pub fn on_timer_interrupt() {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    NEED_RESCHEDULE.store(true, Ordering::Release);
+}
+
+/// Monotonic nanoseconds since time initialization, for CPU accounting:
+/// the calibrated TSC when available (sub-tick precision), otherwise the
+/// tick count.
+pub fn now_ns() -> u64 {
+    #[cfg(feature = "tsc")]
+    if USE_TSC.load(Ordering::Acquire) {
+        let cycles = tsc::read().saturating_sub(TSC_BASE.load(Ordering::Relaxed));
+        return tsc::cycles_to_nanos(cycles);
+    }
+    ticks().saturating_mul(1_000_000_000 / TICK_HZ as u64)
 }
 
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Acquire)
 }
 
-/// Set by the timer interrupt and consumed by the scheduler-safe interrupt
-/// exit path. The timer handler never takes the scheduler lock.
+/// Consumed by the timer interrupt: true if `request_reschedule` was called
+/// since the last tick.
 pub fn take_reschedule_request() -> bool {
     NEED_RESCHEDULE.swap(false, Ordering::AcqRel)
 }

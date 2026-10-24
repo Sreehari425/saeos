@@ -312,6 +312,14 @@ impl LockedHeap {
 
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Interrupt handlers must not allocate: it is slow, and a large
+        // allocation maps page-heap pages. Queues used from IRQs reserve
+        // their capacity in task context instead.
+        debug_assert!(
+            !crate::arch::x86_64::irq::in_interrupt(),
+            "heap allocation in interrupt context ({} bytes)",
+            layout.size()
+        );
         if layout.size() > SMALL_CLASSES[SMALL_CLASSES.len() - 1]
             && PAGE_HEAP_READY.load(Ordering::Acquire)
         {
@@ -367,6 +375,11 @@ unsafe impl GlobalAlloc for LockedHeap {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        debug_assert!(
+            !crate::arch::x86_64::irq::in_interrupt(),
+            "heap free in interrupt context ({} bytes)",
+            layout.size()
+        );
         if (ptr as usize) >= PAGE_HEAP_BASE
             && (ptr as usize) < PAGE_HEAP_BASE + PAGE_HEAP_PAGES * 4096
         {

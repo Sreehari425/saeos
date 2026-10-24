@@ -263,6 +263,7 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
 // Hardware Interrupt Handlers
 #[cfg(feature = "keyboard")]
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _irq = crate::arch::x86_64::irq::enter();
     let scancode = unsafe { cpu::inb(0x60) };
 
     keyboard::handle_scancode(scancode);
