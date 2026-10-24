@@ -26,8 +26,13 @@ static CONSOLE_STATE: SpinMutex<ConsoleState> = SpinMutex::new(ConsoleState {
     kind: ConsoleKind::Vga,
 });
 
+/// Hold the console lock (the panic-lock test panics while holding it).
+#[cfg(feature = "panic-lock-test")]
+pub fn lock_for_panic_test() -> impl Sized {
+    CONSOLE_STATE.lock()
+}
+
 pub fn init(display_mode: DisplayMode) {
-    CONSOLE_STATE.reset();
     let mut state = CONSOLE_STATE.lock();
     match display_mode {
         DisplayMode::VgaText { buffer_addr } => {

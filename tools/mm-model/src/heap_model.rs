@@ -135,11 +135,11 @@ impl HeapModel {
         self.free_runs.sort_by_key(|run| run.start);
         let mut merged: Vec<Run> = Vec::with_capacity(self.free_runs.len());
         for run in self.free_runs.drain(..) {
-            if let Some(previous) = merged.last_mut() {
-                if previous.start + previous.pages * PAGE_SIZE == run.start {
-                    previous.pages += run.pages;
-                    continue;
-                }
+            if let Some(previous) = merged.last_mut()
+                && previous.start + previous.pages * PAGE_SIZE == run.start
+            {
+                previous.pages += run.pages;
+                continue;
             }
             merged.push(run);
         }

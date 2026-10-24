@@ -221,6 +221,19 @@ pub fn rdtscp() -> (u64, u32) {
 }
 
 /// Returns whether the CPU supports the RDTSC instruction.
+/// Whether the CPU supports the Page Attribute Table.
+pub fn has_pat() -> bool {
+    (cpuid(1).edx & (1 << 16)) != 0
+}
+
+/// Write back and invalidate all caches.
+///
+/// # Safety
+/// Privileged and slow; only for cache-attribute changes.
+pub unsafe fn wbinvd() {
+    unsafe { core::arch::asm!("wbinvd", options(nostack, preserves_flags)) };
+}
+
 pub fn has_rdtsc() -> bool {
     let res = cpuid(1);
     (res.edx & (1 << 4)) != 0

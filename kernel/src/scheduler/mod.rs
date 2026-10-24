@@ -156,24 +156,12 @@ pub fn init() {
     for task in [idle, shell, reaper] {
         attach_task_to_new_process(task);
     }
-    #[cfg(feature = "mm-guard-test")]
-    spawn_kernel_task(guard_test_task, "guard-test");
-}
-
-/// Recurse until the kernel stack runs into its guard. The kernel must
-/// report the overflow by task name instead of corrupting memory.
-#[cfg(feature = "mm-guard-test")]
-fn guard_test_task() -> ! {
-    // Unbounded on purpose: the guard page is the only way out.
-    #[allow(unconditional_recursion)]
-    #[inline(never)]
-    fn recurse(depth: u64) -> u64 {
-        let frame = core::hint::black_box([depth; 32]);
-        recurse(depth + 1).wrapping_add(frame[depth as usize % 32])
-    }
-    crate::serial_println!("guard-test: recursing until the stack guard is hit.");
-    let depth = recurse(0);
-    panic!("guard-test: recursion returned {depth} without hitting the guard");
+    #[cfg(any(
+        feature = "mm-guard-test",
+        feature = "fault-test",
+        feature = "panic-lock-test"
+    ))]
+    crate::fault_tests::spawn();
 }
 
 #[cfg(not(feature = "scheduler-selftest"))]

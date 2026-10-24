@@ -16,7 +16,7 @@ BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
 
 .PHONY: all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test mm-stress mm-stress-uefi mm-guard-test boot-test test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test test help
 
 all: bios
 
@@ -66,7 +66,7 @@ mm-test:
 
 # Host tests plus every QEMU test on both boot paths; each run ends with the
 # kernel's own verdict through isa-debug-exit.
-test: mm-test boot-test mm-guard-test
+test: mm-test boot-test mm-guard-test fault-test panic-lock-test
 
 boot-test:
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test
@@ -81,6 +81,21 @@ mm-stress:
 mm-stress-uefi:
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),boot-test,mm-stress,mm-allocator-stats,paging-debug
 	./scripts/run-mm-stress.sh $(UEFI_TEST_IMAGE) -m 16G
+
+# A task executes ud2: the #UD report must name it.
+fault-test:
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),fault-test
+	QEMU_TEST_EXPECT="INVALID OPCODE \(#UD\).*task 'fault-test'" ./scripts/run-qemu-test.sh $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),fault-test
+	QEMU_TEST_EXPECT="INVALID OPCODE \(#UD\).*task 'fault-test'" ./scripts/run-qemu-test.sh $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
+
+# A task panics while holding the console and serial locks: the report must
+# still come out instead of deadlocking.
+panic-lock-test:
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),panic-lock-test
+	QEMU_TEST_EXPECT="panic-lock-test: deliberate panic" ./scripts/run-qemu-test.sh $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),panic-lock-test
+	QEMU_TEST_EXPECT="panic-lock-test: deliberate panic" ./scripts/run-qemu-test.sh $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
 
 mm-guard-test:
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),mm-guard-test
@@ -134,6 +149,6 @@ help:
 	@echo "  all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check"
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\""
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
-	@echo "  test boot-test mm-test mm-stress mm-stress-uefi mm-guard-test"
+	@echo "  test boot-test mm-test mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"
 	@echo "  clean distclean mrproper nix-gc"

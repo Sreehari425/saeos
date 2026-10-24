@@ -90,7 +90,27 @@ impl<T> IrqSpinMutex<T> {
             if let Some(guard) = self.try_lock() {
                 return guard;
             }
+            if crate::fatal::panicking() {
+                // See `crate::fatal`: the holder will never run again.
+                return unsafe { self.force_lock() };
+            }
             core::hint::spin_loop();
+        }
+    }
+
+    /// Take the lock even if it is held.
+    ///
+    /// # Safety
+    /// Only for the fatal path: interrupts are off and the holder can never
+    /// run again, so nothing else can observe the shared access.
+    pub unsafe fn force_lock(&self) -> IrqMutexGuard<'_, T> {
+        let interrupts_enabled = crate::arch::x86_64::cpu::interrupts_enabled();
+        crate::arch::x86_64::cpu::cli();
+        self.lock.store(true, Ordering::Release);
+        IrqMutexGuard {
+            lock: &self.lock,
+            data: unsafe { &mut *self.data.get() },
+            interrupts_enabled,
         }
     }
 }
@@ -140,12 +160,25 @@ impl<T> SpinMutex<T> {
             if let Some(guard) = self.try_lock() {
                 return guard;
             }
+            if crate::fatal::panicking() {
+                // See `crate::fatal`: the holder will never run again.
+                return unsafe { self.force_lock() };
+            }
             core::hint::spin_loop();
         }
     }
 
-    pub fn reset(&self) {
-        self.lock.store(false, Ordering::Relaxed);
+    /// Take the lock even if it is held.
+    ///
+    /// # Safety
+    /// Only for the fatal path: interrupts are off and the holder can never
+    /// run again, so nothing else can observe the shared access.
+    pub unsafe fn force_lock(&self) -> MutexGuard<'_, T> {
+        self.lock.store(true, Ordering::Release);
+        MutexGuard {
+            lock: &self.lock,
+            data: unsafe { &mut *self.data.get() },
+        }
     }
 
     pub fn is_locked(&self) -> bool {

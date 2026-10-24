@@ -48,6 +48,11 @@ impl GopWriter {
         self.clear_screen();
     }
 
+    /// Virtual address of the first pixel (0 until initialized).
+    pub fn mapped_base(&self) -> u64 {
+        self.mapped_base_addr
+    }
+
     pub fn is_active(&self) -> bool {
         self.mapped_base_addr != 0 && self.width > 0 && self.height > 0
     }

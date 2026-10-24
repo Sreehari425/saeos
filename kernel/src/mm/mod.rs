@@ -325,16 +325,17 @@ fn map_framebuffer(display: crate::boot::DisplayMode) {
     else {
         return;
     };
+    // GOP framebuffers are write-combining; legacy VGA text memory stays
+    // uncached. Remap: the range may already sit, uncached, inside a
+    // direct-mapped MMIO region.
+    let flags = match display {
+        crate::boot::DisplayMode::VgaText { .. } => paging::PageFlags::MMIO,
+        crate::boot::DisplayMode::GopFramebuffer(_) => paging::PageFlags::FRAMEBUFFER,
+    };
     let mut physical = start;
     while physical < end {
-        let mapped = paging::map_page(
-            paging::phys_to_virt(PhysAddr(physical)),
-            PhysAddr(physical),
-            paging::PageFlags::MMIO,
-        );
-        // A framebuffer inside an MMIO region is already direct mapped with
-        // these flags; only a genuine mapping failure matters here.
-        if matches!(mapped, Err(message) if message != "page already mapped") {
+        let virtual_address = paging::phys_to_virt(PhysAddr(physical));
+        if paging::remap_page(virtual_address, PhysAddr(physical), flags).is_err() {
             crate::serial_println!("Memory: unable to map framebuffer page at {:#x}.", physical);
             break;
         }

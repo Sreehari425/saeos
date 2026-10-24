@@ -1,6 +1,8 @@
 use core::mem::size_of;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+pub const NMI_IST_INDEX: u16 = 1;
+pub const MACHINE_CHECK_IST_INDEX: u16 = 2;
 
 #[repr(C, packed)]
 pub struct TaskStateSegment {
@@ -33,9 +35,13 @@ impl Default for TaskStateSegment {
     }
 }
 
-// 16 KB stack for Double Fault exception
+// 16 KB IST stacks for exceptions that may arrive on an unusable stack.
 const STACK_SIZE: usize = 4096 * 4;
-static mut DOUBLE_FAULT_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+#[repr(C, align(16))]
+struct IstStack([u8; STACK_SIZE]);
+static mut DOUBLE_FAULT_STACK: IstStack = IstStack([0; STACK_SIZE]);
+static mut NMI_STACK: IstStack = IstStack([0; STACK_SIZE]);
+static mut MACHINE_CHECK_STACK: IstStack = IstStack([0; STACK_SIZE]);
 
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
@@ -50,10 +56,14 @@ static mut GDT: [u64; 5] = [0; 5];
 
 pub fn init() {
     unsafe {
-        // Set up TSS Interrupt Stack Table entry 0 for Double Faults
-        let stack_start = (&raw const DOUBLE_FAULT_STACK) as *const u8 as u64;
-        let stack_end = stack_start + STACK_SIZE as u64;
-        TSS.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_end;
+        // Interrupt Stack Table entries (the CPU loads RSP from these).
+        for (index, stack) in [
+            (DOUBLE_FAULT_IST_INDEX, &raw const DOUBLE_FAULT_STACK),
+            (NMI_IST_INDEX, &raw const NMI_STACK),
+            (MACHINE_CHECK_IST_INDEX, &raw const MACHINE_CHECK_STACK),
+        ] {
+            TSS.interrupt_stack_table[index as usize] = stack as u64 + STACK_SIZE as u64;
+        }
 
         // Entry 0: Null descriptor
         GDT[0] = 0;

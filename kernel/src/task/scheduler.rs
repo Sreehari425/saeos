@@ -124,9 +124,9 @@ impl Scheduler {
     ) -> TaskId {
         let id = self.allocate_id();
         let KernelStack { base, top } = stack_storage_bounds(&storage);
-        #[cfg(any(target_os = "none", target_os = "uefi"))]
+        #[cfg(not(host_model))]
         let bootstrap_ip = crate::arch::x86_64::context::task_bootstrap_ip();
-        #[cfg(not(any(target_os = "none", target_os = "uefi")))]
+        #[cfg(host_model)]
         let bootstrap_ip = 0;
         let mut task = TaskControlBlock::new(id, KernelStack { base, top }, name);
         task.transition(TaskState::Ready)

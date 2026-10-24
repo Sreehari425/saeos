@@ -158,7 +158,11 @@ impl PageFlags {
     pub const KERNEL_TEXT: Self = Self(PRESENT);
     pub const READ_ONLY: Self = Self(PRESENT | NO_EXECUTE);
     pub const WRITABLE: Self = Self(PRESENT | WRITABLE | NO_EXECUTE);
-    pub const MMIO: Self = Self(PRESENT | WRITABLE | NO_EXECUTE);
+    /// Device registers: strong uncacheable (PAT index 3). Reads and
+    /// writes have side effects and must never be cached or merged.
+    pub const MMIO: Self = Self(PRESENT | WRITABLE | NO_EXECUTE | PCD | PWT);
+    /// Framebuffers: write-combining (PAT index 1 in `PAT_LAYOUT`).
+    pub const FRAMEBUFFER: Self = Self(PRESENT | WRITABLE | NO_EXECUTE | PWT);
     pub const USER_READ: Self = Self(PRESENT | USER | NO_EXECUTE);
     pub const USER_READ_WRITE: Self = Self(PRESENT | USER | WRITABLE | NO_EXECUTE);
     pub const USER_READ_EXECUTE: Self = Self(PRESENT | USER);
@@ -812,6 +816,7 @@ pub fn init_with_mode(
     let map = frame::memory_map();
     let _guard = KERNEL_MAP_LOCK.lock();
     crate::arch::x86_64::cpu::enable_nxe();
+    init_pat();
     unsafe {
         PML4.0 = [0; 512];
     }
@@ -1013,6 +1018,95 @@ pub fn kernel_half_matches(root: PhysFrame) -> bool {
 pub fn is_mapped_in(root: PhysFrame, virtual_address: VirtAddr) -> bool {
     let (entries, levels) = walk_entries(root, virtual_address);
     levels > 0 && entries[levels - 1] & PRESENT != 0
+}
+
+const IA32_PAT: u32 = 0x277;
+const PAT_UC: u8 = 0x00;
+const PAT_WC: u8 = 0x01;
+const PAT_WB: u8 = 0x06;
+const PAT_UC_MINUS: u8 = 0x07;
+/// PAT entries 0..=3 are WB, WC, UC-, UC, selected by `PCD:PWT` in a leaf.
+/// Entries 4..=7 repeat them, so the PAT bit (whose position differs between
+/// 4 KiB and huge leaves) never changes a mapping's type.
+const PAT_LAYOUT: u64 = {
+    let low =
+        PAT_WB as u64 | (PAT_WC as u64) << 8 | (PAT_UC_MINUS as u64) << 16 | (PAT_UC as u64) << 24;
+    low | low << 32
+};
+static PAT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Program the PAT with `PAT_LAYOUT` instead of relying on firmware
+/// defaults. Runs before the kernel's tables are loaded; that CR3 load
+/// flushes any translations cached under the old attributes.
+fn init_pat() {
+    if !crate::arch::x86_64::cpu::has_pat() {
+        // Without PAT, PWT alone means write-through and PCD|PWT is still
+        // uncacheable, so `MMIO` stays correct.
+        return;
+    }
+    unsafe {
+        crate::arch::x86_64::cpu::wbinvd();
+        crate::arch::x86_64::cpu::wrmsr(IA32_PAT, PAT_LAYOUT);
+    }
+    PAT_ACTIVE.store(true, Ordering::Release);
+}
+
+/// The PAT MSR value the kernel programmed, or `None` without PAT support.
+pub fn pat_value() -> Option<u64> {
+    PAT_ACTIVE
+        .load(Ordering::Acquire)
+        .then(|| unsafe { crate::arch::x86_64::cpu::rdmsr(IA32_PAT) })
+}
+
+pub fn expected_pat_value() -> u64 {
+    PAT_LAYOUT
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheType {
+    WriteBack,
+    WriteCombining,
+    UncachedMinus,
+    Uncached,
+}
+
+/// Cache type selected by a leaf entry's `PCD:PWT` bits under `PAT_LAYOUT`.
+pub const fn cache_type(entry: u64) -> CacheType {
+    match (entry & PCD != 0, entry & PWT != 0) {
+        (false, false) => CacheType::WriteBack,
+        (false, true) => CacheType::WriteCombining,
+        (true, false) => CacheType::UncachedMinus,
+        (true, true) => CacheType::Uncached,
+    }
+}
+
+/// Cache type of the kernel mapping of `virtual_address`, if mapped.
+pub fn cache_type_of(virtual_address: VirtAddr) -> Option<CacheType> {
+    let (entries, levels) = walk_entries(page_table_frame(), virtual_address);
+    let leaf = *entries.get(levels.checked_sub(1)?)?;
+    (leaf & PRESENT != 0).then(|| cache_type(leaf))
+}
+
+/// Map `length` bytes of device memory at `physical` as uncacheable and
+/// return its direct-map address. Pages already mapped with other
+/// attributes are switched to UC.
+pub fn map_mmio(physical: PhysAddr, length: u64) -> Result<VirtAddr, &'static str> {
+    let start = physical.0 & !(PAGE_SIZE - 1);
+    let end = physical
+        .0
+        .checked_add(length.max(1))
+        .ok_or("MMIO range overflows")?
+        .next_multiple_of(PAGE_SIZE);
+    let mut page = start;
+    while page < end {
+        remap_page(
+            phys_to_virt(PhysAddr(page)),
+            PhysAddr(page),
+            PageFlags::MMIO,
+        )?;
+        page += PAGE_SIZE;
+    }
+    Ok(phys_to_virt(physical))
 }
 
 fn maps_in_direct_map(kind: crate::boot::PhysicalMemoryKind) -> bool {
@@ -1455,18 +1549,29 @@ fn permission_label(flags: u64) -> &'static str {
 }
 
 #[cfg(feature = "paging-debug")]
+fn cache_label(flags: u64) -> &'static str {
+    match cache_type(flags) {
+        CacheType::WriteBack => "WB",
+        CacheType::WriteCombining => "WC",
+        CacheType::UncachedMinus => "UC-",
+        CacheType::Uncached => "UC",
+    }
+}
+
+#[cfg(feature = "paging-debug")]
 fn dump_mapping(section: &str, point: &str, alias: &str, virtual_address: u64) {
     let result = unsafe { inspect_mapping(virtual_address) };
     match result {
         Some(info) => crate::serial_println!(
-            "[PAGING] {} {} {} virt={:#x} phys={:#x} leaf={} flags={}",
+            "[PAGING] {} {} {} virt={:#x} phys={:#x} leaf={} flags={} {}",
             section,
             point,
             alias,
             virtual_address,
             info.physical,
             info.size,
-            permission_label(info.flags)
+            permission_label(info.flags),
+            cache_label(info.flags)
         ),
         None => crate::serial_println!(
             "[PAGING] {} {} {} virt={:#x} UNMAPPED",

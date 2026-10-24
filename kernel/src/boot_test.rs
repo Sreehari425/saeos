@@ -20,14 +20,24 @@ pub fn run() -> ! {
     serial_println!("boot-test: starting.");
     let mm_passed = memory_tests();
     let irq_passed = irq_lock_test();
+    let breakpoint_passed = breakpoint_test();
+    let cache_passed = cache_attributes_test();
     let wait_passed = wait_event_test();
     let idle_passed = idle_test();
     let scheduler_passed = scheduler_test();
-    let passed = mm_passed && irq_passed && wait_passed && idle_passed && scheduler_passed;
+    let passed = mm_passed
+        && irq_passed
+        && breakpoint_passed
+        && cache_passed
+        && wait_passed
+        && idle_passed
+        && scheduler_passed;
     serial_println!(
-        "boot-test: memory={} irq-locks={} wait-event={} idle={} scheduler={} -> {}",
+        "boot-test: memory={} irq-locks={} breakpoint={} cache={} wait-event={} idle={} scheduler={} -> {}",
         verdict(mm_passed),
         verdict(irq_passed),
+        verdict(breakpoint_passed),
+        verdict(cache_passed),
         verdict(wait_passed),
         verdict(idle_passed),
         verdict(scheduler_passed),
@@ -98,6 +108,54 @@ fn irq_lock_test() -> bool {
         );
     }
     masked && restored
+}
+
+/// The PAT holds the kernel's layout, device registers are uncached, and the
+/// framebuffer is write-combining.
+fn cache_attributes_test() -> bool {
+    use crate::mm::PhysAddr;
+    use crate::mm::paging::{self, CacheType};
+    let pat = paging::pat_value();
+    let pat_ok = pat.is_none_or(|value| value == paging::expected_pat_value());
+    let lapic = {
+        let controller = interrupt_controller::CONTROLLER.lock();
+        (controller.mode == interrupt_controller::ControllerKind::Apic)
+            .then(|| controller.lapic.base_address())
+    };
+    let lapic_ok = lapic.is_none_or(|base| {
+        paging::cache_type_of(paging::phys_to_virt(PhysAddr(base))) == Some(CacheType::Uncached)
+    });
+    #[cfg(feature = "framebuffer")]
+    let gop = {
+        let writer = drivers::framebuffer::GOP_WRITER.lock();
+        writer.is_active().then(|| writer.mapped_base())
+    };
+    #[cfg(not(feature = "framebuffer"))]
+    let gop: Option<u64> = None;
+    let display_ok = match gop {
+        Some(base) => {
+            paging::cache_type_of(crate::mm::VirtAddr(base & !0xfff))
+                == Some(CacheType::WriteCombining)
+        }
+        None => paging::cache_type_of(paging::phys_to_virt(PhysAddr(0xb8000)))
+            .is_none_or(|kind| kind == CacheType::Uncached),
+    };
+    if !(pat_ok && lapic_ok && display_ok) {
+        serial_println!(
+            "boot-test: cache pat={:x?} lapic_ok={} display_ok={}",
+            pat,
+            lapic_ok,
+            display_ok
+        );
+    }
+    pat_ok && lapic_ok && display_ok
+}
+
+/// `int3` must be reported and resumed, not halt the kernel.
+fn breakpoint_test() -> bool {
+    let before = crate::arch::x86_64::idt::breakpoints_handled();
+    unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
+    crate::arch::x86_64::idt::breakpoints_handled() == before + 1
 }
 
 static TEST_WAIT: IrqSpinMutex<WaitQueue> =

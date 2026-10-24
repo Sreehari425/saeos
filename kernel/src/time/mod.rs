@@ -37,11 +37,6 @@ static USE_TSC: AtomicBool = AtomicBool::new(false);
 static TSC_BASE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SleepError {
-    Disabled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtcTime {
     pub year: u16,
     pub month: u8,
@@ -117,30 +112,6 @@ pub fn uptime_ms() -> Option<u64> {
     }
     #[cfg(not(any(feature = "pit", feature = "apic-timer")))]
     None
-}
-
-pub fn sleep_ms(milliseconds: u64) -> Result<(), SleepError> {
-    #[cfg(any(feature = "pit", feature = "apic-timer"))]
-    {
-        let Some(start) = uptime_ms() else {
-            return Err(SleepError::Disabled);
-        };
-        let deadline = start.saturating_add(milliseconds);
-        while uptime_ms().is_some_and(|now| now < deadline) {
-            if crate::arch::x86_64::cpu::interrupts_enabled() {
-                crate::arch::x86_64::cpu::hlt();
-            } else {
-                crate::arch::x86_64::cpu::sti();
-                crate::arch::x86_64::cpu::hlt();
-            }
-        }
-        Ok(())
-    }
-    #[cfg(not(any(feature = "pit", feature = "apic-timer")))]
-    {
-        let _ = milliseconds;
-        Err(SleepError::Disabled)
-    }
 }
 
 #[cfg(feature = "rtc")]

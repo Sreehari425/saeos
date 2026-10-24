@@ -10,6 +10,8 @@ pub mod boot;
 mod boot_test;
 pub mod collections;
 pub mod drivers;
+pub mod fatal;
+mod fault_tests;
 pub mod mm;
 pub mod process;
 pub mod scheduler;
@@ -19,7 +21,6 @@ pub mod task;
 pub mod time;
 
 use arch::x86_64::acpi;
-use arch::x86_64::cpu;
 use arch::x86_64::interrupt_controller::ControllerKind;
 #[cfg(not(target_os = "uefi"))]
 use boot::boot_info::KernelSection;
@@ -289,12 +290,9 @@ pub fn kernel_main_high(handoff: Handoff) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    drivers::console::set_color(Color::LightRed, Color::Black);
-    println!("\n[KERNEL PANIC]");
-    println!("{}", info);
-    arch::x86_64::qemu::exit_if_enabled(false);
-
-    loop {
-        cpu::hlt();
-    }
+    // The panic-lock test panics on purpose; anything else is a failure.
+    fatal::report(
+        format_args!("[KERNEL PANIC]\n{}", info),
+        cfg!(feature = "panic-lock-test"),
+    )
 }

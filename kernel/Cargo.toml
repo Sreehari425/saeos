@@ -1,7 +1,16 @@
+# `per-package-target`: build for the BIOS target unless `--target` says
+# otherwise, so plain `cargo build`/`cargo clippy` work from the workspace root.
+cargo-features = ["per-package-target"]
+
 [package]
 name = "saeos"
 version = "0.1.0"
 edition.workspace = true
+default-target = "x86_64-unknown-none"
+
+[lints.rust]
+# Set by tools/mm-model/build.rs when the task code is built into the model.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(host_model)"] }
 
 [dependencies]
 
@@ -18,6 +27,8 @@ mm-lock-debug = []
 mm-allocator-stats = []
 mm-poison = []
 mm-guard-test = ["qemu-exit"]
+fault-test = ["qemu-exit"]
+panic-lock-test = ["qemu-exit"]
 qemu-exit = []
 boot-test = ["qemu-exit", "mm-selftest", "scheduler-selftest"]
 apic = []

@@ -285,28 +285,16 @@ pub fn execute(cmd: &str) {
             match argument.parse::<u64>() {
                 Ok(seconds) => match seconds.checked_mul(1000) {
                     Some(milliseconds) => {
-                        let started = time::uptime_ms();
-                        if started.is_some() && scheduler::current().is_some() {
-                            scheduler::sleep_ms(milliseconds);
-                            {
-                                let elapsed = started
-                                    .zip(time::uptime_ms())
-                                    .map(|(start, end)| end.saturating_sub(start));
-                                match elapsed {
-                                    Some(actual) => println!(
-                                        "Slept for {} seconds ({} ms measured).",
-                                        seconds, actual
-                                    ),
-                                    None => println!("Slept for {} seconds.", seconds),
-                                }
+                        // The shell always runs as a scheduler task; without a
+                        // timer there is no clock to sleep on.
+                        match time::uptime_ms() {
+                            Some(started) => {
+                                scheduler::sleep_ms(milliseconds);
+                                let actual =
+                                    time::uptime_ms().unwrap_or(started).saturating_sub(started);
+                                println!("Slept for {} seconds ({} ms measured).", seconds, actual);
                             }
-                        } else {
-                            match time::sleep_ms(milliseconds) {
-                                Ok(()) => println!("Slept for {} seconds.", seconds),
-                                Err(time::SleepError::Disabled) => {
-                                    println!("Monotonic clock is disabled in this build.")
-                                }
-                            }
+                            None => println!("Monotonic clock is disabled in this build."),
                         }
                     }
                     None => println!("Sleep duration is too large."),
