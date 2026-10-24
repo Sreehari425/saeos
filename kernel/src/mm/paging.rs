@@ -1,8 +1,10 @@
 //! Kernel-owned page tables. Table pages are ordinary physical frames.
 use super::frame::{self, PAGE_SIZE, PhysAddr, PhysFrame, VirtAddr};
+use super::layout::{self, static_phys};
 use crate::boot::boot_info::KernelSections;
 use crate::sync::IrqSpinMutex;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub const KERNEL_VIRT_BASE: u64 = 0xffff_8000_0000_0000;
 pub const PRESENT: u64 = 1;
@@ -43,7 +45,7 @@ impl TlbInvalidation for LocalTlb {
 }
 
 pub fn invalidate_page(address: VirtAddr) {
-    if unsafe { ACTIVE } {
+    if ACTIVE.load(Ordering::Acquire) {
         unsafe {
             core::arch::asm!("invlpg [{}]", in(reg) address.0, options(nostack, preserves_flags));
         }
@@ -51,7 +53,7 @@ pub fn invalidate_page(address: VirtAddr) {
 }
 
 pub fn flush_current() {
-    if unsafe { ACTIVE } {
+    if ACTIVE.load(Ordering::Acquire) {
         let root: u64;
         unsafe {
             core::arch::asm!("mov {}, cr3", out(reg) root, options(nostack, preserves_flags));
@@ -64,9 +66,18 @@ pub fn flush_current() {
 /// deliberately a no-op for inactive roots; a scheduler can later replace
 /// this with an SMP shootdown implementation.
 pub fn flush_address_space(root: PhysFrame) {
-    if unsafe { ACTIVE } && page_table_frame() == root {
+    if ACTIVE.load(Ordering::Acquire) && current_root() == root {
         flush_current();
     }
+}
+
+/// The page-table root currently loaded in CR3.
+pub fn current_root() -> PhysFrame {
+    let root: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) root, options(nomem, nostack, preserves_flags));
+    }
+    PhysFrame(root & PHYS_MASK_4K)
 }
 
 #[inline]
@@ -118,6 +129,9 @@ static mut PML4: PageTable = PageTable([0; 512]);
 // while allocator-backed table frames are being initialized.
 static mut BOOTSTRAP_PML4: PageTable = PageTable([0; 512]);
 static mut BOOTSTRAP_PDPT: PageTable = PageTable([0; 512]);
+// High alias of the bootstrap identity window for an image that already runs
+// in the top 2 GiB (BIOS). It reuses the identity PDs below.
+static mut BOOTSTRAP_PDPT_HIGH: PageTable = PageTable([0; 512]);
 // UEFI may relocate the loaded image above 4 GiB while the final tables are
 // being built. Cover that image in the temporary identity map.
 // The temporary identity window covers the boot-reserved allocator metadata
@@ -125,8 +139,18 @@ static mut BOOTSTRAP_PDPT: PageTable = PageTable([0; 512]);
 const BOOTSTRAP_PD_COUNT: usize = 16;
 static mut BOOTSTRAP_PD: [PageTable; BOOTSTRAP_PD_COUNT] =
     [PageTable([0; 512]); BOOTSTRAP_PD_COUNT];
-static mut ACTIVE: bool = false;
-static mut BIOS_BOOT: bool = false;
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Serializes every edit of the shared kernel half (PML4 256..512 and the
+/// tables below it). Lock order: `AddressSpace.state` -> this -> frame
+/// allocator. Nothing may allocate from the heap while holding it.
+static KERNEL_MAP_LOCK: IrqSpinMutex<()> = IrqSpinMutex::new(());
+/// Set once every upper-half PML4 entry exists. From then on the kernel only
+/// edits tables below those entries, so roots copied by `AddressSpace::new`
+/// never go stale.
+static KERNEL_SLOTS_FROZEN: AtomicBool = AtomicBool::new(false);
+/// Set once the boot identity map is gone; the lower half then belongs to
+/// user address spaces only.
+static LOWER_HALF_DROPPED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageFlags(pub u64);
@@ -237,6 +261,11 @@ pub struct AddressSpace {
 
 impl Drop for AddressSpace {
     fn drop(&mut self) {
+        assert!(
+            current_root() != self.root,
+            "dropping the active address space {:#x}",
+            self.root.0
+        );
         // PML4 entries 0..=255 are private to this address space.  The
         // higher-half entries are copied from PML4 and must never be freed.
         unsafe {
@@ -279,6 +308,15 @@ impl AddressSpace {
         self.root
     }
 
+    /// Invalidate a lower-half translation only when this root is loaded; an
+    /// inactive root has no cached entries on this CPU.
+    // SMP: other CPUs running this address space need a shootdown here.
+    fn flush_if_active(&self, virtual_address: VirtAddr) {
+        if current_root() == self.root {
+            invalidate_page(virtual_address);
+        }
+    }
+
     /// Explicitly tear down the private address space. `Drop` performs the
     /// same cleanup for callers that rely on RAII.
     pub fn destroy(self) -> Result<(), AddressSpaceError> {
@@ -297,7 +335,7 @@ impl AddressSpace {
         let result =
             unsafe { map_page_in_root(self.root, virtual_address, physical_frame, flags.0) };
         if result.is_ok() {
-            invalidate_page(virtual_address);
+            self.flush_if_active(virtual_address);
         }
         result
     }
@@ -334,7 +372,7 @@ impl AddressSpace {
             let frame = unsafe { unmap_page_in_root(self.root, virtual_address) }?;
             (frame, entry)
         };
-        invalidate_page(virtual_address);
+        self.flush_if_active(virtual_address);
         let ownership = self.remove_owned(virtual_address, frame);
         Ok(UnmappedMapping {
             frame,
@@ -421,7 +459,7 @@ impl AddressSpace {
                 return Err(AddressSpaceError::NotMapped);
             }
             *slot = (*slot & ADDRESS_MASK) | flags.0;
-            invalidate_page(virtual_address);
+            self.flush_if_active(virtual_address);
             Ok(())
         }
     }
@@ -557,7 +595,7 @@ fn table_ptr(frame: PhysFrame) -> *mut PageTable {
     // Before the higher-half map is active, table frames are only reachable
     // through the bootstrap identity window. Afterwards prefer the direct map
     // so page-table edits do not depend on the mutable BIOS bootstrap PDPT.
-    if unsafe { ACTIVE } {
+    if ACTIVE.load(Ordering::Acquire) {
         phys_to_virt(PhysAddr(frame.0)).0 as *mut PageTable
     } else {
         frame.0 as *mut PageTable
@@ -572,21 +610,25 @@ fn overlaps_heap(frame: PhysFrame) -> bool {
 }
 
 fn alloc_table() -> Option<PhysFrame> {
-    // Never zero a heap-overlapping frame: that corrupts the freelist. If the
-    // permanent heap reservation is intact this loop finds a usable frame;
-    // otherwise surface OutOfFrames instead of silently smashing the heap.
-    let max_attempts = 100;
-    for _ in 0..max_attempts {
-        let frame = frame::alloc_frame_below(PhysAddr(4 * 1024 * 1024 * 1024))?;
-        if !overlaps_heap(frame) {
-            unsafe {
-                (*table_ptr(frame)).0 = [0; 512];
-            }
-            return Some(frame);
-        }
-        frame::free_frame(frame);
+    // Before CR3 holds the final tables, `table_ptr` reaches table frames
+    // through the bootstrap identity window; afterwards the direct map covers
+    // every tracked frame.
+    let frame = if ACTIVE.load(Ordering::Acquire) {
+        frame::alloc_frame()?
+    } else {
+        frame::alloc_frame_below(PhysAddr(BOOTSTRAP_PD_COUNT as u64 * GIGABYTE))?
+    };
+    // The heap is reserved in the frame bitmap at boot; a heap frame here
+    // means that reservation is broken, and zeroing it would smash the heap.
+    debug_assert!(
+        !overlaps_heap(frame),
+        "frame allocator returned heap frame {:#x}",
+        frame.0
+    );
+    unsafe {
+        (*table_ptr(frame)).0 = [0; 512];
     }
-    None
+    Some(frame)
 }
 fn child(table: *mut PageTable, index: usize) -> Option<&'static mut PageTable> {
     unsafe {
@@ -597,6 +639,11 @@ fn child(table: *mut PageTable, index: usize) -> Option<&'static mut PageTable> 
         Some(&mut *table_ptr(PhysFrame((*table).0[index] & ADDRESS_MASK)))
     }
 }
+
+/// Intermediate entry for user (lower-half) tables. x86 ANDs U/S and R/W
+/// across every level, so intermediates are permissive and the leaf alone
+/// decides the effective permission. Kernel-half intermediates never get USER.
+const USER_TABLE: u64 = PRESENT | WRITABLE | USER;
 
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn map_page_in_root(
@@ -614,7 +661,7 @@ unsafe fn map_page_in_root(
     let mut pd_created = false;
     if pml4.0[pml4_index] & PRESENT == 0 {
         let frame = alloc_table().ok_or(AddressSpaceError::OutOfFrames)?;
-        pml4.0[pml4_index] = frame.0 | PRESENT | WRITABLE;
+        pml4.0[pml4_index] = frame.0 | USER_TABLE;
         pml4_created = true;
     }
     let pdpt = &mut *table_ptr(PhysFrame(pml4.0[pml4_index] & ADDRESS_MASK));
@@ -630,7 +677,7 @@ unsafe fn map_page_in_root(
                 return Err(AddressSpaceError::OutOfFrames);
             }
         };
-        pdpt.0[pdpt_index] = frame.0 | PRESENT | WRITABLE;
+        pdpt.0[pdpt_index] = frame.0 | USER_TABLE;
         pdpt_created = true;
     }
     let pd = &mut *table_ptr(PhysFrame(pdpt.0[pdpt_index] & ADDRESS_MASK));
@@ -646,7 +693,7 @@ unsafe fn map_page_in_root(
                 return Err(AddressSpaceError::OutOfFrames);
             }
         };
-        pd.0[pd_index] = frame.0 | PRESENT | WRITABLE;
+        pd.0[pd_index] = frame.0 | USER_TABLE;
         pd_created = true;
     }
     let pt = &mut *table_ptr(PhysFrame(pd.0[pd_index] & ADDRESS_MASK));
@@ -699,73 +746,95 @@ unsafe fn rollback_tables(
     }
 }
 
-unsafe fn load_cr3(root: *const PageTable) {
+unsafe fn load_cr3(root: u64) {
+    debug_assert!(root < 1 << 52, "virtual address {root:#x} loaded into CR3");
     unsafe {
-        core::arch::asm!("mov cr3, {}", in(reg) root as u64, options(nostack, preserves_flags));
+        core::arch::asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags));
     }
 }
 
-unsafe fn install_bootstrap_identity_map() {
+/// Load a writable identity map of the first `BOOTSTRAP_PD_COUNT` GiB while
+/// the final tables are built. If the image already runs in the high window
+/// (BIOS), the GiB-sized chunks that hold it are aliased there as well.
+unsafe fn install_bootstrap_identity_map(kernel_start: u64, kernel_end: u64) {
     unsafe {
         BOOTSTRAP_PML4.0 = [0; 512];
         BOOTSTRAP_PDPT.0 = [0; 512];
-        BOOTSTRAP_PML4.0[0] = (&raw const BOOTSTRAP_PDPT) as u64 | PRESENT | WRITABLE;
+        BOOTSTRAP_PDPT_HIGH.0 = [0; 512];
+        BOOTSTRAP_PML4.0[0] = static_phys(&raw const BOOTSTRAP_PDPT) | PRESENT | WRITABLE;
         let bootstrap_pd = &raw mut BOOTSTRAP_PD as *mut PageTable;
         for index in 0..BOOTSTRAP_PD_COUNT {
             let pd = &mut *bootstrap_pd.add(index);
             pd.0 = [0; 512];
-            BOOTSTRAP_PDPT.0[index] = (pd as *mut PageTable as u64) | PRESENT | WRITABLE;
+            BOOTSTRAP_PDPT.0[index] = static_phys(pd) | PRESENT | WRITABLE;
             for entry in 0..512 {
                 let physical = (index as u64 * (1 << 30)) + entry as u64 * (1 << 21);
                 pd.0[entry] = physical | PRESENT | WRITABLE | HUGE;
             }
         }
-        load_cr3(&raw const BOOTSTRAP_PML4);
+        let delta = layout::image_delta();
+        if delta != 0 {
+            assert!(
+                delta.is_multiple_of(GIGABYTE),
+                "image delta must be GiB aligned"
+            );
+            let high_pml4 = ((kernel_start + delta) >> 39) as usize & 0x1ff;
+            BOOTSTRAP_PML4.0[high_pml4] =
+                static_phys(&raw const BOOTSTRAP_PDPT_HIGH) | PRESENT | WRITABLE;
+            let mut gib = kernel_start / GIGABYTE;
+            while gib * GIGABYTE < kernel_end {
+                let index = gib as usize;
+                assert!(
+                    index < BOOTSTRAP_PD_COUNT,
+                    "kernel image outside bootstrap window"
+                );
+                let high = gib * GIGABYTE + delta;
+                assert_eq!(((high >> 39) & 0x1ff) as usize, high_pml4);
+                BOOTSTRAP_PDPT_HIGH.0[((high >> 30) & 0x1ff) as usize] =
+                    static_phys(bootstrap_pd.add(index)) | PRESENT | WRITABLE;
+                gib += 1;
+            }
+        }
+        load_cr3(static_phys(&raw const BOOTSTRAP_PML4));
     }
 }
 
 pub fn init(kernel_start: u64, kernel_end: u64) {
-    init_with_mode(
-        kernel_start,
-        kernel_end,
-        KernelSections::EMPTY,
-        kernel_start != 0 && kernel_start < 4 * 1024 * 1024 * 1024,
-    );
+    init_with_mode(kernel_start, kernel_end, KernelSections::EMPTY, 0);
 }
 
 pub fn init_with_mode(
     kernel_start: u64,
     kernel_end: u64,
     sections: KernelSections,
-    bios_boot: bool,
+    image_high_delta: u64,
 ) {
     let map = frame::memory_map();
+    let _guard = KERNEL_MAP_LOCK.lock();
     crate::arch::x86_64::cpu::enable_nxe();
-    unsafe {
-        BIOS_BOOT = bios_boot;
-    }
     unsafe {
         PML4.0 = [0; 512];
     }
     unsafe {
-        install_bootstrap_identity_map();
+        install_bootstrap_identity_map(kernel_start, kernel_end);
     }
     for table in [
-        (&raw const BOOTSTRAP_PML4) as u64,
-        (&raw const BOOTSTRAP_PDPT) as u64,
+        static_phys(&raw const BOOTSTRAP_PML4),
+        static_phys(&raw const BOOTSTRAP_PDPT),
+        static_phys(&raw const BOOTSTRAP_PDPT_HIGH),
     ] {
         frame::reserve_range(PhysAddr(table), PhysAddr(table + PAGE_SIZE));
     }
     unsafe {
         let bootstrap_pd = &raw const BOOTSTRAP_PD as *const PageTable;
         for index in 0..BOOTSTRAP_PD_COUNT {
-            let address = bootstrap_pd.add(index) as u64;
+            let address = static_phys(bootstrap_pd.add(index));
             frame::reserve_range(PhysAddr(address), PhysAddr(address + PAGE_SIZE));
         }
     }
     frame::reserve_range(
-        PhysAddr((&raw const PML4) as u64),
-        PhysAddr((&raw const PML4) as u64 + PAGE_SIZE),
+        PhysAddr(static_phys(&raw const PML4)),
+        PhysAddr(static_phys(&raw const PML4) + PAGE_SIZE),
     );
     let gigabyte_pages = supports_1g_pages();
     for region in map.regions[..map.count].iter() {
@@ -862,9 +931,88 @@ pub fn init_with_mode(
             );
         }
     }
+    if image_high_delta != 0
+        && kernel_start < kernel_end
+        && let Err(error) = map_image_alias(kernel_start, kernel_end, sections, image_high_delta)
+    {
+        crate::serial_println!("Memory: high kernel image mapping failed: {}", error);
+    }
+    prepopulate_kernel_slots();
     // Do not restore PML4[0] to BOOTSTRAP_PDPT. The final identity mappings
     // remain active, making the temporary permissive bootstrap aliases
     // unreachable after CR3 activation.
+}
+
+/// Give every upper-half PML4 slot a table so the kernel half never changes
+/// at the PML4 level again (at most 256 frames). The caller must hold
+/// `KERNEL_MAP_LOCK`.
+fn prepopulate_kernel_slots() {
+    unsafe {
+        let root = &raw mut PML4;
+        for index in layout::KERNEL_PML4_FIRST..512 {
+            if (*root).0[index] & PRESENT == 0 {
+                let table = alloc_table().expect("out of frames for kernel PDPTs");
+                (*root).0[index] = table.0 | PRESENT | WRITABLE;
+            }
+        }
+    }
+    KERNEL_SLOTS_FROZEN.store(true, Ordering::Release);
+}
+
+/// Remove the boot identity map from the kernel root. Nothing may use a
+/// lower-half address afterwards: process roots will not contain it.
+pub fn drop_lower_half() {
+    let _guard = KERNEL_MAP_LOCK.lock();
+    unsafe {
+        let root = &mut *table_ptr(page_table_frame());
+        for entry in root.0[..layout::KERNEL_PML4_FIRST].iter_mut() {
+            if *entry & PRESENT != 0 {
+                free_table_tree(PhysFrame(*entry & ADDRESS_MASK), 3);
+                *entry = 0;
+            }
+        }
+    }
+    LOWER_HALF_DROPPED.store(true, Ordering::Release);
+    flush_current();
+}
+
+/// The page-table entries that translate `virtual_address` in `root`, from
+/// PML4 down. The returned count stops early at a huge leaf or a non-present
+/// entry (which is included).
+pub fn walk_entries(root: PhysFrame, virtual_address: VirtAddr) -> ([u64; 4], usize) {
+    let mut entries = [0u64; 4];
+    if !is_canonical(virtual_address.0) {
+        return (entries, 0);
+    }
+    let indices = table_indices(virtual_address.0);
+    let mut table = root;
+    for (level, index) in indices.iter().enumerate() {
+        let entry = unsafe { (*table_ptr(table)).0[*index] };
+        entries[level] = entry;
+        if entry & PRESENT == 0 || (level > 0 && level < 3 && entry & HUGE != 0) || level == 3 {
+            return (entries, level + 1);
+        }
+        table = PhysFrame(entry & ADDRESS_MASK);
+    }
+    (entries, 4)
+}
+
+pub fn lower_half_dropped() -> bool {
+    LOWER_HALF_DROPPED.load(Ordering::Acquire)
+}
+
+/// Whether `root` shares every kernel PML4 entry with the kernel root.
+pub fn kernel_half_matches(root: PhysFrame) -> bool {
+    let theirs = unsafe { &*table_ptr(root) };
+    let ours = unsafe { &*table_ptr(page_table_frame()) };
+    (layout::KERNEL_PML4_FIRST..512)
+        .all(|index| ours.0[index] & PRESENT != 0 && theirs.0[index] == ours.0[index])
+}
+
+/// Whether `virtual_address` has a present translation in `root`.
+pub fn is_mapped_in(root: PhysFrame, virtual_address: VirtAddr) -> bool {
+    let (entries, levels) = walk_entries(root, virtual_address);
+    levels > 0 && entries[levels - 1] & PRESENT != 0
 }
 
 fn maps_in_direct_map(kind: crate::boot::PhysicalMemoryKind) -> bool {
@@ -876,18 +1024,6 @@ fn maps_in_direct_map(kind: crate::boot::PhysicalMemoryKind) -> bool {
             | crate::boot::PhysicalMemoryKind::Runtime
             | crate::boot::PhysicalMemoryKind::Mmio
     )
-}
-
-fn pml4_index(physical: u64, direct: bool) -> Option<usize> {
-    let limit = if direct {
-        DIRECT_MAP_LIMIT
-    } else {
-        IDENTITY_MAP_LIMIT
-    };
-    if physical >= limit {
-        return None;
-    }
-    Some((((physical >> 39) as usize) + if direct { 256 } else { 0 }) & 0x1ff)
 }
 
 fn supports_1g_pages() -> bool {
@@ -953,9 +1089,6 @@ fn map_range(
 }
 
 fn map_pages(start: u64, end: u64, direct: bool, flags: PageFlags) -> Result<(), &'static str> {
-    if start >= end {
-        return Ok(());
-    }
     if end
         > if direct {
             DIRECT_MAP_LIMIT
@@ -965,18 +1098,49 @@ fn map_pages(start: u64, end: u64, direct: bool, flags: PageFlags) -> Result<(),
     {
         return Err("section range exceeds four-level canonical coverage");
     }
+    map_pages_at(start, end, if direct { KERNEL_VIRT_BASE } else { 0 }, flags)
+}
+
+/// Map `start..end` at `start + offset` with 4 KiB pages, replacing whatever
+/// the range held. The caller must hold `KERNEL_MAP_LOCK`.
+fn map_pages_at(start: u64, end: u64, offset: u64, flags: PageFlags) -> Result<(), &'static str> {
     let mut physical = start;
     while physical < end {
-        map_page(
-            VirtAddr(if direct {
-                KERNEL_VIRT_BASE + physical
-            } else {
-                physical
-            }),
-            PhysAddr(physical),
-            flags,
-        )?;
+        unsafe {
+            map_page_locked(
+                VirtAddr(physical.wrapping_add(offset)),
+                PhysAddr(physical),
+                flags,
+                Overwrite::Replace,
+            )
+        }?;
         physical += PAGE_SIZE;
+    }
+    Ok(())
+}
+
+/// Map the kernel image into the top-2-GiB window at `physical + delta`:
+/// writable/NX for bytes outside known sections, then each section with its
+/// own permissions. The caller must hold `KERNEL_MAP_LOCK`.
+fn map_image_alias(
+    kernel_start: u64,
+    kernel_end: u64,
+    sections: KernelSections,
+    delta: u64,
+) -> Result<(), &'static str> {
+    if kernel_start.wrapping_add(delta) < layout::KERNEL_IMAGE_BASE {
+        return Err("image alias below the kernel image window");
+    }
+    map_pages_at(kernel_start, kernel_end, delta, PageFlags::WRITABLE)?;
+    for (section, flags) in [
+        (sections.text, PageFlags::KERNEL_TEXT),
+        (sections.rodata, PageFlags::READ_ONLY),
+        (sections.data, PageFlags::WRITABLE),
+        (sections.bss, PageFlags::WRITABLE),
+    ] {
+        if section.is_present() {
+            map_pages_at(section.start, section.end, delta, flags)?;
+        }
     }
     Ok(())
 }
@@ -988,23 +1152,39 @@ fn map_leaf(
     flags: PageFlags,
 ) -> Result<(), &'static str> {
     if size == PAGE_SIZE {
-        return map_page(virtual_address, physical, flags);
+        return unsafe { map_page_locked(virtual_address, physical, flags, Overwrite::Replace) };
     }
-    let normalized = if virtual_address.0 >= KERNEL_VIRT_BASE {
-        virtual_address.0 - KERNEL_VIRT_BASE
-    } else {
-        virtual_address.0
-    };
-    let root = pml4_index(normalized, virtual_address.0 >= KERNEL_VIRT_BASE)
-        .ok_or("physical range exceeds four-level canonical coverage")?;
-    let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
+    if !is_canonical(virtual_address.0) {
+        return Err("physical range exceeds four-level canonical coverage");
+    }
+    let [root, pdpt_index, pd_index, _] = table_indices(virtual_address.0);
     let pdpt = child(&raw mut PML4, root).ok_or("out of page-table frames")?;
-    if size == GIGABYTE {
-        pdpt.0[pdpt_index] = physical.0 | flags.0 | HUGE;
+    let slot = if size == GIGABYTE {
+        &mut pdpt.0[pdpt_index]
     } else {
         let pd = child(pdpt as *mut PageTable, pdpt_index).ok_or("out of page-table frames")?;
-        pd.0[((normalized >> 21) & 0x1ff) as usize] = physical.0 | flags.0 | HUGE;
+        &mut pd.0[pd_index]
+    };
+    if *slot & PRESENT != 0 && *slot & HUGE == 0 {
+        // A finer-grained table already covers this range (for example a
+        // section that was mapped with 4 KiB permissions). Overwriting it
+        // with a huge leaf would leak the table and discard those
+        // permissions, so fill it page by page instead.
+        let mut offset = 0;
+        while offset < size {
+            unsafe {
+                map_page_locked(
+                    VirtAddr(virtual_address.0 + offset),
+                    PhysAddr(physical.0 + offset),
+                    flags,
+                    Overwrite::Replace,
+                )
+            }?;
+            offset += PAGE_SIZE;
+        }
+        return Ok(());
     }
+    *slot = physical.0 | flags.0 | HUGE;
     Ok(())
 }
 
@@ -1026,38 +1206,82 @@ pub fn virt_to_phys(v: VirtAddr) -> Option<PhysAddr> {
         None
     }
 }
-#[inline]
-pub fn identity(p: PhysAddr) -> VirtAddr {
-    VirtAddr(p.0)
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Overwrite {
+    /// Fail if a different translation is already present.
+    Reject,
+    /// Replace whatever is present (boot-time permission overrides).
+    Replace,
 }
 
+/// Map one kernel-owned 4 KiB page in the shared kernel tables. An identical
+/// existing mapping is accepted; a different one is an error, so accidental
+/// double-mappings surface instead of silently retargeting a page.
 pub fn map_page(
     virtual_address: VirtAddr,
     physical: PhysAddr,
     flags: PageFlags,
 ) -> Result<(), &'static str> {
+    let _guard = KERNEL_MAP_LOCK.lock();
+    unsafe { map_page_locked(virtual_address, physical, flags, Overwrite::Reject) }
+}
+
+/// Like [`map_page`], but deliberately replaces an existing translation.
+pub fn remap_page(
+    virtual_address: VirtAddr,
+    physical: PhysAddr,
+    flags: PageFlags,
+) -> Result<(), &'static str> {
+    let _guard = KERNEL_MAP_LOCK.lock();
+    unsafe { map_page_locked(virtual_address, physical, flags, Overwrite::Replace) }
+}
+
+const fn table_indices(virtual_address: u64) -> [usize; 4] {
+    [
+        ((virtual_address >> 39) & 0x1ff) as usize,
+        ((virtual_address >> 30) & 0x1ff) as usize,
+        ((virtual_address >> 21) & 0x1ff) as usize,
+        ((virtual_address >> 12) & 0x1ff) as usize,
+    ]
+}
+
+const fn is_canonical(virtual_address: u64) -> bool {
+    virtual_address < (1 << 47) || virtual_address >= KERNEL_VIRT_BASE
+}
+
+/// # Safety
+/// The caller must hold `KERNEL_MAP_LOCK`.
+unsafe fn map_page_locked(
+    virtual_address: VirtAddr,
+    physical: PhysAddr,
+    flags: PageFlags,
+    mode: Overwrite,
+) -> Result<(), &'static str> {
     if virtual_address.0 & (PAGE_SIZE - 1) != 0 || physical.0 & (PAGE_SIZE - 1) != 0 {
         return Err("unaligned page mapping");
     }
-    let normalized = if virtual_address.0 >= KERNEL_VIRT_BASE {
-        virtual_address.0 - KERNEL_VIRT_BASE
-    } else {
-        virtual_address.0
-    };
-    let limit = if virtual_address.0 >= KERNEL_VIRT_BASE {
-        DIRECT_MAP_LIMIT
-    } else {
-        IDENTITY_MAP_LIMIT
-    };
-    if normalized >= limit {
-        return Err("address outside direct map");
+    if !is_canonical(virtual_address.0) {
+        return Err("address outside canonical paging coverage");
     }
-    let pml4_index = pml4_index(normalized, virtual_address.0 >= KERNEL_VIRT_BASE)
-        .ok_or("address outside canonical paging coverage")?;
-    let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
-    let pd_index = ((normalized >> 21) & 0x1ff) as usize;
-    let pt_index = ((normalized >> 12) & 0x1ff) as usize;
+    debug_assert!(
+        physical.0 < 1 << 52,
+        "virtual address {:#x} used as physical",
+        physical.0
+    );
+    let [pml4_index, pdpt_index, pd_index, pt_index] = table_indices(virtual_address.0);
+    if pml4_index < layout::KERNEL_PML4_FIRST && LOWER_HALF_DROPPED.load(Ordering::Acquire) {
+        return Err("lower half is reserved for user address spaces");
+    }
+    let mut split = false;
     unsafe {
+        let root = &*table_ptr(page_table_frame());
+        assert!(
+            pml4_index < layout::KERNEL_PML4_FIRST
+                || !KERNEL_SLOTS_FROZEN.load(Ordering::Acquire)
+                || root.0[pml4_index] & PRESENT != 0,
+            "kernel PML4 slot {pml4_index} created after the kernel half was frozen"
+        );
         let pdpt =
             child(table_ptr(page_table_frame()), pml4_index).ok_or("out of page-table frames")?;
         if pdpt.0[pdpt_index] & HUGE != 0 {
@@ -1070,6 +1294,7 @@ pub fn map_page(
                 pd.0[i] = (old + i as u64 * TWO_MIB) | inherited | HUGE;
             }
             pdpt.0[pdpt_index] = pd_frame.0 | PRESENT | WRITABLE;
+            split = true;
         }
         let pd = child(pdpt as *mut PageTable, pdpt_index).ok_or("out of page-table frames")?;
         if pd.0[pd_index] & HUGE != 0 {
@@ -1083,29 +1308,40 @@ pub fn map_page(
                 pt.0[i] = (old + i as u64 * PAGE_SIZE) | inherited;
             }
             pd.0[pd_index] = pt_frame.0 | PRESENT | WRITABLE;
+            split = true;
         }
         let pt = child(pd as *mut PageTable, pd_index).ok_or("out of page-table frames")?;
-        pt.0[pt_index] = physical.0 | flags.0;
+        let old = pt.0[pt_index];
+        let new = physical.0 | flags.0;
+        if old & PRESENT != 0 && old != new && mode == Overwrite::Reject {
+            if split {
+                flush_current();
+            }
+            return Err("page already mapped");
+        }
+        pt.0[pt_index] = new;
+        // A split changes the page size backing this range; the CPU may hold
+        // either size until flushed, so drop everything. Splits only happen at
+        // boot and for MMIO, where a full flush is cheap.
+        if split {
+            flush_current();
+        } else if old & PRESENT != 0 && old != new {
+            invalidate_page(virtual_address);
+        }
     }
     Ok(())
 }
 
-/// Remove a kernel page from the active root and return its physical frame.
+/// Remove a kernel page from the shared kernel tables and return its frame.
 /// This is used by the page-backed heap; user mappings use `AddressSpace`.
 pub fn unmap_page(virtual_address: VirtAddr) -> Result<PhysAddr, &'static str> {
     if virtual_address.0 & (PAGE_SIZE - 1) != 0 || virtual_address.0 < KERNEL_VIRT_BASE {
         return Err("invalid kernel page address");
     }
-    let normalized = virtual_address.0 - KERNEL_VIRT_BASE;
-    if normalized >= DIRECT_MAP_LIMIT {
-        return Err("address outside direct map window");
-    }
-    let pml4_index = pml4_index(normalized, true).ok_or("noncanonical address")?;
-    let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
-    let pd_index = ((normalized >> 21) & 0x1ff) as usize;
-    let pt_index = ((normalized >> 12) & 0x1ff) as usize;
+    let [pml4_index, pdpt_index, pd_index, pt_index] = table_indices(virtual_address.0);
+    let _guard = KERNEL_MAP_LOCK.lock();
     unsafe {
-        let pml4 = &mut *table_ptr(PhysFrame((&raw const PML4) as u64));
+        let pml4 = &mut *table_ptr(page_table_frame());
         let pdpt = table_from_entry(pml4.0[pml4_index]).map_err(|_| "page not mapped")?;
         let pd = table_from_entry(pdpt.0[pdpt_index]).map_err(|_| "page not mapped")?;
         let pt = table_from_entry(pd.0[pd_index]).map_err(|_| "page not mapped")?;
@@ -1122,8 +1358,8 @@ pub fn unmap_page(virtual_address: VirtAddr) -> Result<PhysAddr, &'static str> {
 
 pub fn activate() {
     unsafe {
-        core::arch::asm!("mov cr3, {}", in(reg) (&raw const PML4) as u64, options(nostack, preserves_flags));
-        ACTIVE = true;
+        load_cr3(static_phys(&raw const PML4));
+        ACTIVE.store(true, Ordering::Release);
     }
     frame::activate_metadata();
 }
@@ -1131,13 +1367,22 @@ pub fn activate() {
 /// Load an externally owned address-space root. The address-space manager owns
 /// the root frame; this function only changes the active CPU page-table root.
 pub fn activate_root(root: PhysFrame) {
-    unsafe {
-        core::arch::asm!(
-            "mov cr3, {}",
-            in(reg) root.0,
-            options(nostack, preserves_flags)
+    if cfg!(debug_assertions) && ACTIVE.load(Ordering::Acquire) {
+        let (ip, sp): (u64, u64);
+        unsafe {
+            core::arch::asm!("lea {}, [rip]", "mov {}, rsp", out(reg) ip, out(reg) sp,
+                options(nomem, nostack, preserves_flags));
+        }
+        assert!(
+            is_mapped_in(root, VirtAddr(ip & !(PAGE_SIZE - 1)))
+                && is_mapped_in(root, VirtAddr(sp & !(PAGE_SIZE - 1))),
+            "root {:#x} does not map the running code {ip:#x} or stack {sp:#x}",
+            root.0
         );
-        ACTIVE = true;
+    }
+    unsafe {
+        load_cr3(root.0);
+        ACTIVE.store(true, Ordering::Release);
     }
     frame::activate_metadata();
 }
@@ -1152,13 +1397,11 @@ struct MappingInfo {
 
 #[cfg(feature = "paging-debug")]
 unsafe fn inspect_mapping(virtual_address: u64) -> Option<MappingInfo> {
-    let direct = virtual_address >= KERNEL_VIRT_BASE;
-    let normalized = if direct {
-        virtual_address - KERNEL_VIRT_BASE
-    } else {
-        virtual_address
-    };
-    let pml4_index = pml4_index(normalized, direct)?;
+    if !is_canonical(virtual_address) {
+        return None;
+    }
+    let [pml4_index, pdpt_index, pd_index, pt_index] = table_indices(virtual_address);
+    let normalized = virtual_address;
     let pml4_ptr = core::ptr::addr_of!(PML4);
     let pml4 = unsafe { &*pml4_ptr };
     let pml4_entry = pml4.0[pml4_index];
@@ -1166,7 +1409,6 @@ unsafe fn inspect_mapping(virtual_address: u64) -> Option<MappingInfo> {
         return None;
     }
     let pdpt = unsafe { &*table_ptr(PhysFrame(pml4_entry & ADDRESS_MASK)) };
-    let pdpt_index = ((normalized >> 30) & 0x1ff) as usize;
     let pdpt_entry = pdpt.0[pdpt_index];
     if pdpt_entry & PRESENT == 0 {
         return None;
@@ -1179,7 +1421,6 @@ unsafe fn inspect_mapping(virtual_address: u64) -> Option<MappingInfo> {
         });
     }
     let pd = unsafe { &*table_ptr(PhysFrame(pdpt_entry & ADDRESS_MASK)) };
-    let pd_index = ((normalized >> 21) & 0x1ff) as usize;
     let pd_entry = pd.0[pd_index];
     if pd_entry & PRESENT == 0 {
         return None;
@@ -1192,7 +1433,6 @@ unsafe fn inspect_mapping(virtual_address: u64) -> Option<MappingInfo> {
         });
     }
     let pt = unsafe { &*table_ptr(PhysFrame(pd_entry & ADDRESS_MASK)) };
-    let pt_index = ((normalized >> 12) & 0x1ff) as usize;
     let pt_entry = pt.0[pt_index];
     if pt_entry & PRESENT == 0 {
         return None;
@@ -1251,7 +1491,10 @@ fn dump_section(name: &str, section: crate::boot::boot_info::KernelSection) {
     );
     for (suffix, physical) in [("start", section.start), ("end", section.end - 1)] {
         dump_mapping(name, suffix, "identity", physical);
-        dump_mapping(name, suffix, "higher-half", KERNEL_VIRT_BASE + physical);
+        dump_mapping(name, suffix, "direct-map", KERNEL_VIRT_BASE + physical);
+        if layout::image_delta() != 0 {
+            dump_mapping(name, suffix, "image", layout::image_phys_to_virt(physical));
+        }
     }
 }
 
@@ -1264,12 +1507,9 @@ pub(crate) fn inspect_final_kernel_mappings(sections: KernelSections) {
     dump_section(".bss", sections.bss);
 }
 pub fn is_active() -> bool {
-    unsafe { ACTIVE }
-}
-pub fn prefer_identity_mmio() -> bool {
-    unsafe { BIOS_BOOT }
+    ACTIVE.load(Ordering::Acquire)
 }
 pub fn page_table_frame() -> PhysFrame {
-    PhysFrame((&raw const PML4) as u64)
+    PhysFrame(static_phys(&raw const PML4))
 }
 pub fn reserve_page_tables() {}

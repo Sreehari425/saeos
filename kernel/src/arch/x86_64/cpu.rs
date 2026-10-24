@@ -31,6 +31,15 @@ pub fn interrupts_enabled() -> bool {
 }
 
 #[inline]
+pub fn stack_pointer() -> u64 {
+    let value: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) value, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+#[inline]
 pub fn pause() {
     core::hint::spin_loop();
 }

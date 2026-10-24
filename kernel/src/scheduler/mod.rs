@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::task::{
     BlockReason, DispatchDecision, ExitStatus, ProcessId, ResumeContext, ResumeKind, Scheduler,
-    SchedulerStats, TaskEntry, TaskId, TaskSnapshot, VoluntaryContext, WaitQueue,
+    SchedulerStats, StackStorage, TaskEntry, TaskId, TaskSnapshot, VoluntaryContext, WaitQueue,
 };
 
 mod dispatch;
@@ -37,6 +37,12 @@ fn scheduler_debug(message: core::fmt::Arguments<'_>) {
 
 #[cfg(not(feature = "scheduler-debug"))]
 fn scheduler_debug(_: core::fmt::Arguments<'_>) {}
+/// Look up a stack's owner from a fault handler: never blocks, and gives up
+/// if the scheduler lock is held by the code that faulted.
+pub fn try_task_on_stack(base: u64) -> Option<(TaskId, &'static str)> {
+    SCHEDULER.try_lock()?.task_on_stack(base)
+}
+
 pub fn current() -> Option<TaskId> {
     SCHEDULER.lock().current()
 }
@@ -101,16 +107,46 @@ pub fn with_scheduler<R>(operation: impl FnOnce(&mut Scheduler) -> R) -> R {
     operation(&mut scheduler)
 }
 
+/// Allocate a guarded kernel stack. Called before taking the scheduler lock:
+/// stack setup maps pages, and the scheduler must never call into the memory
+/// manager while locked.
+pub(crate) fn new_kernel_stack(name: &str) -> StackStorage {
+    crate::mm::kvm::KernelStackAllocation::new()
+        .unwrap_or_else(|error| panic!("no kernel stack for task '{name}': {error:?}"))
+}
+
 pub fn init() {
+    let stacks = [
+        new_kernel_stack("idle"),
+        new_kernel_stack("shell"),
+        new_kernel_stack("reaper"),
+    ];
     let (idle, shell, reaper) = with_scheduler(|scheduler| {
-        let idle = scheduler.spawn_kernel_task(idle_task, "idle", true);
-        let shell = scheduler.spawn_kernel_task(crate::shell::run, "shell", false);
-        let reaper = scheduler.spawn_kernel_task(reaper_task, "reaper", false);
+        let [idle_stack, shell_stack, reaper_stack] = stacks;
+        let idle = scheduler.spawn_kernel_task(idle_task, "idle", true, idle_stack);
+        let shell = scheduler.spawn_kernel_task(crate::shell::run, "shell", false, shell_stack);
+        let reaper = scheduler.spawn_kernel_task(reaper_task, "reaper", false, reaper_stack);
         (idle, shell, reaper)
     });
     for task in [idle, shell, reaper] {
         attach_task_to_new_process(task);
     }
+    #[cfg(feature = "mm-guard-test")]
+    spawn_kernel_task(guard_test_task, "guard-test");
+}
+
+/// Recurse until the kernel stack runs into its guard. The kernel must
+/// report the overflow by task name instead of corrupting memory.
+#[cfg(feature = "mm-guard-test")]
+fn guard_test_task() -> ! {
+    #[inline(never)]
+    fn recurse(depth: u64) -> u64 {
+        let frame = core::hint::black_box([depth; 32]);
+        recurse(depth + 1).wrapping_add(frame[depth as usize % 32])
+    }
+    crate::serial_println!("guard-test: recursing until the stack guard is hit.");
+    let depth = recurse(0);
+    panic!("guard-test: recursion returned {depth} without hitting the guard");
 }
 
 #[cfg(not(feature = "scheduler-selftest"))]

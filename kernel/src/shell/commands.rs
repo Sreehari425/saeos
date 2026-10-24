@@ -10,7 +10,6 @@ use crate::collections::{ChainedMap, HashSet, Map, OpenAddressMap, Set, StaticMa
 use crate::drivers::console;
 use crate::drivers::vga::Color;
 #[cfg(feature = "mm-selftest")]
-use crate::mm::paging;
 #[cfg(feature = "mm-selftest")]
 use crate::mm::selftest::{self, Status};
 use crate::mm::{HEAP_SIZE, heap_start};
@@ -125,6 +124,26 @@ pub fn execute(cmd: &str) {
                 HEAP_SIZE / (1024 * 1024),
                 HEAP_SIZE
             );
+            let frames = crate::mm::frame::stats();
+            let heap = crate::mm::heap::stats();
+            println!(
+                "Frames:        {} free of {} tracked (largest block {} pages)",
+                frames.free_frames, frames.tracked_frames, frames.largest_contiguous_block
+            );
+            println!(
+                "Page heap:     {} ({} pages mapped)",
+                if crate::mm::heap::page_heap_enabled() {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                heap.page_heap_pages
+            );
+            println!(
+                "Kernel stacks: {} of {} arena slots in use",
+                crate::mm::kvm::stacks_in_use(),
+                crate::mm::kvm::MAX_STACKS
+            );
 
             console::set_color(Color::Yellow, Color::Black);
             println!("\n1. Testing dynamic Rust 'alloc' crate:");
@@ -212,10 +231,10 @@ pub fn execute(cmd: &str) {
                 println!("--- Memory and Heap Self-Test ---");
                 println!(
                     "Boot mode: {}",
-                    if paging::prefer_identity_mmio() {
-                        "BIOS"
-                    } else {
+                    if cfg!(target_os = "uefi") {
                         "UEFI"
+                    } else {
+                        "BIOS"
                     }
                 );
                 let report = selftest::run();

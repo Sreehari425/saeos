@@ -83,7 +83,8 @@ pub fn collect_child_status(
 }
 
 pub fn spawn_kernel_task(entry: TaskEntry, name: &'static str) -> TaskId {
-    let task = with_scheduler(|scheduler| scheduler.spawn_kernel_task(entry, name, false));
+    let stack = new_kernel_stack(name);
+    let task = with_scheduler(|scheduler| scheduler.spawn_kernel_task(entry, name, false, stack));
     attach_task_to_new_process(task);
     task
 }

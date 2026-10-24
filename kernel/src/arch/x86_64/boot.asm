@@ -1,7 +1,14 @@
 global _start
 extern kernel_main_bios
-extern _bss_start
-extern _bss_end
+extern _boot_bss_start
+extern _boot_bss_end
+extern _bss_start_phys
+extern _bss_end_phys
+
+; Must match KERNEL_OFFSET in linker.ld and mm::layout::KERNEL_IMAGE_BASE.
+; The low stub below runs at its load address; everything in .text/.rodata/
+; .data/.bss is linked at KERNEL_OFFSET + load address.
+KERNEL_OFFSET equ 0xffffffff80000000
 
 section .multiboot
 align 4
@@ -9,19 +16,27 @@ align 4
     dd 0x00000043                 ; Flags: ALIGN | MEMINFO | MEMORY MAP
     dd -(0x1BADB002 + 0x00000043) ; Checksum
 
-section .bss
+section .boot.bss nobits alloc write align=4096
 align 4096
 p4_table:
     resb 4096
 p3_table:
     resb 4096
+p3_high_table:
+    resb 4096
 p2_table:
     resb 4096 * 4                 ; 4 Page Directories to map 4 GiB
+boot_stack_bottom:
+    resb 16384                    ; 32-bit stack used before the high jump
+boot_stack_top:
+
+section .bss
+align 4096
 stack_bottom:
     resb 524288                   ; 512 KB stack (mapping-plan diagnostics need ~128 KB)
 stack_top:
 
-section .rodata
+section .boot.rodata progbits alloc noexec nowrite align=16
 gdt64:
     dq 0                          ; Null descriptor
 .code: equ $ - gdt64
@@ -30,21 +45,26 @@ gdt64:
     dw $ - gdt64 - 1
     dq gdt64
 
-section .text
+section .boot.text progbits alloc exec nowrite align=16
 bits 32
 _start:
     mov esi, ebx                 ; Preserve Multiboot info while clearing .bss
     mov ebp, eax                 ; Preserve Multiboot magic while clearing .bss
 
-    ; BIOS/Multiboot does not guarantee that the kernel's .bss is zeroed.
-    ; Rust statics (including spinlocks and page-table state) require it.
-    mov edi, _bss_start
-    mov ecx, _bss_end
+    ; BIOS/Multiboot does not guarantee that .bss is zeroed. Rust statics
+    ; (including spinlocks and page-table state) require it. Paging is off,
+    ; so both ranges are cleared through their physical addresses.
+    mov edi, _boot_bss_start
+    mov ecx, _boot_bss_end
     sub ecx, edi
     xor eax, eax
     rep stosb
+    mov edi, _bss_start_phys
+    mov ecx, _bss_end_phys
+    sub ecx, edi
+    rep stosb
 
-    mov esp, stack_top
+    mov esp, boot_stack_top
     mov edi, esi                 ; Save Multiboot info pointer in edi (becomes rdi in 64-bit)
     mov eax, ebp                 ; Restore Multiboot magic
 
@@ -135,6 +155,20 @@ set_up_page_tables:
     cmp ecx, 4
     jne .map_p3_table
 
+    ; Alias the first 2 GiB at KERNEL_OFFSET: P4[511] -> P3_high, whose
+    ; entries 510 and 511 reuse the first two identity page directories.
+    mov eax, p3_high_table
+    or eax, 0b11
+    mov [p4_table + 511 * 8], eax
+    mov dword [p4_table + 511 * 8 + 4], 0
+    mov eax, p2_table
+    or eax, 0b11
+    mov [p3_high_table + 510 * 8], eax
+    mov dword [p3_high_table + 510 * 8 + 4], 0
+    add eax, 4096
+    mov [p3_high_table + 511 * 8], eax
+    mov dword [p3_high_table + 511 * 8 + 4], 0
+
     ; Map each P2 entry to a 2MiB huge page (maps 2048 * 2MiB = 4GiB total)
     mov ecx, 0
 .map_p2_table:
@@ -172,6 +206,13 @@ enable_paging:
 
 bits 64
 long_mode_start:
+    ; Still executing at the low load address; continue in the high window.
+    mov rax, qword long_mode_high
+    jmp rax
+
+section .text
+bits 64
+long_mode_high:
     ; Reload data segment registers
     mov ax, 0
     mov ss, ax
@@ -182,6 +223,10 @@ long_mode_start:
 
     ; Set 64-bit stack
     mov rsp, stack_top
+
+    ; Upper halves are undefined after the mode switch; the Multiboot info
+    ; pointer is a 32-bit physical address.
+    mov edi, edi
 
     ; Call 64-bit Rust kernel entry point
     call kernel_main_bios

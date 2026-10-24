@@ -1,4 +1,6 @@
 pub mod proto;
+#[cfg(target_os = "uefi")]
+pub mod relocate;
 
 use crate::arch::x86_64::acpi;
 use crate::boot::boot_info::{

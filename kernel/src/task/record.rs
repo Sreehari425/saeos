@@ -1,8 +1,7 @@
 use super::{
     AddressSpaceId, BlockReason, EevdfEntity, ExitStatus, KernelStack, ProcessId, ResumeKind,
-    TaskEntry, TaskId, TaskState, Tick, VirtualTime, VoluntaryContext,
+    StackStorage, TaskEntry, TaskId, TaskState, Tick, VirtualTime, VoluntaryContext,
 };
-use alloc::boxed::Box;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulerError {
@@ -54,7 +53,7 @@ pub struct TaskControlBlock {
     pub interrupt_stack_pointer: u64,
     pub resume_kind: ResumeKind,
     pub kernel_stack: KernelStack,
-    pub stack_storage: Option<Box<[u8]>>,
+    pub stack_storage: Option<StackStorage>,
     pub entry: Option<TaskEntry>,
     pub address_space: Option<AddressSpaceId>,
     pub scheduler_entity: EevdfEntity,

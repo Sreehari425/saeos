@@ -27,16 +27,22 @@ pub fn start_selftest() -> Result<(), &'static str> {
     let interrupts_were_enabled = cpu::interrupts_enabled();
     SELFTEST_FINISHED.store(false, Ordering::Release);
     scheduler_debug(format_args!("starting opt-in runtime self-test"));
+    let workload: [(TaskEntry, &'static str); 6] = [
+        (stress_cpu_task, "stress-cpu"),
+        (stress_cpu_task_2, "stress-cpu-2"),
+        (stress_yield_task, "stress-yield"),
+        (stress_sleep_task, "stress-sleep"),
+        (stress_exit_task, "stress-exit"),
+        (stress_verify_task, "stress-verify"),
+    ];
+    let stacks = workload.map(|(_, name)| new_kernel_stack(name));
     cpu::cli();
     let tasks = with_scheduler(|scheduler| {
-        [
-            scheduler.spawn_kernel_task(stress_cpu_task, "stress-cpu", false),
-            scheduler.spawn_kernel_task(stress_cpu_task_2, "stress-cpu-2", false),
-            scheduler.spawn_kernel_task(stress_yield_task, "stress-yield", false),
-            scheduler.spawn_kernel_task(stress_sleep_task, "stress-sleep", false),
-            scheduler.spawn_kernel_task(stress_exit_task, "stress-exit", false),
-            scheduler.spawn_kernel_task(stress_verify_task, "stress-verify", false),
-        ]
+        let mut stacks = stacks.into_iter();
+        workload.map(|(entry, name)| {
+            let stack = stacks.next().expect("one stack per task");
+            scheduler.spawn_kernel_task(entry, name, false, stack)
+        })
     });
     for task in tasks {
         attach_task_to_new_process(task);

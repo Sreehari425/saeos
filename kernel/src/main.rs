@@ -25,6 +25,9 @@ use boot::boot_info::{BootInfo, BootMode, DisplayMode, KernelSections};
 use core::panic::PanicInfo;
 use drivers::vga::Color;
 
+/// Must match `KERNEL_OFFSET` in `linker.ld` and `boot.asm`.
+const KERNEL_OFFSET: u64 = mm::layout::KERNEL_IMAGE_BASE;
+
 #[cfg(not(target_os = "uefi"))]
 unsafe extern "C" {
     static _kernel_start: u8;
@@ -39,33 +42,29 @@ unsafe extern "C" {
     static _bss_end: u8;
 }
 
+/// The linker places the image at `KERNEL_OFFSET + physical`; these report
+/// the physical load addresses the memory manager tracks.
 #[cfg(not(target_os = "uefi"))]
 fn kernel_physical_bounds() -> (u64, u64) {
+    use mm::layout::static_phys;
     (
-        (&raw const _kernel_start) as u64,
-        (&raw const _kernel_end) as u64,
+        static_phys(&raw const _kernel_start),
+        static_phys(&raw const _kernel_end),
     )
 }
 
 #[cfg(not(target_os = "uefi"))]
 fn kernel_sections() -> KernelSections {
+    use mm::layout::static_phys;
+    let section = |start: *const u8, end: *const u8| KernelSection {
+        start: static_phys(start),
+        end: static_phys(end),
+    };
     KernelSections {
-        text: KernelSection {
-            start: (&raw const _text_start) as u64,
-            end: (&raw const _text_end) as u64,
-        },
-        rodata: KernelSection {
-            start: (&raw const _rodata_start) as u64,
-            end: (&raw const _rodata_end) as u64,
-        },
-        data: KernelSection {
-            start: (&raw const _data_start) as u64,
-            end: (&raw const _data_end) as u64,
-        },
-        bss: KernelSection {
-            start: (&raw const _bss_start) as u64,
-            end: (&raw const _bss_end) as u64,
-        },
+        text: section(&raw const _text_start, &raw const _text_end),
+        rodata: section(&raw const _rodata_start, &raw const _rodata_end),
+        data: section(&raw const _data_start, &raw const _data_end),
+        bss: section(&raw const _bss_start, &raw const _bss_end),
     }
 }
 
@@ -82,6 +81,9 @@ const fn kernel_sections() -> KernelSections {
 /// BIOS entrypoint called from `boot.asm` with the Multiboot 1 info pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
+    // boot.asm already runs the image in the top-2-GiB window; record that
+    // before anything converts a static's address to a physical one.
+    mm::layout::set_image_delta(KERNEL_OFFSET);
     let mut memory_map = boot::boot_info::PhysicalMemoryMap::empty();
     if multiboot_info_addr != 0 {
         let mb_info = unsafe { &*(multiboot_info_addr as *const mm::MultibootInfo) };
@@ -125,7 +127,36 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
         None
     };
 
-    mm::init(boot_info);
+    mm::init_early(boot_info);
+
+    let handoff = Handoff {
+        boot_info: *boot_info,
+        bios_acpi,
+    };
+    // UEFI still executes from the firmware's identity mapping of the image;
+    // rebase it into the top-2-GiB window before continuing. BIOS linked the
+    // image there, so it simply carries on.
+    #[cfg(target_os = "uefi")]
+    unsafe {
+        arch::x86_64::uefi::relocate::enter_higher_half(handoff)
+    }
+    #[cfg(not(target_os = "uefi"))]
+    kernel_main_high(handoff)
+}
+
+/// State carried across the switch from the boot-time image alias to the
+/// final high-half image.
+#[derive(Clone, Copy)]
+pub struct Handoff {
+    pub boot_info: BootInfo,
+    pub bios_acpi: Option<acpi::InterruptTopology>,
+}
+
+/// Second half of kernel bring-up, always running from the high image window.
+pub fn kernel_main_high(handoff: Handoff) -> ! {
+    let boot_info = &handoff.boot_info;
+    let bios_acpi = handoff.bios_acpi;
+    mm::init_late(boot_info);
 
     let acpi_topology = bios_acpi.or_else(|| match boot_info.rsdp_addr {
         Some(address) => match unsafe { acpi::parse_rsdp(address) } {
@@ -181,6 +212,9 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     // 2. Initialize Architecture (GDT/TSS with IST, IDT, and Interrupt Controller)
     let mode = arch::x86_64::init(acpi_topology.as_ref());
     time::init();
+    // GDT, IDT, TSS, and every MMIO pointer now use upper-half addresses, so
+    // the boot identity map can go; the lower half belongs to processes.
+    mm::finish_boot();
     drivers::console::set_color(Color::LightGreen, Color::Black);
     println!("[OK] GDT & TSS with IST loaded.");
     println!("[OK] IDT loaded (256 vectors).");

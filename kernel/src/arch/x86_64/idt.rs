@@ -7,6 +7,7 @@ use crate::arch::x86_64::interrupt_controller;
 use crate::arch::x86_64::pic;
 #[cfg(feature = "keyboard")]
 use crate::drivers::keyboard;
+use crate::mm::kvm;
 use crate::println;
 use crate::serial_println;
 
@@ -94,12 +95,13 @@ pub fn init() {
         IDT.entries[8]
             .set_handler_addr(double_fault_handler as *const () as u64)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-        IDT.entries[13]
-            .set_handler_addr(general_protection_fault_handler as *const () as u64)
-            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-        IDT.entries[14]
-            .set_handler_addr(page_fault_handler as *const () as u64)
-            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+        // #GP and #PF run on the current stack. Sharing the #DF IST would let
+        // a nested fault overwrite the outer frame, and a page-fault handler
+        // that may one day block cannot live on a per-CPU IST stack. A fault
+        // that cannot push its frame (a kernel stack overflow into a guard
+        // page) escalates to #DF, which keeps its own IST stack.
+        IDT.entries[13].set_handler_addr(general_protection_fault_handler as *const () as u64);
+        IDT.entries[14].set_handler_addr(page_fault_handler as *const () as u64);
 
         // 2. Hardware Interrupts (Vectors 0x20 = 32, 0x21 = 33)
         IDT.entries[pic::PIC_1_OFFSET as usize]
@@ -151,10 +153,44 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     }
 }
 
+fn read_cr2() -> u64 {
+    let address: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) address, options(nomem, nostack, preserves_flags));
+    }
+    address
+}
+
+/// If `address` hit a kernel-stack guard, name the overflowing task. Uses only
+/// non-blocking locks: the faulting code may hold the serial or scheduler lock.
+fn report_stack_overflow(address: u64, instruction_pointer: u64) -> bool {
+    let Some(kvm::FaultKind::StackGuard { slot, stack }) = kvm::classify_fault(address) else {
+        return false;
+    };
+    match crate::scheduler::try_task_on_stack(stack.base) {
+        Some((task, name)) => crate::drivers::serial::try_serial_print(format_args!(
+            "\n[KERNEL STACK OVERFLOW in task '{}' (id {}), stack {:#x}..{:#x}, fault {:#x}, RIP={:#x}]\n",
+            name, task.0, stack.base, stack.top, address, instruction_pointer
+        )),
+        None => crate::drivers::serial::try_serial_print(format_args!(
+            "\n[KERNEL STACK OVERFLOW in stack slot {}, stack {:#x}..{:#x}, fault {:#x}, RIP={:#x}]\n",
+            slot, stack.base, stack.top, address, instruction_pointer
+        )),
+    };
+    true
+}
+
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
+    // A guard-page hit cannot push a #PF frame, so overflows arrive here with
+    // CR2 still naming the guard address.
+    if report_stack_overflow(read_cr2(), stack_frame.instruction_pointer) {
+        loop {
+            cpu::hlt();
+        }
+    }
     println!(
         "\n[EXCEPTION: DOUBLE FAULT (err={:#x})]\n{:#?}",
         error_code, stack_frame
@@ -189,9 +225,13 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    let faulting_address: u64;
-    unsafe {
-        core::arch::asm!("mov {}, cr2", out(reg) faulting_address, options(nomem, nostack, preserves_flags));
+    let faulting_address = read_cr2();
+    // A large frame can touch the guard while RSP is still on the stack, in
+    // which case the #PF itself is delivered normally.
+    if report_stack_overflow(faulting_address, stack_frame.instruction_pointer) {
+        loop {
+            cpu::hlt();
+        }
     }
     println!(
         "\n[EXCEPTION: PAGE FAULT at {:#x} (err={:#x})]\n{:#?}",

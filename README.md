@@ -18,8 +18,12 @@ run inside QEMU. The current codebase includes:
 - BIOS boot support and UEFI boot support
 - GDT, TSS, IDT, and interrupt handling
 - Legacy 8259 PIC and APIC/IOAPIC support
-- Physical frame allocation and paging
-- A kernel heap
+- Higher-half kernel (top 2 GiB) on both boot paths; the lower half is left
+  empty for user address spaces
+- Buddy physical frame allocator with per-frame reference counts, and paging
+- A kernel heap (small-object classes plus a page-backed heap)
+- Guarded kernel stacks with stack-overflow detection
+- A preemptive kernel task scheduler (EEVDF)
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
 - PIT, RTC, TSC, and local APIC timer support
@@ -38,9 +42,9 @@ grows.
 - [x] Heap
 - [x] Basic drivers
 - [x] Timer
-- [ ] Tasks
-- [ ] Scheduler
-- [ ] Context switching
+- [x] Tasks
+- [x] Scheduler
+- [x] Context switching
 - [ ] User mode
 - [ ] Syscalls
 - [ ] Processes
@@ -124,6 +128,9 @@ The checked-in configuration templates live in [`configs/`](configs/).
 make check         # Check BIOS and UEFI kernel builds
 make fmt-check     # Check formatting
 make clippy        # Run Clippy with warnings denied
+make mm-test       # Host tests for the buddy allocator, scheduler model, and lock order
+make mm-stress     # Boot with MM self-tests and stress runs (also mm-stress-uefi)
+make mm-guard-test # Overflow a kernel stack on purpose and check it is reported
 make asm           # Emit BIOS and UEFI assembly
 make clean         # Remove Cargo build artifacts
 ```

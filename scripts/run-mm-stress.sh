@@ -27,6 +27,10 @@ if ! rg -q 'Memory: kernel address-space user mapping self-check passed' "$LOG_F
     echo "address-space self-test marker missing" >&2
     exit 1
 fi
+if ! rg -q 'Memory: process-root activation self-check passed' "$LOG_FILE"; then
+    echo "process-root activation marker missing" >&2
+    exit 1
+fi
 if ! rg -q 'Kernel Heap Allocator initialized' "$LOG_FILE"; then
     echo "heap self-test marker missing" >&2
     exit 1

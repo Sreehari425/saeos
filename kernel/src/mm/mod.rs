@@ -1,7 +1,33 @@
+//! Memory management.
+//!
+//! Address layout: see [`layout`]. Physical frames: [`frame`] (bitmap
+//! ownership, [`buddy`] free lists, reference counts). Page tables:
+//! [`paging`]. Kernel heap: [`heap`] (static small-object heap plus a
+//! page-backed heap). Guarded kernel stacks: [`kvm`].
+//!
+//! # Lock order
+//!
+//! Locks are taken in this order and never the reverse (modelled and tested
+//! in `tools/mm-model/src/lock_model.rs`):
+//!
+//! `SCHEDULER`/`PROCESSES` -> `AddressSpace.state` -> small-object heap ->
+//! `KERNEL_MAP_LOCK` -> frame allocator
+//!
+//! - The scheduler and process locks may be held while a `Vec` grows, and a
+//!   large allocation maps page-heap pages, so memory-management code must
+//!   never take them (fault handlers only `try_lock`).
+//! - The page-heap and stack-arena bitmaps are leaves: they are released
+//!   before any page is mapped.
+//! - Reference counts are atomics; only the final drop takes the frame lock.
+//! - The heap never allocates while holding `KERNEL_MAP_LOCK` or the frame
+//!   lock, so `GlobalAlloc` cannot recurse into a held lock.
 pub mod address_space;
 pub mod allocator_model;
+pub mod buddy;
 pub mod frame;
 pub mod heap;
+pub mod kvm;
+pub mod layout;
 pub mod mapping_model;
 pub mod multiboot;
 pub mod paging;
@@ -20,6 +46,11 @@ pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) -> bool {
             error
         );
         return false;
+    }
+    // UEFI reports the firmware stack we are running on as usable
+    // boot-services memory; keep it until init_late runs on its own stack.
+    if boot_info.boot_mode == crate::boot::boot_info::BootMode::Uefi {
+        frame::hold_boot_stack(crate::arch::x86_64::cpu::stack_pointer());
     }
     // These regions are never handed to a future mapper or heap.
     frame::reserve_range(
@@ -50,7 +81,27 @@ pub fn init_heap() {
     }
 }
 
+/// Where the final tables place the kernel image in the top-2-GiB window.
+/// BIOS links the image there, so its delta is already active.
+fn planned_image_delta(boot_info: &crate::boot::BootInfo) -> u64 {
+    match boot_info.boot_mode {
+        crate::boot::boot_info::BootMode::Bios => layout::image_delta(),
+        crate::boot::boot_info::BootMode::Uefi if boot_info.kernel_physical_start != 0 => {
+            layout::KERNEL_IMAGE_BASE.wrapping_sub(boot_info.kernel_physical_start)
+        }
+        crate::boot::boot_info::BootMode::Uefi => 0,
+    }
+}
+
 pub fn init(boot_info: &crate::boot::BootInfo) {
+    init_early(boot_info);
+    init_late(boot_info);
+}
+
+/// Build the final page tables and switch CR3 to them. On UEFI the caller
+/// then moves the running image into the top-2-GiB window before
+/// [`init_late`]; the image is mapped there from this point on.
+pub fn init_early(boot_info: &crate::boot::BootInfo) {
     if !init_boot_memory(boot_info) {
         crate::arch::x86_64::cpu::cli();
         loop {
@@ -82,7 +133,7 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         boot_info.kernel_physical_start,
         boot_info.kernel_physical_end,
         boot_info.kernel_sections,
-        boot_info.boot_mode == crate::boot::boot_info::BootMode::Bios,
+        planned_image_delta(boot_info),
     );
     paging::reserve_page_tables();
     if let Err(error) = mapping_model::check_memory_map(&boot_info.memory_map, true, true) {
@@ -107,6 +158,12 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
         }
     };
     activate_higher_half();
+}
+
+/// Finish memory-manager bring-up from the final image address.
+pub fn init_late(boot_info: &crate::boot::BootInfo) {
+    // Nothing runs on the firmware stack any more.
+    frame::release_boot_stack();
     #[cfg(feature = "paging-debug")]
     paging::inspect_final_kernel_mappings(boot_info.kernel_sections);
     if let Some(rsdp) = boot_info.rsdp_addr {
@@ -173,16 +230,24 @@ pub fn init(boot_info: &crate::boot::BootInfo) {
     );
 }
 
+/// Retire boot-only mappings once nothing references them.
+pub fn finish_boot() {
+    paging::drop_lower_half();
+    crate::serial_println!("Memory: boot identity map removed; lower half reserved for processes.");
+    heap::enable_page_heap();
+    crate::serial_println!(
+        "Memory: page heap enabled at {:#x} for allocations above {} bytes.",
+        layout::PAGE_HEAP_BASE,
+        4096
+    );
+}
+
 fn memory_self_check(boot_info: &crate::boot::BootInfo) {
     let Some(low_frame) = frame::alloc_frame() else {
         crate::serial_println!("Memory: unable to allocate low diagnostic frame.");
         return;
     };
-    let low_virtual = if paging::prefer_identity_mmio() {
-        paging::identity(PhysAddr(low_frame.0))
-    } else {
-        paging::phys_to_virt(PhysAddr(low_frame.0))
-    };
+    let low_virtual = paging::phys_to_virt(PhysAddr(low_frame.0));
     let low_address = low_virtual.0 as *mut u64;
     let marker = 0x0053_4145_4f4c_4f57_u64;
     unsafe {
@@ -262,20 +327,14 @@ fn map_framebuffer(display: crate::boot::DisplayMode) {
     };
     let mut physical = start;
     while physical < end {
-        let mapped_direct = paging::map_page(
+        let mapped = paging::map_page(
             paging::phys_to_virt(PhysAddr(physical)),
             PhysAddr(physical),
             paging::PageFlags::MMIO,
-        )
-        .is_ok();
-        let mapped_identity = !paging::prefer_identity_mmio()
-            || paging::map_page(
-                paging::identity(PhysAddr(physical)),
-                PhysAddr(physical),
-                paging::PageFlags::MMIO,
-            )
-            .is_ok();
-        if !mapped_direct || !mapped_identity {
+        );
+        // A framebuffer inside an MMIO region is already direct mapped with
+        // these flags; only a genuine mapping failure matters here.
+        if matches!(mapped, Err(message) if message != "page already mapped") {
             crate::serial_println!("Memory: unable to map framebuffer page at {:#x}.", physical);
             break;
         }

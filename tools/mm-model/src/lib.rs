@@ -8,6 +8,10 @@ extern crate alloc;
 #[path = "../../../kernel/src/mm/allocator_model.rs"]
 mod model;
 pub use model::*;
+#[path = "../../../kernel/src/mm/buddy.rs"]
+pub mod buddy;
+#[cfg(test)]
+mod buddy_tests;
 mod heap_model;
 pub use heap_model::*;
 mod lock_model;
