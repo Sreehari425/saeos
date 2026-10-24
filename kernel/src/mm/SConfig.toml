@@ -36,6 +36,22 @@ feature = "mm-lock-debug"
 help = "Enable lock-order and interrupt-safe MM locking diagnostics."
 
 [[option]]
+id = "poison"
+name = "Poison freed frames"
+type = "bool"
+default = false
+feature = "mm-poison"
+help = "Fill freed physical frames with 0x6b so use-after-free reads return obvious garbage."
+
+[[option]]
+id = "guard_test"
+name = "Kernel stack guard test"
+type = "bool"
+default = false
+feature = "mm-guard-test"
+help = "Spawn a task that overflows its kernel stack at boot; the kernel must report the overflow and halt."
+
+[[option]]
 id = "allocator_stats"
 name = "Allocator statistics"
 type = "bool"

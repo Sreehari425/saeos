@@ -20,11 +20,13 @@ struct HeapStorage([u8; HEAP_SIZE]);
 
 static mut HEAP_STORAGE: HeapStorage = HeapStorage([0u8; HEAP_SIZE]);
 static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);
-// Keep the range in the existing higher-half PML4 slot while placing it
-// above the physical-memory window covered by the boot direct map.
-const PAGE_HEAP_BASE: usize = (crate::mm::paging::KERNEL_VIRT_BASE + 0x20_0000_0000) as usize;
-const PAGE_HEAP_PAGES: usize = 262_144; // 1 GiB virtual extent.
+// Allocations above the largest small class get their own pages in the kernel
+// VM window (see `mm::layout`), so they never fragment the static heap.
+const PAGE_HEAP_BASE: usize = crate::mm::layout::PAGE_HEAP_BASE as usize;
+const PAGE_HEAP_PAGES: usize = (crate::mm::layout::PAGE_HEAP_SIZE / 4096) as usize;
 static PAGE_HEAP_READY: AtomicBool = AtomicBool::new(false);
+/// Next-fit hint: page index where the next search starts.
+static PAGE_HEAP_CURSOR: AtomicUsize = AtomicUsize::new(0);
 static PAGE_HEAP_LOCK: IrqSpinMutex<()> = IrqSpinMutex::new(());
 static mut PAGE_HEAP_BITMAP: [u64; PAGE_HEAP_PAGES / 64] = [0; PAGE_HEAP_PAGES / 64];
 static SMALL_USAGE: [core::sync::atomic::AtomicUsize; SMALL_CLASSES.len()] = [
@@ -39,6 +41,7 @@ static SMALL_USAGE: [core::sync::atomic::AtomicUsize; SMALL_CLASSES.len()] = [
     AtomicUsize::new(0),
 ];
 static PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PAGE_HEAP_MAPPED: AtomicUsize = AtomicUsize::new(0);
 static LARGE_ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static FAILED_ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
@@ -49,13 +52,15 @@ pub struct HeapStats {
     pub large_allocations: usize,
     pub failed_allocations: usize,
     pub largest_free_extent: usize,
+    /// Pages currently mapped by the page-backed heap.
+    pub page_heap_pages: usize,
 }
 
 /// Physical / load address of the embedded heap storage (for reservations).
 #[inline]
 pub fn heap_phys_start() -> u64 {
     // SAFETY: we only read the address, never the contents at this point.
-    core::ptr::addr_of!(HEAP_STORAGE) as u64
+    crate::mm::layout::static_phys(core::ptr::addr_of!(HEAP_STORAGE))
 }
 
 /// Virtual address used by the freelist after higher-half activate.
@@ -238,10 +243,23 @@ impl LinkedListAllocator {
         SMALL_CLASSES.iter().position(|size| *size >= required)
     }
 
+    /// Carve a class-sized, class-aligned run of blocks for `class`. Under
+    /// fragmentation the run shrinks down to a single block; the small path
+    /// never falls back to the general list, so every pointer on a class list
+    /// is exactly one carved block and `dealloc` may route by `Layout` alone.
     unsafe fn refill_small(&mut self, class: usize) -> Option<usize> {
         let block = SMALL_CLASSES[class];
-        let total = block.checked_mul(SMALL_REFILL_BLOCKS)?;
-        let (region_start, region_end, alloc_start) = self.find_region(total, block)?;
+        let mut blocks = SMALL_REFILL_BLOCKS;
+        let (total, (region_start, region_end, alloc_start)) = loop {
+            let total = block.checked_mul(blocks)?;
+            if let Some(region) = self.find_region(total, block) {
+                break (total, region);
+            }
+            if blocks == 1 {
+                return None;
+            }
+            blocks /= 2;
+        };
         let prefix = alloc_start - region_start;
         let end = alloc_start.checked_add(total)?;
         let suffix = region_end - end;
@@ -313,10 +331,14 @@ unsafe impl GlobalAlloc for LockedHeap {
             } else {
                 unsafe { allocator.refill_small(class) }.unwrap_or(0)
             };
-            if address != 0 {
-                SMALL_USAGE[class].fetch_add(1, Ordering::Relaxed);
-                return address as *mut u8;
+            if address == 0 {
+                // Falling through to the general list would hand out a block
+                // that dealloc later threads onto this class list.
+                FAILED_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                return ptr::null_mut();
             }
+            SMALL_USAGE[class].fetch_add(1, Ordering::Relaxed);
+            return address as *mut u8;
         }
 
         if let Some((region_start, region_end, alloc_start)) = allocator.find_region(size, align) {
@@ -377,6 +399,7 @@ pub fn stats() -> HeapStats {
         page_count: PAGE_COUNT.load(Ordering::Relaxed),
         large_allocations: LARGE_ALLOCS.load(Ordering::Relaxed),
         failed_allocations: FAILED_ALLOCS.load(Ordering::Relaxed),
+        page_heap_pages: PAGE_HEAP_MAPPED.load(Ordering::Relaxed),
         ..HeapStats::default()
     };
     for (slot, usage) in result.small_class_usage.iter_mut().zip(SMALL_USAGE.iter()) {
@@ -416,27 +439,24 @@ fn page_alloc(layout: Layout) -> Option<usize> {
     let align_pages = align.div_ceil(4096).next_power_of_two();
     let start = {
         let _guard = PAGE_HEAP_LOCK.lock();
-        let mut candidate = 0usize;
-        let mut found = None;
-        while candidate.checked_add(pages)? <= PAGE_HEAP_PAGES {
-            candidate = (candidate + align_pages - 1) & !(align_pages - 1);
-            if candidate.checked_add(pages)? > PAGE_HEAP_PAGES {
-                break;
+        let is_free = |candidate: usize| {
+            (candidate..candidate + pages)
+                .all(|page| unsafe { PAGE_HEAP_BITMAP[page / 64] & (1u64 << (page % 64)) == 0 })
+        };
+        let last = PAGE_HEAP_PAGES.checked_sub(pages)?;
+        let hint = PAGE_HEAP_CURSOR.load(Ordering::Relaxed).min(last);
+        let first = hint.next_multiple_of(align_pages);
+        let found = (first..=last)
+            .step_by(align_pages)
+            .chain((0..first.min(last + 1)).step_by(align_pages))
+            .find(|&candidate| is_free(candidate))?;
+        for page in found..found + pages {
+            unsafe {
+                PAGE_HEAP_BITMAP[page / 64] |= 1u64 << (page % 64);
             }
-            let free = (candidate..candidate + pages)
-                .all(|page| unsafe { PAGE_HEAP_BITMAP[page / 64] & (1u64 << (page % 64)) == 0 });
-            if free {
-                for page in candidate..candidate + pages {
-                    unsafe {
-                        PAGE_HEAP_BITMAP[page / 64] |= 1u64 << (page % 64);
-                    }
-                }
-                found = Some(candidate);
-                break;
-            }
-            candidate += align_pages;
         }
-        found?
+        PAGE_HEAP_CURSOR.store(found + pages, Ordering::Relaxed);
+        found
     };
     let mut mapped = 0usize;
     while mapped < pages {
@@ -473,6 +493,7 @@ fn page_alloc(layout: Layout) -> Option<usize> {
     }
     LARGE_ALLOCS.fetch_add(1, Ordering::Relaxed);
     PAGE_COUNT.fetch_add(pages, Ordering::Relaxed);
+    PAGE_HEAP_MAPPED.fetch_add(pages, Ordering::Relaxed);
     Some(PAGE_HEAP_BASE + start * 4096)
 }
 
@@ -512,6 +533,7 @@ fn page_dealloc(pointer: usize, layout: Layout) {
     }
     LARGE_ALLOCS.fetch_sub(1, Ordering::Relaxed);
     PAGE_COUNT.fetch_sub(pages, Ordering::Relaxed);
+    PAGE_HEAP_MAPPED.fetch_sub(pages, Ordering::Relaxed);
 }
 
 #[inline]
@@ -527,99 +549,83 @@ fn align_up(addr: usize, align: usize) -> Option<usize> {
 pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 pub(crate) fn validate() -> bool {
+    check().is_ok()
+}
+
+pub(crate) fn validate_reason() -> &'static str {
+    check().err().unwrap_or("valid")
+}
+
+/// Walk the general free list and every small-class list, verifying bounds,
+/// ordering, alignment, and termination.
+fn check() -> Result<(), &'static str> {
     let Some(allocator) = ALLOCATOR.0.try_lock() else {
-        return false;
+        return Err("allocator lock held");
     };
     let start = heap_virt_start();
-    let Some(heap_end) = start.checked_add(HEAP_SIZE) else {
-        return false;
-    };
+    let end = start.checked_add(HEAP_SIZE).ok_or("heap range overflow")?;
     let mut previous_end = start;
     let mut count = 0;
     let mut node = allocator.head.next.as_deref();
     while let Some(current) = node {
         count += 1;
         if count > HEAP_SIZE / size_of::<ListNode>() + 1 {
-            return false;
+            return Err("free list too long or cyclic");
         }
         let node_start = current.start_addr();
-        let Some(node_end) = node_start.checked_add(current.size) else {
-            return false;
-        };
-        if node_start % align_of::<ListNode>() != 0
-            || current.size < size_of::<ListNode>()
-            || node_start < start
-            || node_end > heap_end
-            || node_start < previous_end
-        {
-            return false;
+        let node_end = node_start
+            .checked_add(current.size)
+            .ok_or("free node range overflow")?;
+        if node_start % align_of::<ListNode>() != 0 {
+            return Err("free node misaligned");
+        }
+        if current.size < size_of::<ListNode>() {
+            return Err("free node too small");
+        }
+        if node_start < start || node_end > end {
+            return Err("free node outside heap");
+        }
+        if node_start < previous_end {
+            return Err("free nodes overlap or are unsorted");
         }
         previous_end = node_end;
         node = current.next.as_deref();
     }
     if HEAP_INITIALIZED.load(Ordering::Acquire) && count == 0 && !allocator.has_small_free() {
-        return false;
+        return Err("free list empty after initialization");
     }
     for (class, head) in allocator.small_heads.iter().enumerate() {
         let block = SMALL_CLASSES[class];
         let mut current = *head;
         let mut seen = 0;
         while current != 0 {
-            if seen > HEAP_SIZE / block + 1
-                || current < start
+            if seen > HEAP_SIZE / block + 1 {
+                return Err("small-class list too long or cyclic");
+            }
+            if current < start
                 || current
                     .checked_add(block)
-                    .is_none_or(|node_end| node_end > heap_end)
-                || current % block != 0
+                    .is_none_or(|node_end| node_end > end)
             {
-                return false;
+                return Err("small-class block outside heap");
+            }
+            if current % block != 0 {
+                return Err("small-class block misaligned");
             }
             current = unsafe { *(current as *const usize) };
             seen += 1;
         }
     }
-    true
+    Ok(())
 }
 
-pub(crate) fn validate_reason() -> &'static str {
-    let Some(allocator) = ALLOCATOR.0.try_lock() else {
-        return "allocator lock held";
-    };
-    let start = heap_virt_start();
-    let Some(end) = start.checked_add(HEAP_SIZE) else {
-        return "heap range overflow";
-    };
-    let mut previous_end = start;
-    let mut count = 0;
-    let mut node = allocator.head.next.as_deref();
-    while let Some(current) = node {
-        count += 1;
-        if count > HEAP_SIZE / size_of::<ListNode>() + 1 {
-            return "free list too long or cyclic";
-        }
-        let node_start = current.start_addr();
-        let Some(node_end) = node_start.checked_add(current.size) else {
-            return "free node range overflow";
-        };
-        if node_start % align_of::<ListNode>() != 0 {
-            return "free node misaligned";
-        }
-        if current.size < size_of::<ListNode>() {
-            return "free node too small";
-        }
-        if node_start < start || node_end > end {
-            return "free node outside heap";
-        }
-        if node_start < previous_end {
-            return "free nodes overlap or are unsorted";
-        }
-        previous_end = node_end;
-        node = current.next.as_deref();
-    }
-    if HEAP_INITIALIZED.load(Ordering::Acquire) && count == 0 && !allocator.has_small_free() {
-        return "free list empty after initialization";
-    }
-    "valid"
+/// Route large allocations to the page heap from now on.
+pub fn enable_page_heap() {
+    PAGE_HEAP_READY.store(true, Ordering::Release);
+}
+
+pub fn page_heap_enabled() -> bool {
+    PAGE_HEAP_READY.load(Ordering::Acquire)
 }
 
 pub fn init() {
@@ -627,8 +633,9 @@ pub fn init() {
     let initialized = unsafe { ALLOCATOR.init(start, HEAP_SIZE) };
     if initialized {
         HEAP_INITIALIZED.store(true, Ordering::Release);
-        // Keep the bootstrap allocator active until the active-root mapping
-        // path is installed by the scheduler-facing paging layer.
+        // Large allocations stay on the static heap until `enable_page_heap`:
+        // the page heap maps into shared kernel slots, which only exist once
+        // paging is final.
         PAGE_HEAP_READY.store(false, Ordering::Release);
     }
     if !initialized || !validate() {

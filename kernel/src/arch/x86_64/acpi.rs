@@ -101,12 +101,15 @@ fn read_u16(address: usize) -> u16 {
 fn mapped_address(address: u64) -> usize {
     if crate::mm::paging::is_active() {
         let page = address & !0xfff;
+        // Firmware tables in ACPI regions are already direct mapped (then
+        // this reports "already mapped" and the read works); tables in
+        // reserved holes get a read-only page.
         let _ = crate::mm::paging::map_page(
-            crate::mm::paging::identity(crate::mm::PhysAddr(page)),
+            crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(page)),
             crate::mm::PhysAddr(page),
             crate::mm::paging::PageFlags::READ_ONLY,
         );
-        crate::mm::paging::identity(crate::mm::PhysAddr(address)).0 as usize
+        crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(address)).0 as usize
     } else {
         address as usize
     }

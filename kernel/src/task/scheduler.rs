@@ -1,6 +1,5 @@
 use super::*;
 use alloc::collections::VecDeque;
-use alloc::vec;
 use alloc::vec::Vec;
 
 pub struct Scheduler {
@@ -72,20 +71,19 @@ impl Scheduler {
         id
     }
 
-    /// Create a task with an interrupt-return frame prepared on its private
-    /// kernel stack. Runtime tasks use this path so the timer entry can switch
-    /// directly between task-owned interrupt frames.
+    /// Create a kernel task that starts on `storage` through the voluntary
+    /// bootstrap path. The caller allocates the stack before taking the
+    /// scheduler lock, so the scheduler never calls into the memory manager.
     pub fn spawn_kernel_task(
         &mut self,
         entry: TaskEntry,
         name: &'static str,
         is_idle: bool,
+        storage: StackStorage,
     ) -> TaskId {
         let id = TaskId(self.next_task_id);
         self.next_task_id = self.next_task_id.saturating_add(1);
-        let mut storage = vec![0u8; DEFAULT_KERNEL_STACK_SIZE].into_boxed_slice();
-        let base = storage.as_mut_ptr() as u64;
-        let top = (base + storage.len() as u64) & !0xf;
+        let KernelStack { base, top } = stack_storage_bounds(&storage);
         #[cfg(any(target_os = "none", target_os = "uefi"))]
         let bootstrap_ip = crate::arch::x86_64::context::task_bootstrap_ip();
         #[cfg(not(any(target_os = "none", target_os = "uefi")))]
@@ -116,6 +114,14 @@ impl Scheduler {
 
     pub fn current(&self) -> Option<TaskId> {
         self.current
+    }
+
+    /// The task whose kernel stack starts at `base`, without allocating.
+    pub fn task_on_stack(&self, base: u64) -> Option<(TaskId, &'static str)> {
+        self.tasks
+            .iter()
+            .find(|task| task.kernel_stack.base == base)
+            .map(|task| (task.task_id, task.name))
     }
 
     pub fn task(&self, id: TaskId) -> Option<&TaskControlBlock> {

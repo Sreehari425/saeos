@@ -67,6 +67,21 @@ pub fn _serial_print(args: fmt::Arguments) {
     SERIAL1.lock().write_fmt(args).unwrap();
 }
 
+/// Print without waiting for the port. Fault handlers use this: the code that
+/// faulted may itself hold the serial lock. Returns false if the port was busy.
+#[cfg(feature = "serial")]
+pub fn try_serial_print(args: fmt::Arguments) -> bool {
+    match SERIAL1.try_lock() {
+        Some(mut port) => port.write_fmt(args).is_ok(),
+        None => false,
+    }
+}
+
+#[cfg(not(feature = "serial"))]
+pub fn try_serial_print(_args: fmt::Arguments) -> bool {
+    false
+}
+
 #[macro_export]
 #[cfg(feature = "serial")]
 macro_rules! serial_print {

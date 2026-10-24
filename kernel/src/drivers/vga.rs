@@ -90,11 +90,10 @@ impl Writer {
     }
 
     pub fn set_buffer_address(&mut self, physical_address: u64) {
-        // BIOS retains the writable low-memory identity transition window;
-        // use it for VGA text memory, which may be a reserved hole omitted
-        // from the sparse higher-half map.
+        // `mm::init` maps VGA text memory into the direct map even when it
+        // sits in a reserved hole the direct map otherwise skips.
         self.buffer =
-            crate::mm::paging::identity(crate::mm::PhysAddr(physical_address)).0 as *mut Buffer;
+            crate::mm::paging::phys_to_virt(crate::mm::PhysAddr(physical_address)).0 as *mut Buffer;
     }
 
     pub fn set_color(&mut self, color: ColorCode) {

@@ -130,3 +130,24 @@ pub struct KernelStack {
     pub base: u64,
     pub top: u64,
 }
+
+/// Owner of a task's kernel stack memory. In the kernel this is a guarded
+/// stack-arena slot; the host model (`tools/mm-model`) uses a heap buffer.
+#[cfg(any(target_os = "none", target_os = "uefi"))]
+pub type StackStorage = crate::mm::kvm::KernelStackAllocation;
+#[cfg(not(any(target_os = "none", target_os = "uefi")))]
+pub type StackStorage = alloc::boxed::Box<[u8]>;
+
+#[cfg(any(target_os = "none", target_os = "uefi"))]
+pub fn stack_storage_bounds(storage: &StackStorage) -> KernelStack {
+    storage.bounds()
+}
+
+#[cfg(not(any(target_os = "none", target_os = "uefi")))]
+pub fn stack_storage_bounds(storage: &StackStorage) -> KernelStack {
+    let base = storage.as_ptr() as u64;
+    KernelStack {
+        base,
+        top: (base + storage.len() as u64) & !0xf,
+    }
+}

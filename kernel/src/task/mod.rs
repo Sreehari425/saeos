@@ -13,8 +13,8 @@ pub use record::{SchedulerError, SchedulerStats, TaskControlBlock, TaskSnapshot}
 pub use scheduler::{PolicyKind, Scheduler};
 pub use types::{
     AddressSpaceId, BlockReason, DEFAULT_KERNEL_STACK_SIZE, DispatchDecision, ExitStatus,
-    InterruptContext, KernelStack, ProcessId, ResumeContext, ResumeKind, TaskEntry, TaskId,
-    TaskState, Tick, VirtualTime, VoluntaryContext,
+    InterruptContext, KernelStack, ProcessId, ResumeContext, ResumeKind, StackStorage, TaskEntry,
+    TaskId, TaskState, Tick, VirtualTime, VoluntaryContext, stack_storage_bounds,
 };
 pub use wait_queue::WaitQueue;
 

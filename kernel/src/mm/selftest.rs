@@ -12,7 +12,7 @@ use crate::boot::PhysicalMemoryKind;
 use crate::mm::frame::VirtAddr;
 use crate::mm::{frame, mapping_model, paging};
 
-pub const TEST_COUNT: usize = 11;
+pub const TEST_COUNT: usize = 17;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -32,6 +32,155 @@ pub struct Report {
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
+}
+
+static PROCESS_ROOT_MARKER: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x5341_454f_524f_4f54);
+
+/// Load a fresh process root and keep running kernel code under it. This is
+/// what every future context switch into a process does, so the shared kernel
+/// half must hold the image, stack, heap, and statics.
+fn process_root_test() -> Status {
+    let Ok(space) = paging::AddressSpace::new() else {
+        return Status::Fail;
+    };
+    let Some(user_frame) = frame::alloc_frame() else {
+        return Status::Fail;
+    };
+    let user_page = VirtAddr(0x4000_0000);
+    if space
+        .map_user_page(
+            user_page,
+            user_frame,
+            paging::UserPageFlags::USER_READ.union(paging::UserPageFlags::USER_WRITE),
+        )
+        .is_err()
+    {
+        frame::free_frame(user_frame);
+        return Status::Fail;
+    }
+    // Ring 3 needs U/S at every level, not only on the leaf.
+    let (entries, levels) = paging::walk_entries(space.root_frame(), user_page);
+    let user_walk = levels == 4
+        && entries
+            .iter()
+            .all(|entry| entry & paging::PRESENT != 0 && entry & paging::USER != 0);
+    let shared_kernel_half = paging::kernel_half_matches(space.root_frame());
+
+    let previous = paging::current_root();
+    paging::activate_root(space.root_frame());
+    let marker = PROCESS_ROOT_MARKER.load(core::sync::atomic::Ordering::Relaxed);
+    let boxed = Box::new(marker ^ 0xffff);
+    let ran_in_root = paging::current_root() == space.root_frame()
+        && marker == 0x5341_454f_524f_4f54
+        && *boxed == marker ^ 0xffff;
+    drop(boxed);
+    paging::activate_root(previous);
+
+    let returned = space.unmap_user_page(user_page);
+    let unmapped = returned == Ok(user_frame);
+    frame::free_frame(returned.unwrap_or(user_frame));
+    drop(space);
+    if user_walk && shared_kernel_half && ran_in_root && unmapped {
+        crate::serial_println!("Memory: process-root activation self-check passed.");
+        Status::Pass
+    } else {
+        crate::serial_println!(
+            "Selftest: process root walk={} shared={} ran={} unmapped={}.",
+            user_walk,
+            shared_kernel_half,
+            ran_in_root,
+            unmapped
+        );
+        Status::Fail
+    }
+}
+
+/// After boot the kernel root must not translate any lower-half address; a
+/// stray identity access then faults here first rather than in a process.
+fn lower_half_empty_test() -> Status {
+    if !paging::lower_half_dropped() {
+        return Status::Skip;
+    }
+    let root = paging::page_table_frame();
+    let image_phys = crate::mm::layout::static_phys(&raw const PROCESS_ROOT_MARKER);
+    let probes = [
+        VirtAddr(0),
+        VirtAddr(0x10_0000),
+        VirtAddr(image_phys & !0xfff),
+    ];
+    if probes
+        .iter()
+        .all(|probe| !paging::is_mapped_in(root, *probe))
+    {
+        Status::Pass
+    } else {
+        Status::Fail
+    }
+}
+
+fn buddy_lists_test() -> Status {
+    match frame::validate() {
+        Ok(()) => Status::Pass,
+        Err(reason) => {
+            crate::serial_println!("Selftest: buddy lists: {}.", reason);
+            Status::Fail
+        }
+    }
+}
+
+/// A shared frame survives until its last reference is dropped.
+fn refcount_test() -> Status {
+    let Some(shared) = frame::alloc_frame() else {
+        return Status::Fail;
+    };
+    if frame::frame_refcount(shared).is_none() {
+        frame::free_frame(shared);
+        return Status::Skip;
+    }
+    let one = frame::frame_refcount(shared) == Some(1);
+    let shared_ok = frame::frame_get(shared).is_ok() && frame::frame_refcount(shared) == Some(2);
+    frame::free_frame(shared);
+    let still_held = frame::frame_refcount(shared) == Some(1);
+    frame::free_frame(shared);
+    let released = frame::frame_refcount(shared) == Some(0);
+    let free_rejects = frame::frame_get(shared) == Err(frame::FrameError::NotShareable);
+    if one && shared_ok && still_held && released && free_rejects {
+        Status::Pass
+    } else {
+        Status::Fail
+    }
+}
+
+fn zeroed_frame_test() -> Status {
+    // Dirty a frame and give it back so the zeroed allocation below is
+    // likely (not guaranteed) to reuse it.
+    if let Some(dirty) = frame::alloc_frame() {
+        let bytes = paging::phys_to_virt(frame::PhysAddr(dirty.0)).0 as *mut u8;
+        unsafe { core::ptr::write_bytes(bytes, 0xa5, frame::PAGE_SIZE as usize) };
+        frame::free_frame(dirty);
+    }
+    let Some(zeroed) = frame::alloc_frame_zeroed() else {
+        return Status::Fail;
+    };
+    let words = paging::phys_to_virt(frame::PhysAddr(zeroed.0)).0 as *const u64;
+    let clean = (0..frame::PAGE_SIZE as usize / 8).all(|index| unsafe { *words.add(index) } == 0);
+    frame::free_frame(zeroed);
+    if clean { Status::Pass } else { Status::Fail }
+}
+
+fn contiguous_block_test() -> Status {
+    let order = frame::AllocationOrder(4);
+    let Ok(block) = frame::alloc_contiguous(order, None) else {
+        return Status::Fail;
+    };
+    let aligned = block.0 % order.bytes() == 0;
+    frame::release_contiguous(block, order);
+    if aligned && frame::validate().is_ok() {
+        Status::Pass
+    } else {
+        Status::Fail
+    }
 }
 
 fn invalid_address_test(space: Option<&mut paging::AddressSpace>) -> Status {
@@ -409,6 +558,20 @@ pub fn run() -> Report {
         heap_test()
     };
     report.record(10, heap_name, heap_status);
+    report.record(
+        11,
+        "process-root activation and shared kernel half",
+        process_root_test(),
+    );
+    report.record(12, "boot identity map removed", lower_half_empty_test());
+    report.record(13, "buddy free lists match the bitmap", buddy_lists_test());
+    report.record(14, "frame reference counting", refcount_test());
+    report.record(15, "zeroed frame allocation", zeroed_frame_test());
+    report.record(
+        16,
+        "contiguous block alignment and release",
+        contiguous_block_test(),
+    );
 
     if interrupts_were_enabled {
         cpu::sti();
