@@ -1,7 +1,7 @@
 use crate::arch::x86_64::acpi::InterruptTopology;
 use crate::arch::x86_64::apic::{IoApic, LocalApic};
 use crate::arch::x86_64::pic;
-use crate::sync::SpinMutex;
+use crate::sync::IrqSpinMutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerKind {
@@ -144,7 +144,10 @@ impl Default for InterruptController {
     }
 }
 
-pub static CONTROLLER: SpinMutex<InterruptController> = SpinMutex::new(InterruptController::new());
+/// Every IRQ handler takes this lock to send EOI, so holders must mask
+/// interrupts or the next tick would spin on it forever.
+pub static CONTROLLER: IrqSpinMutex<InterruptController> =
+    IrqSpinMutex::new(InterruptController::new());
 
 pub fn init(topology: Option<&InterruptTopology>) -> ControllerKind {
     CONTROLLER.lock().init(topology)

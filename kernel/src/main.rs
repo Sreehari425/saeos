@@ -6,6 +6,8 @@ extern crate alloc;
 
 pub mod arch;
 pub mod boot;
+#[cfg(feature = "boot-test")]
+mod boot_test;
 pub mod collections;
 pub mod drivers;
 pub mod mm;
@@ -290,6 +292,7 @@ fn panic(info: &PanicInfo) -> ! {
     drivers::console::set_color(Color::LightRed, Color::Black);
     println!("\n[KERNEL PANIC]");
     println!("{}", info);
+    arch::x86_64::qemu::exit_if_enabled(false);
 
     loop {
         cpu::hlt();

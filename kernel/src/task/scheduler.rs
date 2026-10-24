@@ -235,16 +235,16 @@ impl Scheduler {
     /// next task. The caller must release the scheduler lock before restoring
     /// the returned stack pointer.
     pub fn preempt(&mut self, stack_pointer: u64, elapsed: Tick) -> TaskId {
-        if self.policy == PolicyKind::Fifo {
-            if let Some(current) = self.current {
-                if let Some(task) = self.task_mut(current) {
-                    task.interrupt_stack_pointer = stack_pointer;
-                    task.resume_kind = ResumeKind::Interrupt;
-                    task.scheduler_entity.account(elapsed);
-                }
-                self.clock = self.clock.saturating_add(elapsed);
-                return current;
+        if self.policy == PolicyKind::Fifo
+            && let Some(current) = self.current
+        {
+            if let Some(task) = self.task_mut(current) {
+                task.interrupt_stack_pointer = stack_pointer;
+                task.resume_kind = ResumeKind::Interrupt;
+                task.scheduler_entity.account(elapsed);
             }
+            self.clock = self.clock.saturating_add(elapsed);
+            return current;
         }
         self.stats.timer_preemptions = self.stats.timer_preemptions.saturating_add(1);
         self.stats.context_switches = self.stats.context_switches.saturating_add(1);

@@ -142,12 +142,16 @@ impl BuddyBitmap {
                 {
                     return false;
                 }
-                for frame in start..start + count {
-                    if self.used[frame] || seen[frame] {
-                        return false;
-                    }
-                    seen[frame] = true;
+                let used = &self.used[start..start + count];
+                let block = &mut seen[start..start + count];
+                if used
+                    .iter()
+                    .zip(block.iter())
+                    .any(|(used, seen)| *used || *seen)
+                {
+                    return false;
                 }
+                block.fill(true);
             }
         }
         seen.iter()

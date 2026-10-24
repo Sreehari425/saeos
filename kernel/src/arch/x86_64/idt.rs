@@ -5,6 +5,7 @@ use crate::arch::x86_64::gdt;
 #[cfg(feature = "keyboard")]
 use crate::arch::x86_64::interrupt_controller;
 use crate::arch::x86_64::pic;
+use crate::arch::x86_64::qemu;
 #[cfg(feature = "keyboard")]
 use crate::drivers::keyboard;
 use crate::mm::kvm;
@@ -134,6 +135,7 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
         "[EXCEPTION: DIVIDE BY ZERO] RIP={:#x}",
         stack_frame.instruction_pointer
     );
+    qemu::exit_if_enabled(false);
     loop {
         cpu::pause();
     }
@@ -187,6 +189,8 @@ extern "x86-interrupt" fn double_fault_handler(
     // A guard-page hit cannot push a #PF frame, so overflows arrive here with
     // CR2 still naming the guard address.
     if report_stack_overflow(read_cr2(), stack_frame.instruction_pointer) {
+        // An overflow is the expected outcome only in the guard test.
+        qemu::exit_if_enabled(cfg!(feature = "mm-guard-test"));
         loop {
             cpu::hlt();
         }
@@ -200,6 +204,7 @@ extern "x86-interrupt" fn double_fault_handler(
         error_code,
         stack_frame.instruction_pointer
     );
+    qemu::exit_if_enabled(false);
     loop {
         cpu::pause();
     }
@@ -217,8 +222,12 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         "[EXCEPTION: GPF (err={:#x})] RIP={:#x} current={:?}",
         error_code,
         stack_frame.instruction_pointer,
-        crate::scheduler::current(),
+        // try_lock: the fault may have happened with the scheduler lock held.
+        crate::scheduler::SCHEDULER
+            .try_lock()
+            .and_then(|scheduler| scheduler.current()),
     );
+    qemu::exit_if_enabled(false);
     loop {
         cpu::pause();
     }
@@ -229,6 +238,8 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
     // A large frame can touch the guard while RSP is still on the stack, in
     // which case the #PF itself is delivered normally.
     if report_stack_overflow(faulting_address, stack_frame.instruction_pointer) {
+        // An overflow is the expected outcome only in the guard test.
+        qemu::exit_if_enabled(cfg!(feature = "mm-guard-test"));
         loop {
             cpu::hlt();
         }
@@ -243,6 +254,7 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
         error_code,
         stack_frame.instruction_pointer
     );
+    qemu::exit_if_enabled(false);
     loop {
         cpu::pause();
     }

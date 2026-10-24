@@ -3,9 +3,11 @@ pub mod proto;
 pub mod relocate;
 
 use crate::arch::x86_64::acpi;
+#[cfg(feature = "framebuffer")]
+use crate::boot::boot_info::PixelFormat;
 use crate::boot::boot_info::{
     BootInfo, BootMode, DisplayMode, FramebufferInfo, KernelSection, KernelSections,
-    MAX_MEMORY_REGIONS, PhysicalMemoryKind, PhysicalMemoryMap, PhysicalMemoryRegion, PixelFormat,
+    MAX_MEMORY_REGIONS, PhysicalMemoryKind, PhysicalMemoryMap, PhysicalMemoryRegion,
 };
 #[cfg(feature = "framebuffer")]
 use proto::{EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, EfiGraphicsOutputProtocol};

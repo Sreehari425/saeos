@@ -3,7 +3,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::interrupt_controller::{self, ControllerKind};
 use crate::collections::hasher::BuildIdentityHasher;
 use crate::collections::{ChainedMap, HashSet, Map, OpenAddressMap, Set, StaticMap};
@@ -316,13 +315,8 @@ pub fn execute(cmd: &str) {
             }
         }
         "apic" | "status" => {
-            // Snapshot controller state before printing. Printing can take
-            // time while interrupts are enabled, and the keyboard interrupt
-            // handler also needs CONTROLLER to send its EOI. Holding this
-            // lock across println! would deadlock if a key arrived then.
-            // The interrupt handler also reads CONTROLLER for EOI, so mask
-            // interrupts for the short snapshot window as well.
-            cpu::cli();
+            // Snapshot controller state before printing so the lock (which
+            // masks interrupts while held) is not kept across println!.
             let snapshot = {
                 let ctrl = interrupt_controller::CONTROLLER.lock();
                 (
@@ -335,7 +329,6 @@ pub fn execute(cmd: &str) {
                     ctrl.ioapic.max_redirection_entries(),
                 )
             };
-            cpu::sti();
 
             let (mode, lapic_base, lapic_id, lapic_version, ioapic_base, ioapic_id, max_irqs) =
                 snapshot;

@@ -14,6 +14,11 @@ pub fn mm_lock_depth() -> usize {
 }
 
 /// A lightweight spinlock mutex suitable for bare-metal `#![no_std]` environments.
+///
+/// Only for state that interrupt handlers never touch. On a single CPU, an
+/// interrupt that arrives while a task holds the lock and then tries to take
+/// it spins forever; any lock an interrupt handler takes must be an
+/// [`IrqSpinMutex`].
 pub struct SpinMutex<T> {
     lock: AtomicBool,
     data: UnsafeCell<T>,
@@ -67,10 +72,9 @@ impl<T> IrqSpinMutex<T> {
                 data: unsafe { &mut *self.data.get() },
                 interrupts_enabled,
             })
-            .map(|guard| {
+            .inspect(|_| {
                 #[cfg(feature = "mm-lock-debug")]
                 MM_LOCK_DEPTH.fetch_add(1, Ordering::AcqRel);
-                guard
             }),
             Err(_) => {
                 if interrupts_enabled {

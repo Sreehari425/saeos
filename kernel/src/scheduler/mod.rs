@@ -20,7 +20,7 @@ pub use dispatch::TimerDispatch;
 use dispatch::{Dispatch, assert_switch_boundary_unlocked, dispatch_for, switch_dispatch};
 pub use lifecycle::{collect_child_status, exit_current, register_child_waiter, spawn_kernel_task};
 #[cfg(feature = "scheduler-selftest")]
-pub use selftest::start_selftest;
+pub use selftest::{selftest_passed, start_selftest};
 pub use wait::exit;
 pub use wait::{block_current, block_on, sleep_ms, sleep_until, wake_all, wake_one, yield_now};
 
@@ -124,7 +124,12 @@ pub fn init() {
     let (idle, shell, reaper) = with_scheduler(|scheduler| {
         let [idle_stack, shell_stack, reaper_stack] = stacks;
         let idle = scheduler.spawn_kernel_task(idle_task, "idle", true, idle_stack);
-        let shell = scheduler.spawn_kernel_task(crate::shell::run, "shell", false, shell_stack);
+        // The unattended boot test replaces the interactive shell.
+        #[cfg(feature = "boot-test")]
+        let (shell_entry, shell_name): (TaskEntry, _) = (crate::boot_test::run, "boot-test");
+        #[cfg(not(feature = "boot-test"))]
+        let (shell_entry, shell_name): (TaskEntry, _) = (crate::shell::run, "shell");
+        let shell = scheduler.spawn_kernel_task(shell_entry, shell_name, false, shell_stack);
         let reaper = scheduler.spawn_kernel_task(reaper_task, "reaper", false, reaper_stack);
         (idle, shell, reaper)
     });
@@ -139,6 +144,8 @@ pub fn init() {
 /// report the overflow by task name instead of corrupting memory.
 #[cfg(feature = "mm-guard-test")]
 fn guard_test_task() -> ! {
+    // Unbounded on purpose: the guard page is the only way out.
+    #[allow(unconditional_recursion)]
     #[inline(never)]
     fn recurse(depth: u64) -> u64 {
         let frame = core::hint::black_box([depth; 32]);
@@ -152,6 +159,11 @@ fn guard_test_task() -> ! {
 #[cfg(not(feature = "scheduler-selftest"))]
 pub fn start_selftest() -> Result<(), &'static str> {
     Err("scheduler self-test is disabled in this build")
+}
+
+#[cfg(not(feature = "scheduler-selftest"))]
+pub fn selftest_passed() -> bool {
+    false
 }
 
 fn attach_task_to_new_process(task: TaskId) -> ProcessId {

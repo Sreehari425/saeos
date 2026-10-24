@@ -18,6 +18,13 @@ static SELFTEST_STARTED: core::sync::atomic::AtomicBool =
 static SELFTEST_FINISHED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Whether the runtime workload has finished and passed. A failing run
+/// panics instead.
+#[cfg(feature = "scheduler-selftest")]
+pub fn selftest_passed() -> bool {
+    SELFTEST_FINISHED.load(Ordering::Acquire)
+}
+
 /// Start the opt-in runtime workload when explicitly requested from the shell.
 #[cfg(feature = "scheduler-selftest")]
 pub fn start_selftest() -> Result<(), &'static str> {

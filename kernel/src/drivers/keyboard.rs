@@ -1,4 +1,4 @@
-use crate::sync::SpinMutex;
+use crate::sync::IrqSpinMutex;
 
 const KEY_BUFFER_CAPACITY: usize = 128;
 
@@ -45,7 +45,8 @@ impl Default for KeyQueue {
     }
 }
 
-pub static KEY_QUEUE: SpinMutex<KeyQueue> = SpinMutex::new(KeyQueue::new());
+// Both are taken by the keyboard IRQ handler, so holders must mask interrupts.
+pub static KEY_QUEUE: IrqSpinMutex<KeyQueue> = IrqSpinMutex::new(KeyQueue::new());
 
 struct KeyboardState {
     lshift: bool,
@@ -67,7 +68,7 @@ impl KeyboardState {
     }
 }
 
-static KEYBOARD_STATE: SpinMutex<KeyboardState> = SpinMutex::new(KeyboardState::new());
+static KEYBOARD_STATE: IrqSpinMutex<KeyboardState> = IrqSpinMutex::new(KeyboardState::new());
 
 pub fn pop_key() -> Option<char> {
     KEY_QUEUE.lock().pop()

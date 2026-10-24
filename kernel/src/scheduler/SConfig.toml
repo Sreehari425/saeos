@@ -12,6 +12,14 @@ feature = "scheduler-selftest"
 help = "Compile scheduler stress tasks and validation instrumentation; keep disabled until the live multi-task stack path is validated."
 
 [[option]]
+id = "boot_test"
+name = "Unattended boot test"
+type = "bool"
+default = false
+feature = "boot-test"
+help = "Replace the shell with a task that runs the memory and scheduler self-tests and exits QEMU with the verdict (needs -device isa-debug-exit,iobase=0xf4,iosize=0x04)."
+
+[[option]]
 id = "debug"
 name = "Scheduler runtime diagnostics"
 type = "bool"

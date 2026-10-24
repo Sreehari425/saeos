@@ -7,7 +7,9 @@ use crate::drivers::vga::Color;
 #[cfg(feature = "vga-text")]
 use crate::drivers::vga::{self, WRITER as VGA_WRITER};
 use crate::sync::SpinMutex;
-use core::fmt::{self, Write};
+use core::fmt;
+#[cfg(any(feature = "vga-text", feature = "framebuffer", feature = "serial"))]
+use core::fmt::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleKind {
@@ -87,7 +89,9 @@ pub fn set_color(fg: Color, bg: Color) {
         #[cfg(feature = "vga-text")]
         ConsoleKind::Vga => vga::set_color(fg, bg),
         #[cfg(not(feature = "vga-text"))]
-        ConsoleKind::Vga => {}
+        ConsoleKind::Vga => {
+            let _ = (fg, bg);
+        }
         #[cfg(feature = "framebuffer")]
         ConsoleKind::Gop => GOP_WRITER.lock().set_color(fg, bg),
     }
@@ -102,7 +106,9 @@ pub fn _print(args: fmt::Arguments) {
             VGA_WRITER.lock().write_fmt(args).unwrap();
         }
         #[cfg(not(feature = "vga-text"))]
-        ConsoleKind::Vga => {}
+        ConsoleKind::Vga => {
+            let _ = args;
+        }
         #[cfg(feature = "framebuffer")]
         ConsoleKind::Gop => {
             GOP_WRITER.lock().write_fmt(args).unwrap();

@@ -1,37 +1,17 @@
 #!/usr/bin/env bash
+# Boot a `boot-test` + `mm-stress` kernel and require the MM stress markers
+# on top of the kernel's own PASS verdict.
+#
+# usage: run-mm-stress.sh <runner> <image> [qemu options...]
 set -euo pipefail
 
-if [ "$#" -eq 0 ]; then
-    echo "usage: $0 <runner> [runner arguments...]" >&2
+if [ "$#" -lt 2 ]; then
+    echo "usage: $0 <runner> <image> [qemu options...]" >&2
     exit 2
 fi
 
-LOG_FILE="$(mktemp -t saeos-mm-stress.XXXXXX)"
-trap 'rm -f "$LOG_FILE"' EXIT
-
-set +e
-"$@" 2>&1 | tee "$LOG_FILE"
-STATUS=${PIPESTATUS[0]}
-set -e
-
-if [ "$STATUS" -ne 0 ]; then
-    echo "MM stress runner failed with status $STATUS" >&2
-    exit "$STATUS"
-fi
-
-if ! rg -q 'Memory: boot MM stress report: [0-9]+ passed, 0 failed' "$LOG_FILE"; then
-    echo "MM stress completion marker missing or reported failures" >&2
-    exit 1
-fi
-if ! rg -q 'Memory: kernel address-space user mapping self-check passed' "$LOG_FILE"; then
-    echo "address-space self-test marker missing" >&2
-    exit 1
-fi
-if ! rg -q 'Memory: process-root activation self-check passed' "$LOG_FILE"; then
-    echo "process-root activation marker missing" >&2
-    exit 1
-fi
-if ! rg -q 'Kernel Heap Allocator initialized' "$LOG_FILE"; then
-    echo "heap self-test marker missing" >&2
-    exit 1
-fi
+QEMU_TEST_EXPECT='Memory: boot MM stress report: [0-9]+ passed, 0 failed
+Memory: kernel address-space user mapping self-check passed
+Memory: process-root activation self-check passed
+Kernel Heap Allocator initialized' \
+    exec "$(dirname "$0")/run-qemu-test.sh" "$@"
