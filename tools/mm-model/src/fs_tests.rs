@@ -1,8 +1,9 @@
-//! Unit tests for the VFS, ramfs, devfs, the tar parser, and RamDisk.
+//! Unit tests for the VFS, ramfs, devfs, the cpio parser, and RamDisk.
 
 use crate::fs::block::{BlockDevice, RamDisk};
 use crate::fs::devfs::{CONSOLE_CAPTURE, DevFs};
-use crate::fs::initramfs::{self, EntryKind, TarError};
+use crate::fs::initramfs::{self, CpioError, EntryKind};
+use crate::fs::procfs::{Generator, ProcFs};
 use crate::fs::ramfs::RamFs;
 use crate::fs::vfs::Vfs;
 use crate::fs::{Errno, FileSystem, FileTable, InodeKind, OpenFlags, Whence};
@@ -333,42 +334,29 @@ fn device_files() {
     assert_eq!(vfs.mkdir("/dev/dir"), Err(Errno::EROFS));
 }
 
-/// Minimal ustar writer for the parser tests (mirrors kernel/build.rs).
-fn tar_entry(archive: &mut Vec<u8>, path: &str, kind: u8, data: &[u8]) {
-    let mut header = [0u8; 512];
-    header[..path.len()].copy_from_slice(path.as_bytes());
-    let mut octal = |range: std::ops::Range<usize>, value: u64| {
-        let width = range.len() - 1;
-        header[range].copy_from_slice(format!("{value:0width$o}\0").as_bytes());
-    };
-    octal(100..108, 0o644);
-    octal(108..116, 0);
-    octal(116..124, 0);
-    octal(124..136, data.len() as u64);
-    octal(136..148, 0);
-    header[156] = kind;
-    header[257..263].copy_from_slice(b"ustar\0");
-    header[263..265].copy_from_slice(b"00");
-    header[148..156].fill(b' ');
-    let checksum: u64 = header.iter().map(|&byte| u64::from(byte)).sum();
-    header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
-    archive.extend_from_slice(&header);
-    archive.extend_from_slice(data);
-    archive.resize(archive.len().next_multiple_of(512), 0);
+fn sample_image() -> mkinitramfs::Image {
+    let mut image = mkinitramfs::Image::default();
+    image
+        .add_file("/etc/hello", 0o644, b"hello\n".to_vec())
+        .unwrap();
+    image
+        .add_file("/deep/a/b/file", 0o644, vec![5; 1300])
+        .unwrap();
+    image.add_directory("/empty").unwrap();
+    image
 }
 
-fn sample_archive() -> Vec<u8> {
-    let mut archive = Vec::new();
-    tar_entry(&mut archive, "etc", b'5', &[]);
-    tar_entry(&mut archive, "etc/hello", b'0', b"hello\n");
-    tar_entry(&mut archive, "./deep/a/b/file", b'0', &[5; 1300]);
-    archive.extend_from_slice(&[0; 1024]);
-    archive
+fn unpack_into_vfs(archive: &[u8]) -> (Vfs, Result<(usize, u64), CpioError>) {
+    let filesystem = RamFs::new();
+    let vfs = Vfs::new();
+    vfs.mount("/", filesystem.clone()).unwrap();
+    let result = initramfs::unpack(&filesystem.root(), archive);
+    (vfs, result)
 }
 
 #[test]
-fn tar_parses_and_unpacks() {
-    let archive = sample_archive();
+fn cpio_parses_and_unpacks() {
+    let archive = sample_image().to_cpio();
     let entries = initramfs::parse(&archive).unwrap();
     let summary: Vec<_> = entries
         .iter()
@@ -377,32 +365,98 @@ fn tar_parses_and_unpacks() {
     assert_eq!(
         summary,
         [
+            ("deep", EntryKind::Directory, 0),
+            ("deep/a", EntryKind::Directory, 0),
+            ("deep/a/b", EntryKind::Directory, 0),
+            ("deep/a/b/file", EntryKind::File, 1300),
+            ("empty", EntryKind::Directory, 0),
             ("etc", EntryKind::Directory, 0),
             ("etc/hello", EntryKind::File, 6),
-            ("deep/a/b/file", EntryKind::File, 1300),
         ]
     );
-    let filesystem = RamFs::new();
-    let vfs = Vfs::new();
-    vfs.mount("/", filesystem.clone()).unwrap();
-    assert_eq!(
-        initramfs::unpack(&filesystem.root(), &archive),
-        Ok((2, 1306))
-    );
+    let (vfs, result) = unpack_into_vfs(&archive);
+    assert_eq!(result, Ok((2, 1306)));
     let files = FileTable::new();
     assert_eq!(read_file(&vfs, &files, "/etc/hello").unwrap(), b"hello\n");
     assert_eq!(
         read_file(&vfs, &files, "/deep/a/b/file").unwrap(),
         vec![5; 1300]
     );
+    assert_eq!(vfs.stat("/empty").unwrap().kind, InodeKind::Directory);
 }
 
 #[test]
-fn tar_rejects_every_kind_of_damage() {
-    let archive = sample_archive();
-    // Any truncation (losing the end marker or part of an entry) fails.
-    let step = if cfg!(miri) { 97 } else { 1 };
-    for length in (0..archive.len() - 1024).step_by(step) {
+fn cpio_fixture_image_unpacks_with_matching_hashes() {
+    let mut image = mkinitramfs::Image::default();
+    image.add_test_fixtures().unwrap();
+    let (vfs, result) = unpack_into_vfs(&image.to_cpio());
+    result.unwrap();
+    let files = FileTable::new();
+    let manifest = read_file(&vfs, &files, "/test/MANIFEST").unwrap();
+    for line in std::str::from_utf8(&manifest).unwrap().lines() {
+        let fields: Vec<_> = line.split(' ').collect();
+        let data = read_file(&vfs, &files, fields[0]).unwrap();
+        assert_eq!(data.len().to_string(), fields[1], "{line}");
+        assert_eq!(
+            format!("{:016x}", mkinitramfs::fnv1a(&data)),
+            fields[2],
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn concatenated_archives_override_earlier_files() {
+    let mut first = mkinitramfs::Image::default();
+    first
+        .add_file("/etc/hello", 0o644, b"a much longer original".to_vec())
+        .unwrap();
+    first
+        .add_file("/etc/kept", 0o644, b"kept".to_vec())
+        .unwrap();
+    let mut second = mkinitramfs::Image::default();
+    second
+        .add_file("/etc/hello", 0o644, b"new".to_vec())
+        .unwrap();
+    second.add_file("/extra", 0o644, b"x".to_vec()).unwrap();
+    let mut archive = first.to_cpio();
+    // Linux allows zero padding between concatenated archives.
+    archive.extend_from_slice(&[0; 512]);
+    archive.extend_from_slice(&second.to_cpio());
+    let (vfs, result) = unpack_into_vfs(&archive);
+    assert_eq!(result, Ok((4, 22 + 4 + 3 + 1)));
+    let files = FileTable::new();
+    assert_eq!(
+        read_file(&vfs, &files, "/etc/hello").unwrap(),
+        b"new",
+        "replaced and truncated"
+    );
+    assert_eq!(read_file(&vfs, &files, "/etc/kept").unwrap(), b"kept");
+    assert_eq!(read_file(&vfs, &files, "/extra").unwrap(), b"x");
+    // A file cannot be replaced by a directory (or the reverse).
+    let mut clash = mkinitramfs::Image::default();
+    clash.add_file("/extra/inside", 0o644, Vec::new()).unwrap();
+    archive.extend_from_slice(&clash.to_cpio());
+    assert_eq!(
+        unpack_into_vfs(&archive).1,
+        Err(CpioError::Filesystem(Errno::ENOTDIR))
+    );
+}
+
+/// One raw entry followed by a trailer.
+fn raw_archive(mode: u32, path: &str, data: &[u8]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    mkinitramfs::cpio::push_entry(&mut archive, 1, mode, path, data);
+    mkinitramfs::cpio::push_entry(&mut archive, 0, 0, mkinitramfs::cpio::TRAILER, &[]);
+    archive
+}
+
+#[test]
+fn cpio_rejects_every_kind_of_damage() {
+    let archive = sample_image().to_cpio();
+    // Any truncation (losing the trailer or part of an entry) fails.
+    let step = if cfg!(miri) { 37 } else { 1 };
+    for length in (0..archive.len()).step_by(step) {
         assert!(
             initramfs::parse(&archive[..length]).is_err(),
             "truncated to {length}"
@@ -413,36 +467,148 @@ fn tar_rejects_every_kind_of_damage() {
         copy[offset] = byte;
         initramfs::parse(&copy).err()
     };
-    assert_eq!(corrupt(0, b'X'), Some(TarError::BadChecksum));
-    assert_eq!(corrupt(257, b'X'), Some(TarError::BadMagic));
-    let mut bad_size = Vec::new();
-    tar_entry(&mut bad_size, "f", b'0', b"abc");
-    bad_size[124] = b'9';
-    assert!(matches!(
-        initramfs::parse(&bad_size),
-        Err(TarError::BadNumber | TarError::BadChecksum)
-    ));
-    let mut huge = Vec::new();
-    tar_entry(&mut huge, "f", b'0', &[]);
-    huge.extend_from_slice(&[0; 1024]);
-    // Claim a 1 GiB body (with a correct checksum).
-    let mut patched = huge.clone();
-    patched[124..136].copy_from_slice(b"10000000000\0");
-    patched[148..156].fill(b' ');
-    let checksum: u64 = patched[..512].iter().map(|&byte| u64::from(byte)).sum();
-    patched[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
-    assert_eq!(initramfs::parse(&patched).unwrap_err(), TarError::Truncated);
-    let mut escape = Vec::new();
-    tar_entry(&mut escape, "../etc/passwd", b'0', b"x");
-    escape.extend_from_slice(&[0; 1024]);
-    assert_eq!(initramfs::parse(&escape).unwrap_err(), TarError::BadPath);
-    let mut link = Vec::new();
-    tar_entry(&mut link, "link", b'2', &[]);
-    link.extend_from_slice(&[0; 1024]);
+    assert_eq!(corrupt(0, b'X'), Some(CpioError::BadMagic));
     assert_eq!(
-        initramfs::parse(&link).unwrap_err(),
-        TarError::UnsupportedType(b'2')
+        corrupt(5, b'2'),
+        Some(CpioError::BadMagic),
+        "070702 (crc) variant"
     );
+    assert_eq!(corrupt(6, b'g'), Some(CpioError::BadNumber), "ino field");
+    assert_eq!(
+        corrupt(6 + 6 * 8, b' '),
+        Some(CpioError::BadNumber),
+        "filesize field"
+    );
+    // Trailing garbage after the trailer is not another archive.
+    let mut garbage = archive.clone();
+    garbage.extend_from_slice(b"junk");
+    assert_eq!(initramfs::parse(&garbage).err(), Some(CpioError::Truncated));
+    garbage.extend_from_slice(&[b'j'; 200]);
+    assert_eq!(initramfs::parse(&garbage).err(), Some(CpioError::BadMagic));
+
+    let regular = mkinitramfs::cpio::S_IFREG | 0o644;
+    // Sizes far beyond the archive.
+    let mut huge = raw_archive(regular, "f", b"abcd");
+    huge[6 + 6 * 8..14 + 6 * 8].copy_from_slice(b"ffffffff");
+    assert_eq!(initramfs::parse(&huge).err(), Some(CpioError::Truncated));
+    let mut long_name = raw_archive(regular, "f", b"");
+    long_name[6 + 11 * 8..14 + 11 * 8].copy_from_slice(b"ffffffff");
+    assert_eq!(
+        initramfs::parse(&long_name).err(),
+        Some(CpioError::Truncated)
+    );
+    // namesize must include exactly one NUL, at the end.
+    let mut no_nul = raw_archive(regular, "f", b"");
+    no_nul[6 + 11 * 8..14 + 11 * 8].copy_from_slice(b"00000001");
+    assert_eq!(initramfs::parse(&no_nul).err(), Some(CpioError::BadPath));
+    let mut zero_name = raw_archive(regular, "f", b"");
+    zero_name[6 + 11 * 8..14 + 11 * 8].copy_from_slice(b"00000000");
+    assert_eq!(initramfs::parse(&zero_name).err(), Some(CpioError::BadPath));
+
+    for path in ["../etc/passwd", "a/../../b", "/"] {
+        assert_eq!(
+            initramfs::parse(&raw_archive(regular, path, b"x")).err(),
+            Some(CpioError::BadPath),
+            "{path}"
+        );
+    }
+    for mode in [0o120777, 0o020644, 0o060644, 0o010644, 0o140755] {
+        assert_eq!(
+            initramfs::parse(&raw_archive(mode, "special", b"")).err(),
+            Some(CpioError::UnsupportedType(mode)),
+            "{mode:o}"
+        );
+    }
+    let directory = mkinitramfs::cpio::S_IFDIR | 0o755;
+    assert_eq!(
+        initramfs::parse(&raw_archive(directory, "d", b"data")).err(),
+        Some(CpioError::BadNumber),
+        "directory with a body"
+    );
+    // `.` and `./x` (from `find . | cpio`) are accepted.
+    let mut dotted = Vec::new();
+    mkinitramfs::cpio::push_entry(&mut dotted, 1, directory, ".", &[]);
+    mkinitramfs::cpio::push_entry(&mut dotted, 2, regular, "./x", b"1");
+    mkinitramfs::cpio::push_entry(&mut dotted, 0, 0, mkinitramfs::cpio::TRAILER, &[]);
+    let entries = initramfs::parse(&dotted).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "x");
+}
+
+#[test]
+fn procfs_regenerates_on_read_and_is_read_only() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (vfs, files) = setup();
+    vfs.mkdir("/proc").unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let counting: Generator = Arc::new(move || {
+        let call = counter.fetch_add(1, Ordering::SeqCst);
+        format!("call {call}\n").into_bytes()
+    });
+    let fixed: Generator = Arc::new(|| b"0123456789".to_vec());
+    vfs.mount(
+        "/proc",
+        ProcFs::new(vec![("count", counting), ("fixed", fixed)]),
+    )
+    .unwrap();
+
+    // Offsets and partial reads are served from the generated contents.
+    let fd = vfs.open(&files, "/proc/fixed", OpenFlags::READ).unwrap();
+    let mut buffer = [0u8; 4];
+    assert_eq!(vfs.read(&files, fd, &mut buffer).unwrap(), 4);
+    assert_eq!(&buffer, b"0123");
+    vfs.lseek(&files, fd, 8, Whence::Set).unwrap();
+    assert_eq!(vfs.read(&files, fd, &mut buffer).unwrap(), 2);
+    assert_eq!(&buffer[..2], b"89");
+    assert_eq!(vfs.read(&files, fd, &mut buffer).unwrap(), 0, "end of file");
+    vfs.lseek(&files, fd, 1 << 40, Whence::Set).unwrap();
+    assert_eq!(
+        vfs.read(&files, fd, &mut buffer).unwrap(),
+        0,
+        "far past the end"
+    );
+    vfs.close(&files, fd).unwrap();
+    assert_eq!(
+        read_file(&vfs, &files, "/proc/fixed").unwrap(),
+        b"0123456789"
+    );
+
+    // Each read generates afresh.
+    assert_eq!(read_file(&vfs, &files, "/proc/count").unwrap(), b"call 0\n");
+    let before = calls.load(Ordering::SeqCst);
+    let again = read_file(&vfs, &files, "/proc/count").unwrap();
+    assert_eq!(again, format!("call {before}\n").into_bytes());
+
+    // Listing, stat (size 0 as on Linux), and nothing writable.
+    let fd = vfs
+        .open(&files, "/proc", OpenFlags::READ | OpenFlags::DIRECTORY)
+        .unwrap();
+    let names: Vec<_> = vfs
+        .readdir(&files, fd)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(names, ["count", "fixed"]);
+    vfs.close(&files, fd).unwrap();
+    let stat = vfs.stat("/proc/fixed").unwrap();
+    assert_eq!((stat.kind, stat.size), (InodeKind::File, 0));
+    let writable = vfs.open(&files, "/proc/fixed", OpenFlags::WRITE).unwrap();
+    assert_eq!(vfs.write(&files, writable, b"x"), Err(Errno::EROFS));
+    vfs.close(&files, writable).unwrap();
+    assert_eq!(
+        vfs.open(&files, "/proc/fixed", OpenFlags::WRITE | OpenFlags::TRUNC),
+        Err(Errno::EROFS)
+    );
+    assert_eq!(
+        vfs.open(&files, "/proc/new", OpenFlags::WRITE | CREATE),
+        Err(Errno::EROFS)
+    );
+    assert_eq!(vfs.unlink("/proc/fixed"), Err(Errno::EROFS));
+    assert_eq!(vfs.mkdir("/proc/dir"), Err(Errno::EROFS));
+    assert_eq!(vfs.rename("/proc/fixed", "/proc/other"), Err(Errno::EROFS));
+    assert_eq!(vfs.stat("/proc/missing"), Err(Errno::ENOENT));
 }
 
 #[test]

@@ -10,6 +10,7 @@
 //! is live; `free_frame` drops one reference and the last one releases.
 use crate::boot::boot_info::{PhysicalMemoryKind, PhysicalMemoryMap};
 use crate::mm::buddy::{self, BuddyLists, FrameStore, FreeNode, ReleaseError, State, Zone};
+use crate::mm::holds::{HoldId, HoldTable};
 use crate::sync::IrqSpinMutex;
 use core::sync::atomic::{AtomicPtr, AtomicU16, AtomicUsize, Ordering};
 
@@ -168,9 +169,9 @@ struct Allocator {
     scan_cursor: usize,
     lists: BuddyLists,
     buddy_active: bool,
-    /// Usable memory pinned during boot (the UEFI firmware stack) and handed
-    /// back once nothing runs on it.
-    boot_hold: Option<(usize, usize)>,
+    /// Usable memory pinned during boot (the UEFI firmware stack, the
+    /// initramfs) and handed back once it is no longer needed.
+    holds: HoldTable,
 }
 
 impl Allocator {
@@ -181,7 +182,7 @@ impl Allocator {
             scan_cursor: 0,
             lists: BuddyLists::new(),
             buddy_active: false,
-            boot_hold: None,
+            holds: HoldTable::new(),
         }
     }
     fn store(&self) -> ArenaStore {
@@ -452,40 +453,76 @@ pub fn init(map: PhysicalMemoryMap) -> Result<(), FrameError> {
     Ok(())
 }
 
+/// Hold the currently free frames of `start..end` (rounded out to pages)
+/// until [`release_hold`]. Frames that are already reserved or allocated
+/// are not part of the hold, and later permanent reservations are punched
+/// out of it, so releasing it only ever frees what it took.
+pub fn hold_range(start: u64, end: u64) -> Option<HoldId> {
+    let mut allocator = ALLOCATOR.lock();
+    let first = (start / PAGE_SIZE) as usize;
+    let last = (end.div_ceil(PAGE_SIZE) as usize).min(allocator.metadata.frame_count);
+    if first >= last {
+        return None;
+    }
+    let id = allocator.holds.new_id();
+    let mut frame = first;
+    while frame < last {
+        if allocator.state(frame) != State::Free {
+            frame += 1;
+            continue;
+        }
+        let run_start = frame;
+        while frame < last && allocator.state(frame) == State::Free {
+            frame += 1;
+        }
+        let (run_first, run_last) = (run_start as u64 * PAGE_SIZE, frame as u64 * PAGE_SIZE);
+        if allocator.reserve(run_first, run_last).is_ok()
+            && !allocator.holds.add(id, run_start, frame)
+        {
+            crate::serial_println!(
+                "Memory: hold table full; {:#x}..{:#x} stays reserved",
+                run_first,
+                run_last
+            );
+        }
+    }
+    Some(id)
+}
+
+/// Return the frames of a [`hold_range`] hold to the allocator.
+pub fn release_hold(id: HoldId) {
+    let mut allocator = ALLOCATOR.lock();
+    let mut holds = allocator.holds;
+    holds.release(id, |first, last| allocator.unreserve(first, last));
+    allocator.holds = holds;
+}
+
+/// Frames still pinned by boot-time holds.
+pub fn held_frames() -> usize {
+    ALLOCATOR.lock().holds.held_frames()
+}
+
 /// Pin the usable memory-map region holding `stack_pointer` until
 /// [`release_boot_stack`]. The UEFI firmware stack is boot-services memory,
 /// which the map reports as usable while the kernel is still running on it.
 pub fn hold_boot_stack(stack_pointer: u64) {
-    let mut allocator = ALLOCATOR.lock();
-    let Some(region) = allocator
+    let region = ALLOCATOR
+        .lock()
         .map
         .usable()
         .find(|region| region.start <= stack_pointer && stack_pointer < region.end())
-    else {
-        return;
-    };
-    let start = region.start & !(PAGE_SIZE - 1);
-    let end = region.end().next_multiple_of(PAGE_SIZE);
-    match allocator.reserve(start, end) {
-        Ok(()) => {
-            let first = (start / PAGE_SIZE) as usize;
-            let last = ((end / PAGE_SIZE) as usize).min(allocator.metadata.frame_count);
-            allocator.boot_hold = Some((first, last));
-        }
-        Err(error) => crate::serial_println!(
-            "Memory: unable to pin boot stack region {:#x}..{:#x}: {:?}",
-            start,
-            end,
-            error
-        ),
+        .copied();
+    if let Some(region) = region {
+        *BOOT_STACK_HOLD.lock() = hold_range(region.start, region.end());
     }
 }
 
+static BOOT_STACK_HOLD: IrqSpinMutex<Option<HoldId>> = IrqSpinMutex::new(None);
+
 /// Return the region pinned by [`hold_boot_stack`] to the allocator.
 pub fn release_boot_stack() {
-    let mut allocator = ALLOCATOR.lock();
-    if let Some((first, last)) = allocator.boot_hold.take() {
-        allocator.unreserve(first, last);
+    if let Some(id) = BOOT_STACK_HOLD.lock().take() {
+        release_hold(id);
     }
 }
 
@@ -612,8 +649,20 @@ pub fn release_contiguous(frame: PhysFrame, order: AllocationOrder) {
     }
 }
 
+/// Reserve `start..end` for good. Frames inside a temporary hold leave it,
+/// so releasing the hold will not free them.
 pub fn reserve_range(start: PhysAddr, end: PhysAddr) {
-    if let Err(error) = ALLOCATOR.lock().reserve(start.0, end.0) {
+    let mut allocator = ALLOCATOR.lock();
+    let result = allocator.reserve(start.0, end.0);
+    if result.is_ok() {
+        let first = (start.0 / PAGE_SIZE) as usize;
+        let last = (end.0 / PAGE_SIZE) as usize;
+        if !allocator.holds.punch(first, last) {
+            crate::serial_println!("Memory: hold table full; part of a hold stays reserved");
+        }
+    }
+    drop(allocator);
+    if let Err(error) = result {
         crate::serial_println!(
             "Memory: reservation failure for {:#x}..{:#x}: {:?}.",
             start.0,

@@ -165,9 +165,108 @@ fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
 }
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
+/// Read a whole file through the fd API in awkward chunk sizes.
+fn read_file(path: &str) -> Result<alloc::vec::Vec<u8>, crate::fs::Errno> {
+    use crate::fs::{self, OpenFlags};
+    let fd = fs::open(path, OpenFlags::READ)?;
+    let mut contents = alloc::vec::Vec::new();
+    let mut buffer = [0u8; 4096];
+    let result = (|| {
+        for chunk in [1usize, 7, 509, 4096].iter().cycle() {
+            match fs::read(fd, &mut buffer[..*chunk])? {
+                0 => return Ok(()),
+                count => contents.extend_from_slice(&buffer[..count]),
+            }
+        }
+        Ok(())
+    })();
+    fs::close(fd)?;
+    result.map(|()| contents)
+}
+
+/// Every file listed in the test image's `/test/MANIFEST` (written by
+/// `mkinitramfs --test-fixtures` as `path size fnv1a-hex` lines).
+fn initramfs_manifest_test() -> bool {
+    let manifest = match read_file("/test/MANIFEST") {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            serial_println!(
+                "boot-test: fs: /test/MANIFEST: {} (booted without the test initramfs?)",
+                error
+            );
+            return false;
+        }
+    };
+    let Ok(manifest) = core::str::from_utf8(&manifest) else {
+        return false;
+    };
+    let mut checked = 0;
+    for line in manifest.lines() {
+        let mut fields = line.split(' ');
+        let (Some(path), Some(size), Some(hash)) = (fields.next(), fields.next(), fields.next())
+        else {
+            serial_println!("boot-test: fs: bad manifest line {:?}", line);
+            return false;
+        };
+        let contents = match read_file(path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                serial_println!("boot-test: fs: cannot read {}: {}", path, error);
+                return false;
+            }
+        };
+        let digest = fnv1a(FNV_OFFSET, &contents);
+        if size.parse() != Ok(contents.len()) || u64::from_str_radix(hash, 16) != Ok(digest) {
+            serial_println!(
+                "boot-test: fs: {} size {} hash {:016x} (want {} {})",
+                path,
+                contents.len(),
+                digest,
+                size,
+                hash
+            );
+            return false;
+        }
+        checked += 1;
+    }
+    checked != 0
+}
+
+/// `/proc` reflects the boot command line and the mount table. The test
+/// runner passes `saeos.test=boot` on the command line.
+fn procfs_test() -> bool {
+    let cmdline = read_file("/proc/cmdline").unwrap_or_default();
+    let cmdline_ok = cmdline.ends_with(b"\n")
+        && cmdline[..cmdline.len().saturating_sub(1)] == *crate::cmdline::raw().as_bytes()
+        && crate::cmdline::params().get("saeos.test") == Some("boot");
+    let mounts = read_file("/proc/mounts").unwrap_or_default();
+    let mounts = core::str::from_utf8(&mounts).unwrap_or("");
+    let mounts_ok = [
+        "ramfs / ramfs rw 0 0",
+        "devfs /dev devfs rw 0 0",
+        "proc /proc proc rw 0 0",
+    ]
+    .iter()
+    .all(|line| mounts.lines().any(|mounted| mounted == *line));
+    let read_only = crate::fs::open("/proc/cmdline", crate::fs::OpenFlags::WRITE).and_then(|fd| {
+        let result = crate::fs::write(fd, b"x");
+        crate::fs::close(fd)?;
+        result
+    }) == Err(crate::fs::Errno::EROFS);
+    if !(cmdline_ok && mounts_ok && read_only) {
+        serial_println!(
+            "boot-test: fs: /proc/cmdline {:?} /proc/mounts {:?} read-only={}",
+            alloc::string::String::from_utf8_lossy(&cmdline),
+            mounts,
+            read_only
+        );
+    }
+    cmdline_ok && mounts_ok && read_only
+}
+
 /// Filesystem checks through the same fd API userspace will use: the
-/// embedded initramfs, a write/read round trip, device files, and
-/// concurrent tasks.
+/// initramfs the bootloader loaded, a write/read round trip, device files,
+/// procfs, and concurrent tasks.
 fn filesystem_test() -> bool {
     use crate::fs::{self, Errno, OpenFlags, Whence};
     let check = |name: &str, passed: bool| {
@@ -177,31 +276,13 @@ fn filesystem_test() -> bool {
         passed
     };
 
-    // (a) Every initramfs file, read in awkward chunk sizes.
-    let manifest = fs::INITRAMFS_MANIFEST.iter().all(|&(path, size, hash)| {
-        let Ok(fd) = fs::open(path, OpenFlags::READ) else {
-            serial_println!("boot-test: fs: cannot open {}", path);
-            return false;
-        };
-        let mut buffer = [0u8; 4096];
-        let (mut total, mut digest) = (0u64, FNV_OFFSET);
-        for chunk in [1usize, 7, 509, 4096].iter().cycle() {
-            match fs::read(fd, &mut buffer[..*chunk]) {
-                Ok(0) => break,
-                Ok(count) => {
-                    total += count as u64;
-                    digest = fnv1a(digest, &buffer[..count]);
-                }
-                Err(_) => return false,
-            }
-        }
-        let _ = fs::close(fd);
-        let matches = total == size && digest == hash;
-        if !matches {
-            serial_println!("boot-test: fs: {} size {} (want {})", path, total, size);
-        }
-        matches
-    });
+    // (a) Every initramfs file; the archive's memory was released after
+    // unpacking (and so was every other boot-time hold).
+    let manifest = initramfs_manifest_test();
+    let held = crate::mm::frame::held_frames();
+    if held != 0 {
+        serial_println!("boot-test: fs: {} boot-time frames still held", held);
+    }
 
     // (b) Round trip, including reading on after the name is gone.
     let round_trip = (|| -> Result<bool, Errno> {
@@ -243,6 +324,8 @@ fn filesystem_test() -> bool {
     let concurrent = concurrent_files_test();
 
     check("initramfs manifest", manifest)
+        & check("initramfs memory released", held == 0)
+        & check("procfs", procfs_test())
         & check("round trip", round_trip)
         & check("devices", devices)
         & check("concurrency", concurrent)

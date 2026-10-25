@@ -5,40 +5,97 @@ use super::devfs::DevFs;
 use super::errno::{Errno, FsResult};
 use super::file::{Fd, FileTable, OpenFlags, Whence};
 use super::initramfs;
-use super::inode::{DirEntry, Stat};
+use super::inode::{DirEntry, FileSystem, Stat};
+use super::procfs::{Generator, ProcFs};
 use super::ramfs::RamFs;
 use super::vfs::Vfs;
+use crate::boot::boot_info::{BootInfo, PhysicalRange};
+use crate::mm::PhysAddr;
+use crate::mm::paging::phys_to_virt;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-/// The archive built from the repository's `initramfs/` directory by
-/// `kernel/build.rs`.
-pub static INITRAMFS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/initramfs.tar"));
-
-/// `(path, size, FNV-1a 64)` of every file in the embedded archive.
-pub static INITRAMFS_MANIFEST: &[(&str, u64, u64)] =
-    include!(concat!(env!("OUT_DIR"), "/initramfs_manifest.rs"));
-
 pub static VFS: Vfs = Vfs::new();
 
-/// Mount ramfs at `/`, unpack the initramfs into it, and mount devfs at
-/// `/dev`. Needs the heap.
-pub fn init() {
+/// Mount ramfs at `/` and unpack every initramfs archive the bootloader
+/// loaded into it (later archives override earlier files), then hand their
+/// memory back. Then mount devfs at `/dev` and procfs at `/proc`. Needs the
+/// heap.
+pub fn init(boot_info: &BootInfo) {
     let root = RamFs::new();
     VFS.mount("/", root.clone()).expect("mount ramfs at /");
-    match initramfs::unpack(&super::FileSystem::root(&*root), INITRAMFS) {
-        Ok((files, bytes)) => crate::kinfo!("fs: initramfs {} files, {} bytes", files, bytes),
-        Err(error) => crate::kerror!("fs: initramfs rejected: {:?}", error),
+    let archives: Vec<PhysicalRange> = boot_info.initramfs.iter().flatten().copied().collect();
+    if archives.is_empty() {
+        crate::kwarn!("fs: no initramfs; / starts empty");
     }
-    if let Err(error) = VFS.mkdir("/dev").or_else(|error| match error {
+    for range in archives {
+        // Bootloader memory is ordinary RAM, reachable through the direct map.
+        let archive = unsafe {
+            core::slice::from_raw_parts(
+                phys_to_virt(PhysAddr(range.start)).0 as *const u8,
+                (range.end - range.start) as usize,
+            )
+        };
+        match initramfs::unpack(&root.root(), archive) {
+            Ok((files, bytes)) => crate::kinfo!(
+                "fs: initramfs at {:#x}: {} files, {} bytes",
+                range.start,
+                files,
+                bytes
+            ),
+            Err(error) => {
+                crate::kerror!("fs: initramfs at {:#x} rejected: {:?}", range.start, error)
+            }
+        }
+    }
+    let held = crate::mm::frame::held_frames();
+    crate::mm::release_initramfs();
+    let released = held - crate::mm::frame::held_frames();
+    if released != 0 {
+        crate::kinfo!("fs: released {} KiB of initramfs memory", released * 4);
+    }
+
+    mount_pseudo("/dev", DevFs::new());
+    mount_pseudo(
+        "/proc",
+        ProcFs::new(alloc::vec![
+            ("cmdline", generator(proc_cmdline)),
+            ("mounts", generator(proc_mounts)),
+        ]),
+    );
+}
+
+fn generator(function: fn() -> Vec<u8>) -> Generator {
+    Arc::new(function)
+}
+
+/// Create `path` (unless the initramfs did) and mount `filesystem` there.
+fn mount_pseudo(path: &str, filesystem: Arc<dyn FileSystem>) {
+    if let Err(error) = VFS.mkdir(path).or_else(|error| match error {
         Errno::EEXIST => Ok(()),
         error => Err(error),
     }) {
-        crate::kerror!("fs: cannot create /dev: {}", error);
+        crate::kerror!("fs: cannot create {}: {}", path, error);
     }
-    if let Err(error) = VFS.mount("/dev", DevFs::new()) {
-        crate::kerror!("fs: cannot mount devfs: {}", error);
+    if let Err(error) = VFS.mount(path, filesystem) {
+        crate::kerror!("fs: cannot mount {}: {}", path, error);
     }
+}
+
+/// `/proc/cmdline`: the command line and a newline, exactly as Linux.
+fn proc_cmdline() -> Vec<u8> {
+    let mut contents = Vec::from(crate::cmdline::raw().as_bytes());
+    contents.push(b'\n');
+    contents
+}
+
+/// `/proc/mounts`: `device mountpoint type options 0 0`, as Linux.
+fn proc_mounts() -> Vec<u8> {
+    let mut contents = alloc::string::String::new();
+    for (path, name) in VFS.mounts() {
+        contents.push_str(&alloc::format!("{name} {path} {name} rw 0 0\n"));
+    }
+    contents.into_bytes()
 }
 
 /// The current task's process file table. Taken under a brief process-table

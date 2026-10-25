@@ -5,3 +5,7 @@ edition.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+# The parser is tested against the real archive writer.
+mkinitramfs = { path = "../mkinitramfs" }

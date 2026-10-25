@@ -43,6 +43,82 @@ pub const EFI_LOADED_IMAGE_PROTOCOL_GUID: EfiGuid = EfiGuid {
     data4: [0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B],
 };
 
+pub const EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID: EfiGuid = EfiGuid {
+    data1: 0x964e5b22,
+    data2: 0x6459,
+    data3: 0x11d2,
+    data4: [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+pub const EFI_FILE_INFO_GUID: EfiGuid = EfiGuid {
+    data1: 0x09576e92,
+    data2: 0x6d3f,
+    data3: 0x11d2,
+    data4: [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+pub const EFI_FILE_MODE_READ: u64 = 1;
+/// `AllocatePages` type: any pages below the given address.
+pub const ALLOCATE_MAX_ADDRESS: u32 = 1;
+pub const EFI_LOADER_DATA: u32 = 2;
+
+pub type EfiAllocatePages = unsafe extern "efiapi" fn(
+    allocate_type: u32,
+    memory_type: u32,
+    pages: usize,
+    memory: *mut u64,
+) -> EfiStatus;
+
+#[repr(C)]
+pub struct EfiSimpleFileSystemProtocol {
+    pub revision: u64,
+    pub open_volume: unsafe extern "efiapi" fn(
+        this: *mut EfiSimpleFileSystemProtocol,
+        root: *mut *mut EfiFileProtocol,
+    ) -> EfiStatus,
+}
+
+/// The leading part of `EFI_FILE_PROTOCOL`; later members are never used.
+#[repr(C)]
+pub struct EfiFileProtocol {
+    pub revision: u64,
+    pub open: unsafe extern "efiapi" fn(
+        this: *mut EfiFileProtocol,
+        new_handle: *mut *mut EfiFileProtocol,
+        file_name: *const u16,
+        open_mode: u64,
+        attributes: u64,
+    ) -> EfiStatus,
+    pub close: unsafe extern "efiapi" fn(this: *mut EfiFileProtocol) -> EfiStatus,
+    pub delete: usize,
+    pub read: unsafe extern "efiapi" fn(
+        this: *mut EfiFileProtocol,
+        buffer_size: *mut usize,
+        buffer: *mut u8,
+    ) -> EfiStatus,
+    pub write: usize,
+    pub get_position: usize,
+    pub set_position: usize,
+    pub get_info: unsafe extern "efiapi" fn(
+        this: *mut EfiFileProtocol,
+        information_type: *const EfiGuid,
+        buffer_size: *mut usize,
+        buffer: *mut u8,
+    ) -> EfiStatus,
+}
+
+/// The fixed head of `EFI_FILE_INFO` (a variable-length name follows).
+#[repr(C)]
+pub struct EfiFileInfo {
+    pub size: u64,
+    pub file_size: u64,
+    pub physical_size: u64,
+    pub create_time: [u8; 16],
+    pub last_access_time: [u8; 16],
+    pub modification_time: [u8; 16],
+    pub attribute: u64,
+}
+
 #[repr(C)]
 pub struct EfiTableHeader {
     pub signature: u64,

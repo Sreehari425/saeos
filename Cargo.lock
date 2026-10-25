@@ -267,8 +267,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkinitramfs"
+version = "0.1.0"
+dependencies = [
+ "toml",
+]
+
+[[package]]
 name = "mm-model"
 version = "0.1.0"
+dependencies = [
+ "mkinitramfs",
+]
 
 [[package]]
 name = "parking_lot"

@@ -1,3 +1,4 @@
+mod boot_files;
 pub mod proto;
 #[cfg(target_os = "uefi")]
 pub mod relocate;
@@ -285,6 +286,8 @@ pub unsafe extern "efiapi" fn efi_main(
         let mut image_base = 0u64;
         let mut image_end = 0u64;
         let mut kernel_sections = KernelSections::EMPTY;
+        let mut boot_device: EfiHandle = core::ptr::null_mut();
+        let mut load_options: (*const u16, u32) = (core::ptr::null(), 0);
         let open_protocol: unsafe extern "efiapi" fn(
             EfiHandle,
             *const proto::EfiGuid,
@@ -310,7 +313,12 @@ pub unsafe extern "efiapi" fn efi_main(
             image_base = image.image_base as u64;
             image_end = image_base.saturating_add(image.image_size);
             kernel_sections = parse_pe_sections(image_base);
+            boot_device = image.device_handle;
+            load_options = (image.load_options as *const u16, image.load_options_size);
         }
+        // Allocates pages, so before the final memory map is read.
+        let (initramfs, cmdline) =
+            boot_files::load(bs, boot_device, load_options.0, load_options.1);
 
         #[cfg(feature = "framebuffer")]
         let fb_info = {
@@ -487,6 +495,12 @@ pub unsafe extern "efiapi" fn efi_main(
             rsdp_addr,
             memory_map_descriptor_count: UEFI_DESCRIPTOR_COUNT,
             memory_map_discarded: UEFI_DISCARDED,
+            initramfs: {
+                let mut archives = [None; crate::boot::boot_info::MAX_INITRAMFS];
+                archives[0] = initramfs;
+                archives
+            },
+            cmdline,
         };
 
         crate::kernel_main(&boot_info);

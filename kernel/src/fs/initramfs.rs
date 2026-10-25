@@ -1,7 +1,19 @@
-//! The initial RAM filesystem: a POSIX ustar archive unpacked into ramfs at
-//! boot. The parser trusts nothing: every header is checked (magic,
-//! checksum, octal fields, sizes, paths) and a bad archive is an error,
-//! never a panic or an out-of-bounds read.
+//! The initial RAM filesystem: a cpio "newc" archive (Linux's initramfs
+//! format, written by `tools/mkinitramfs`) unpacked into ramfs at boot.
+//!
+//! ```text
+//! entry   = header(110 bytes) name NUL pad4 data pad4
+//! header  = "070701" + 13 fields of 8 hex digits:
+//!           ino mode uid gid nlink mtime filesize
+//!           devmajor devminor rdevmajor rdevminor namesize check
+//! archive = entry* "TRAILER!!!" entry, then optionally zero padding and
+//!           further archives (later entries override earlier ones)
+//! ```
+//!
+//! The parser trusts nothing: every field, size and path is checked and a
+//! bad archive is an error, never a panic or an out-of-bounds read. Only
+//! regular files and directories are supported; hard links are unpacked as
+//! independent files.
 
 use super::errno::Errno;
 use super::inode::{Inode, InodeKind};
@@ -9,17 +21,24 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-const BLOCK: usize = 512;
+const MAGIC: &[u8; 6] = b"070701";
+const HEADER_LEN: usize = 110;
+const TRAILER: &str = "TRAILER!!!";
+const S_IFMT: u32 = 0o170000;
+const S_IFREG: u32 = 0o100000;
+const S_IFDIR: u32 = 0o040000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TarError {
-    /// The archive ends inside a header or file body.
+pub enum CpioError {
+    /// The archive ends inside a header, name, file body or padding, or
+    /// has no trailer.
     Truncated,
     BadMagic,
-    BadChecksum,
+    /// A header field is not eight hex digits.
     BadNumber,
     BadPath,
-    UnsupportedType(u8),
+    /// A file type other than regular file or directory (the full mode).
+    UnsupportedType(u32),
     /// The filesystem rejected an entry.
     Filesystem(Errno),
 }
@@ -38,46 +57,20 @@ pub struct Entry<'a> {
     pub data: &'a [u8],
 }
 
-/// Parse an octal field (NUL- or space-terminated, optional leading spaces).
-fn octal(field: &[u8]) -> Result<u64, TarError> {
-    let mut value: u64 = 0;
-    let mut digits = 0;
-    for &byte in field {
-        match byte {
-            b'0'..=b'7' => {
-                value = value
-                    .checked_mul(8)
-                    .and_then(|value| value.checked_add(u64::from(byte - b'0')))
-                    .ok_or(TarError::BadNumber)?;
-                digits += 1;
-            }
-            b' ' if digits == 0 => {}
-            0 | b' ' => break,
-            _ => return Err(TarError::BadNumber),
-        }
-    }
-    if digits == 0 {
-        return Err(TarError::BadNumber);
-    }
-    Ok(value)
+fn hex(field: &[u8]) -> Result<usize, CpioError> {
+    field.iter().try_fold(0usize, |value, &byte| {
+        let digit = (byte as char).to_digit(16).ok_or(CpioError::BadNumber)?;
+        Ok(value << 4 | digit as usize)
+    })
 }
 
-/// A NUL-terminated text field.
-fn text(field: &[u8]) -> Result<&str, TarError> {
-    let length = field
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(field.len());
-    core::str::from_utf8(&field[..length]).map_err(|_| TarError::BadPath)
-}
-
-/// Join ustar `prefix` and `name` and reduce to safe relative components.
-fn clean_path(prefix: &str, name: &str) -> Result<String, TarError> {
+/// Reduce a member name to safe relative components; `..` is rejected.
+fn clean_path(name: &str) -> Result<String, CpioError> {
     let mut path = String::new();
-    for component in prefix.split('/').chain(name.split('/')) {
+    for component in name.split('/') {
         match component {
             "" | "." => {}
-            ".." => return Err(TarError::BadPath),
+            ".." => return Err(CpioError::BadPath),
             component => {
                 if !path.is_empty() {
                     path.push('/');
@@ -89,62 +82,74 @@ fn clean_path(prefix: &str, name: &str) -> Result<String, TarError> {
     Ok(path)
 }
 
-/// Parse every entry. The archive ends at the first all-zero header.
-pub fn parse(archive: &[u8]) -> Result<Vec<Entry<'_>>, TarError> {
+/// `archive[start..start + length]`, or `Truncated`.
+fn slice(archive: &[u8], start: usize, length: usize) -> Result<&[u8], CpioError> {
+    start
+        .checked_add(length)
+        .and_then(|end| archive.get(start..end))
+        .ok_or(CpioError::Truncated)
+}
+
+/// Parse every entry of every concatenated archive, in order.
+pub fn parse(archive: &[u8]) -> Result<Vec<Entry<'_>>, CpioError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     loop {
-        let header = archive
-            .get(offset..offset + BLOCK)
-            .ok_or(TarError::Truncated)?;
-        if header.iter().all(|&byte| byte == 0) {
-            return Ok(entries);
+        let header = slice(archive, offset, HEADER_LEN)?;
+        if &header[..6] != MAGIC {
+            return Err(CpioError::BadMagic);
         }
-        if &header[257..263] != b"ustar\0" {
-            return Err(TarError::BadMagic);
+        let mut fields = [0usize; 13];
+        for (index, field) in fields.iter_mut().enumerate() {
+            *field = hex(&header[6 + index * 8..14 + index * 8])?;
         }
-        // The checksum covers the header with its own field read as spaces.
-        let stored = octal(&header[148..156])?;
-        let computed: u64 = header
-            .iter()
-            .enumerate()
-            .map(|(index, &byte)| {
-                if (148..156).contains(&index) {
-                    u64::from(b' ')
-                } else {
-                    u64::from(byte)
-                }
-            })
-            .sum();
-        if stored != computed {
-            return Err(TarError::BadChecksum);
-        }
-        let size = usize::try_from(octal(&header[124..136])?).map_err(|_| TarError::BadNumber)?;
-        let path = clean_path(text(&header[345..500])?, text(&header[0..100])?)?;
-        if path.is_empty() {
-            return Err(TarError::BadPath);
-        }
-        let kind = match header[156] {
-            b'0' | 0 => EntryKind::File,
-            b'5' => EntryKind::Directory,
-            other => return Err(TarError::UnsupportedType(other)),
+        let (mode, size, name_size) = (fields[1] as u32, fields[6], fields[11]);
+        // The name is NUL-terminated and padded so the data starts 4-aligned
+        // relative to the header.
+        let name = slice(archive, offset + HEADER_LEN, name_size)?;
+        let Some((&0, name)) = name.split_last() else {
+            return Err(CpioError::BadPath);
         };
-        let data_start = offset + BLOCK;
-        let data_end = data_start.checked_add(size).ok_or(TarError::Truncated)?;
-        let data = archive
-            .get(data_start..data_end)
-            .ok_or(TarError::Truncated)?;
-        if kind == EntryKind::Directory && size != 0 {
-            return Err(TarError::BadNumber);
+        if name.is_empty() || name.contains(&0) {
+            return Err(CpioError::BadPath);
         }
+        let name = core::str::from_utf8(name).map_err(|_| CpioError::BadPath)?;
+        let data_start = offset + (HEADER_LEN + name_size).next_multiple_of(4);
+        let padded_size = size
+            .checked_next_multiple_of(4)
+            .ok_or(CpioError::Truncated)?;
+        slice(archive, data_start, padded_size)?;
+        let data = &archive[data_start..data_start + size];
+        offset = data_start + padded_size;
+
+        if name == TRAILER {
+            // Zero padding may separate concatenated archives.
+            while archive.get(offset) == Some(&0) {
+                offset += 1;
+            }
+            if offset == archive.len() {
+                return Ok(entries);
+            }
+            continue;
+        }
+        let path = clean_path(name)?;
+        let kind = match mode & S_IFMT {
+            S_IFREG if !path.is_empty() => EntryKind::File,
+            S_IFREG => return Err(CpioError::BadPath),
+            S_IFDIR if size != 0 => return Err(CpioError::BadNumber),
+            // `.` (as written by `find . | cpio`) is the root itself.
+            S_IFDIR if path.is_empty() => continue,
+            S_IFDIR => EntryKind::Directory,
+            _ => return Err(CpioError::UnsupportedType(mode)),
+        };
         entries.push(Entry { path, kind, data });
-        offset = data_start + size.div_ceil(BLOCK) * BLOCK;
     }
 }
 
 /// Unpack `archive` below `root`, creating parent directories as needed.
-/// Returns `(files, bytes)` unpacked.
-pub fn unpack(root: &Arc<dyn Inode>, archive: &[u8]) -> Result<(usize, u64), TarError> {
+/// A file that already exists (from an earlier archive) is replaced; an
+/// existing directory is kept. Returns `(files, bytes)` unpacked.
+pub fn unpack(root: &Arc<dyn Inode>, archive: &[u8]) -> Result<(usize, u64), CpioError> {
     let entries = parse(archive)?;
     let (mut files, mut bytes) = (0, 0u64);
     for entry in &entries {
@@ -153,20 +158,29 @@ pub fn unpack(root: &Arc<dyn Inode>, archive: &[u8]) -> Result<(usize, u64), Tar
         while let Some(component) = components.next() {
             let last = components.peek().is_none();
             if last && entry.kind == EntryKind::File {
-                let file = directory
-                    .create(component, InodeKind::File)
-                    .map_err(TarError::Filesystem)?;
-                file.write_at(0, entry.data).map_err(TarError::Filesystem)?;
+                let file = match directory.lookup(component) {
+                    Ok(existing) if existing.kind() == InodeKind::File => {
+                        existing.truncate(0).map_err(CpioError::Filesystem)?;
+                        existing
+                    }
+                    Ok(_) => return Err(CpioError::Filesystem(Errno::EISDIR)),
+                    Err(Errno::ENOENT) => directory
+                        .create(component, InodeKind::File)
+                        .map_err(CpioError::Filesystem)?,
+                    Err(error) => return Err(CpioError::Filesystem(error)),
+                };
+                file.write_at(0, entry.data)
+                    .map_err(CpioError::Filesystem)?;
                 files += 1;
                 bytes += entry.data.len() as u64;
             } else {
                 directory = match directory.lookup(component) {
                     Ok(existing) if existing.kind() == InodeKind::Directory => existing,
-                    Ok(_) => return Err(TarError::Filesystem(Errno::ENOTDIR)),
+                    Ok(_) => return Err(CpioError::Filesystem(Errno::ENOTDIR)),
                     Err(Errno::ENOENT) => directory
                         .create(component, InodeKind::Directory)
-                        .map_err(TarError::Filesystem)?,
-                    Err(error) => return Err(TarError::Filesystem(error)),
+                        .map_err(CpioError::Filesystem)?,
+                    Err(error) => return Err(CpioError::Filesystem(error)),
                 };
             }
         }

@@ -60,6 +60,8 @@
                 feature_args=(--features "$features")
               fi
               cargo build --frozen --locked -p ${packageMetadata.name} --target ${target} "''${feature_args[@]}"
+              # The initramfs ships next to the kernel, not inside it.
+              cargo run --frozen --locked -p mkinitramfs -- build initramfs.toml -o initramfs.cpio
               runHook postBuild
             '';
 
@@ -73,11 +75,14 @@
                       target/${target}/debug/${packageMetadata.name} \
                       "$out/saeos.bin"
                     cp target/${target}/debug/${packageMetadata.name} "$out/saeos.elf"
+                    cp initramfs.cpio "$out/initramfs.cpio"
                   ''
                 else
                   ''
                     mkdir -p "$out/EFI/BOOT"
                     cp target/${target}/debug/${packageMetadata.name}.efi "$out/EFI/BOOT/BOOTX64.EFI"
+                    mkdir -p "$out/saeos"
+                    cp initramfs.cpio "$out/saeos/initramfs.cpio"
                   ''
               }
               runHook postInstall
@@ -90,9 +95,12 @@
         biosApp = pkgs.writeShellApplication {
           name = "saeos-bios";
           runtimeInputs = [ pkgs.qemu ];
+          # CMDLINE="loglevel=debug" nix run .#bios
           text = ''
             exec qemu-system-x86_64 \
               -kernel ${bios}/saeos.bin \
+              -initrd ${bios}/initramfs.cpio \
+              -append "''${CMDLINE:-}" \
               -serial stdio \
               -no-reboot \
                 "$@"
@@ -106,6 +114,10 @@
             esp_dir="$(mktemp -d -t saeos-uefi-esp.XXXXXX)"
             trap 'rm -rf "$esp_dir"' EXIT
             cp -R ${uefi}/. "$esp_dir/"
+            chmod -R u+w "$esp_dir"
+            if [ -n "''${CMDLINE:-}" ]; then
+              printf '%s\n' "$CMDLINE" > "$esp_dir/saeos/cmdline.txt"
+            fi
 
             exec qemu-system-x86_64 \
               -bios ${pkgs.OVMF.fd}/FV/OVMF.fd \

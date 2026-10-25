@@ -19,7 +19,19 @@ mkdir -p "$BOOT_DIR"
 cp "$EFI_BINARY" "$BOOT_DIR/BOOTX64.EFI"
 echo "==> Prepared $BOOT_DIR/BOOTX64.EFI"
 
-# 3. Locate OVMF firmware. Nix users can provide the store path explicitly.
+# 3. The kernel reads its initramfs and command line from the ESP:
+# INITRAMFS=target/initramfs.cpio CMDLINE="loglevel=debug".
+if [ -n "${INITRAMFS:-}" ] || [ -n "${CMDLINE:-}" ]; then
+    mkdir -p "$ESP_DIR/saeos"
+fi
+if [ -n "${INITRAMFS:-}" ]; then
+    cp "$INITRAMFS" "$ESP_DIR/saeos/initramfs.cpio"
+fi
+if [ -n "${CMDLINE:-}" ]; then
+    printf '%s\n' "$CMDLINE" > "$ESP_DIR/saeos/cmdline.txt"
+fi
+
+# 4. Locate OVMF firmware. Nix users can provide the store path explicitly.
 OVMF_PATH="${OVMF_PATH:-}"
 if [ -z "$OVMF_PATH" ]; then
     OVMF_PATH="/usr/share/edk2/x64/OVMF.4m.fd"
@@ -33,7 +45,7 @@ if [ ! -f "$OVMF_PATH" ]; then
     exit 1
 fi
 
-# 4. Launch QEMU
+# 5. Launch QEMU
 echo "==> Booting SaeOS in UEFI Mode with OVMF ($OVMF_PATH)..."
 exec qemu-system-x86_64 \
     -bios "$OVMF_PATH" \

@@ -1,0 +1,13 @@
+# What goes into the initramfs, built by `tools/mkinitramfs` (`make initramfs`).
+# Sources are relative to this file. Each entry may also be a build output.
+
+# Everything under initramfs/ appears at /.
+[[tree]]
+source = "initramfs"
+target = "/"
+
+# A single file, e.g. a future userspace init:
+# [[file]]
+# source = "target/userspace/init"
+# target = "/bin/init"
+# mode = 0o755

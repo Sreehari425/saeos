@@ -26,6 +26,7 @@ pub mod allocator_model;
 pub mod buddy;
 pub mod frame;
 pub mod heap;
+pub mod holds;
 pub mod kvm;
 pub mod layout;
 pub mod mapping_model;
@@ -47,6 +48,13 @@ pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) -> bool {
         );
         return false;
     }
+    // The bootloader put the initramfs in memory the map calls usable; keep
+    // it until fs::init has unpacked it.
+    let mut holds = INITRAMFS_HOLDS.lock();
+    for (slot, range) in holds.iter_mut().zip(&boot_info.initramfs) {
+        *slot = range.and_then(|range| frame::hold_range(range.start, range.end));
+    }
+    drop(holds);
     // UEFI reports the firmware stack we are running on as usable
     // boot-services memory; keep it until init_late runs on its own stack.
     if boot_info.boot_mode == crate::boot::boot_info::BootMode::Uefi {
@@ -60,6 +68,17 @@ pub fn init_boot_memory(boot_info: &crate::boot::BootInfo) -> bool {
     let heap_phys = heap_phys_start();
     frame::reserve_range(PhysAddr(heap_phys), PhysAddr(heap_phys + HEAP_SIZE as u64));
     true
+}
+
+static INITRAMFS_HOLDS: crate::sync::IrqSpinMutex<
+    [Option<holds::HoldId>; crate::boot::boot_info::MAX_INITRAMFS],
+> = crate::sync::IrqSpinMutex::new([None; crate::boot::boot_info::MAX_INITRAMFS]);
+
+/// Give the initramfs memory back to the allocator once it is unpacked.
+pub fn release_initramfs() {
+    for id in INITRAMFS_HOLDS.lock().iter_mut().filter_map(Option::take) {
+        frame::release_hold(id);
+    }
 }
 
 pub fn init_paging() {

@@ -16,10 +16,21 @@ KERNEL_BIN="$TEMP_DIR/saeos.bin"
 # 1. Convert 64-bit ELF container to Multiboot-compatible container for QEMU/GRUB
 objcopy -O elf32-i386 "$KERNEL_ELF" "$KERNEL_BIN"
 
-# 2. Launch QEMU with kernel and pass through any additional flags.
+# 2. The initramfs is a Multiboot module and the command line goes through
+# -append, as with GRUB: INITRAMFS=target/initramfs.cpio CMDLINE="loglevel=debug".
+BOOT_ARGS=()
+if [ -n "${INITRAMFS:-}" ]; then
+    BOOT_ARGS+=(-initrd "$INITRAMFS")
+fi
+if [ -n "${CMDLINE:-}" ]; then
+    BOOT_ARGS+=(-append "$CMDLINE")
+fi
+
+# 3. Launch QEMU with kernel and pass through any additional flags.
 # High-frame testing requires explicit QEMU memory, for example: cargo run -- -m 16G
 exec qemu-system-x86_64 \
     -kernel "$KERNEL_BIN" \
+    "${BOOT_ARGS[@]}" \
     -serial stdio \
     -no-reboot \
     "$@"

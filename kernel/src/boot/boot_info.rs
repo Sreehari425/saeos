@@ -125,6 +125,65 @@ impl PhysicalMemoryMap {
     }
 }
 
+/// A physical byte range, `start..end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Initramfs archives the bootloader loaded (Multiboot modules, or the file
+/// read from the ESP), unpacked in order.
+pub const MAX_INITRAMFS: usize = 4;
+
+/// Linux's `COMMAND_LINE_SIZE`; longer command lines are truncated.
+pub const COMMAND_LINE_SIZE: usize = 2048;
+
+/// The kernel command line, copied out of bootloader memory before that
+/// memory can be reused. Fixed-size so `BootInfo` stays `Copy`.
+#[derive(Clone, Copy)]
+pub struct Cmdline {
+    bytes: [u8; COMMAND_LINE_SIZE],
+    length: usize,
+}
+
+impl Cmdline {
+    pub const EMPTY: Self = Self {
+        bytes: [0; COMMAND_LINE_SIZE],
+        length: 0,
+    };
+
+    /// Copy `text` (stopping at a NUL, without surrounding whitespace),
+    /// truncated to the limit on a character boundary. Control characters
+    /// such as newlines become spaces.
+    pub fn new(text: &[u8]) -> Self {
+        let text = text.split(|&byte| byte == 0).next().unwrap_or(&[]);
+        let text = text.trim_ascii();
+        let text = &text[..text.len().min(COMMAND_LINE_SIZE)];
+        let valid = match core::str::from_utf8(text) {
+            Ok(text) => text.len(),
+            Err(error) => error.valid_up_to(),
+        };
+        let mut line = Self::EMPTY;
+        for (slot, &byte) in line.bytes.iter_mut().zip(&text[..valid]) {
+            *slot = if byte.is_ascii_control() { b' ' } else { byte };
+        }
+        line.length = valid;
+        line
+    }
+
+    pub fn as_str(&self) -> &str {
+        // `new` only stores a valid UTF-8 prefix.
+        core::str::from_utf8(&self.bytes[..self.length]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Debug for Cmdline {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), formatter)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootMode {
     Bios,
@@ -142,6 +201,8 @@ pub struct BootInfo {
     pub rsdp_addr: Option<u64>,
     pub memory_map_descriptor_count: usize,
     pub memory_map_discarded: usize,
+    pub initramfs: [Option<PhysicalRange>; MAX_INITRAMFS],
+    pub cmdline: Cmdline,
 }
 
 impl BootInfo {
@@ -158,6 +219,8 @@ impl BootInfo {
             rsdp_addr: None,
             memory_map_descriptor_count: 0,
             memory_map_discarded: 0,
+            initramfs: [None; MAX_INITRAMFS],
+            cmdline: Cmdline::EMPTY,
         }
     }
 

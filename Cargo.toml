@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "kernel",
+    "tools/mkinitramfs",
     "tools/mm-model",
     "tools/ratconf",
 ]

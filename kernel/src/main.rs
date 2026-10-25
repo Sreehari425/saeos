@@ -9,6 +9,7 @@ pub mod backtrace;
 pub mod boot;
 #[cfg(feature = "boot-test")]
 mod boot_test;
+pub mod cmdline;
 pub mod collections;
 pub mod drivers;
 pub mod fatal;
@@ -93,9 +94,24 @@ pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
     // before anything converts a static's address to a physical one.
     mm::layout::set_image_delta(KERNEL_OFFSET);
     let mut memory_map = boot::boot_info::PhysicalMemoryMap::empty();
+    let mut initramfs = [None; boot::boot_info::MAX_INITRAMFS];
+    let mut cmdline = boot::boot_info::Cmdline::EMPTY;
     if multiboot_info_addr != 0 {
         let mb_info = unsafe { &*(multiboot_info_addr as *const mm::MultibootInfo) };
         memory_map = mb_info.usable_memory_map();
+        // Copy everything out of bootloader memory now: it is ordinary RAM
+        // to the allocator once mm is up.
+        if let Some(line) = mb_info.cmdline_bytes() {
+            cmdline = boot::boot_info::Cmdline::new(strip_kernel_path(line));
+        }
+        for (slot, module) in initramfs.iter_mut().zip(mb_info.modules()) {
+            if module.mod_start < module.mod_end {
+                *slot = Some(boot::boot_info::PhysicalRange {
+                    start: u64::from(module.mod_start),
+                    end: u64::from(module.mod_end),
+                });
+            }
+        }
     }
 
     let (kernel_physical_start, kernel_physical_end) = kernel_physical_bounds();
@@ -111,9 +127,26 @@ pub extern "C" fn kernel_main_bios(multiboot_info_addr: usize) -> ! {
         rsdp_addr: acpi::find_rsdp_bios(),
         memory_map_descriptor_count: memory_map.count,
         memory_map_discarded: 0,
+        initramfs,
+        cmdline,
     };
 
     kernel_main(&boot_info);
+}
+
+/// Multiboot loaders (QEMU, GRUB) put the kernel's path before the
+/// parameters; drop a first word that looks like a path, not a parameter.
+fn strip_kernel_path(line: &[u8]) -> &[u8] {
+    let line = line.trim_ascii_start();
+    let word = line
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(line.len());
+    if line[..word].contains(&b'/') && !line[..word].contains(&b'=') {
+        line[word..].trim_ascii_start()
+    } else {
+        line
+    }
 }
 
 /// Unified kernel entrypoint shared by both BIOS and UEFI.
@@ -164,8 +197,10 @@ pub struct Handoff {
 pub fn kernel_main_high(handoff: Handoff) -> ! {
     let boot_info = &handoff.boot_info;
     let bios_acpi = handoff.bios_acpi;
+    // First, so loglevel= applies to the rest of bring-up.
+    cmdline::init(&boot_info.cmdline);
     mm::init_late(boot_info);
-    fs::init();
+    fs::init(boot_info);
 
     let acpi_topology = bios_acpi.or_else(|| match boot_info.rsdp_addr {
         Some(address) => match unsafe { acpi::parse_rsdp(address) } {

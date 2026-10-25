@@ -24,8 +24,10 @@ run inside QEMU. The current codebase includes:
 - A kernel heap (small-object classes plus a page-backed heap)
 - Guarded kernel stacks with stack-overflow detection
 - A preemptive kernel task scheduler (EEVDF)
-- A VFS with ramfs (`/`), devfs (`/dev`), per-process file descriptors, and
-  a tar initramfs built from `initramfs/`
+- A VFS with ramfs (`/`), devfs (`/dev`), procfs (`/proc`), and
+  per-process file descriptors
+- A cpio initramfs loaded by the bootloader, and a Linux-style kernel
+  command line (`/proc/cmdline`)
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
 - PIT, RTC, TSC, and local APIC timer support
@@ -136,20 +138,20 @@ make miri          # The same host tests under Miri (undefined-behaviour checks)
 make mm-stress     # Boot with MM self-tests and stress runs (also mm-stress-uefi)
 make mm-guard-test # Overflow a kernel stack on purpose and check it is reported
 make asm           # Emit BIOS and UEFI assembly
+make initramfs     # Build target/initramfs.cpio from initramfs.toml
 make clean         # Remove Cargo build artifacts
 ```
 
 The kernel is written in Rust and owns the platform, memory, and driver layers
 it runs on.
 
-## Filesystem
+## Initramfs and command line
 
-At boot the kernel mounts ramfs at `/`, unpacks the initramfs into it, and
-mounts devfs at `/dev`. Anything placed in the repository's `initramfs/`
-directory is packed into the kernel image at build time (a deterministic
-ustar archive written by `kernel/build.rs`). The kernel API in
-`kernel/src/fs` mirrors the Linux file system calls, errno values included;
-the shell's `ls`, `cat`, `stat`, `write`, `mkdir`, and `rm` use it.
+Files in `initramfs/` appear at `/` after boot. `initramfs.toml` lists what
+goes into the image, and `make initramfs` builds it. Pass kernel parameters
+with `CMDLINE`, for example `make run-debug CMDLINE="loglevel=debug"`; the
+kernel shows them in `/proc/cmdline`. See `kernel/src/fs/mod.rs` and
+`kernel/src/cmdline.rs` for the details.
 
 ## Debugging
 
@@ -183,6 +185,7 @@ kernel/src/mm/      Physical memory, paging, and heap code
 kernel/src/drivers/ Console and hardware drivers
 kernel/src/time/    Timer implementations
 tools/ratconf/      Configuration tool
+tools/mkinitramfs/  Initramfs (cpio) builder
 scripts/            QEMU runner scripts
 configs/            Example configuration files
 ```

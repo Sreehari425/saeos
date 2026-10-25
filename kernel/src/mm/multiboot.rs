@@ -26,7 +26,46 @@ pub struct MultibootMmapEntry {
     pub memory_type: u32,
 }
 
+/// One entry of the `mods_addr` array.
+#[repr(C)]
+pub struct MultibootModule {
+    pub mod_start: u32,
+    pub mod_end: u32,
+    pub string: u32,
+    pub reserved: u32,
+}
+
 impl MultibootInfo {
+    /// The bootloader's command line (flag bit 2), up to its NUL. Must be
+    /// called while low memory is still identity mapped.
+    pub fn cmdline_bytes(&self) -> Option<&'static [u8]> {
+        if self.flags & (1 << 2) == 0 || self.cmdline == 0 {
+            return None;
+        }
+        let start = self.cmdline as usize as *const u8;
+        let mut length = 0;
+        // Bounded so a missing terminator cannot run off into memory.
+        while length < crate::boot::boot_info::COMMAND_LINE_SIZE * 2
+            && unsafe { start.add(length).read() } != 0
+        {
+            length += 1;
+        }
+        Some(unsafe { core::slice::from_raw_parts(start, length) })
+    }
+
+    /// Loaded modules (flag bit 3) as physical `start..end`.
+    pub fn modules(&self) -> &'static [MultibootModule] {
+        if self.flags & (1 << 3) == 0 || self.mods_addr == 0 {
+            return &[];
+        }
+        unsafe {
+            core::slice::from_raw_parts(
+                self.mods_addr as usize as *const MultibootModule,
+                self.mods_count as usize,
+            )
+        }
+    }
+
     pub fn has_mem_info(&self) -> bool {
         (self.flags & (1 << 0)) != 0
     }
