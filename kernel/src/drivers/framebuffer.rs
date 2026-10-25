@@ -140,6 +140,16 @@ impl GopWriter {
 
         match byte {
             b'\n' => self.new_line(),
+            // Terminal control characters, as the TTY's echo uses them:
+            // backspace moves left without erasing (`\b \b` erases).
+            0x08 => self.cursor_col = self.cursor_col.saturating_sub(1),
+            b'\r' => self.cursor_col = 0,
+            b'\t' => {
+                let next = (self.cursor_col / 8 + 1) * 8;
+                while self.cursor_col < next.min(self.cols()) {
+                    self.write_byte(b' ');
+                }
+            }
             byte => {
                 if self.cursor_col >= self.cols() {
                     self.new_line();

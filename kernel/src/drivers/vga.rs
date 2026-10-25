@@ -103,6 +103,24 @@ impl Writer {
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
+            // Terminal control characters, as the TTY's echo uses them:
+            // backspace moves left without erasing (`\b \b` erases).
+            0x08 => {
+                if self.column_position > 0 {
+                    self.column_position -= 1;
+                    self.update_cursor();
+                }
+            }
+            b'\r' => {
+                self.column_position = 0;
+                self.update_cursor();
+            }
+            b'\t' => {
+                let next = (self.column_position / 8 + 1) * 8;
+                while self.column_position < next.min(BUFFER_WIDTH) {
+                    self.write_byte(b' ');
+                }
+            }
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -130,7 +148,7 @@ impl Writer {
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
             match byte {
-                0x20..=0x7e | b'\n' => self.write_byte(byte),
+                0x20..=0x7e | b'\n' | b'\r' | b'\t' | 0x08 => self.write_byte(byte),
                 _ => self.write_byte(0xfe),
             }
         }

@@ -67,6 +67,18 @@ fn editing_keys() {
     assert!(echo.windows(3).any(|window| window == b"^C\n"));
     // Other control characters are ignored; Tab is text.
     assert_eq!(run(b"a\x01\x02\tb\n", 64).0, [b"a\tb\n".to_vec()]);
+    // A Tab echoes as spaces to the next stop, and erasing it takes all of
+    // them back (the screen has no idea how wide a Tab was).
+    let (reads, echo) = run(b"abc\td\x08\x08x\n", 64);
+    assert_eq!(reads, [b"abcx\n".to_vec()]);
+    let erase = b"\x08 \x08";
+    let mut expected = b"abc     d".to_vec();
+    expected.extend_from_slice(erase);
+    for _ in 0..5 {
+        expected.extend_from_slice(erase);
+    }
+    expected.extend_from_slice(b"x\n");
+    assert_eq!(echo, expected);
     // Erasing a multi-byte character takes all of its bytes.
     assert_eq!(run("é!\x08\x08\n".as_bytes(), 64).0, [b"\n".to_vec()]);
 }

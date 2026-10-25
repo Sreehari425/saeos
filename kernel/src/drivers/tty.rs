@@ -11,7 +11,8 @@
 //!
 //! | input            | effect                                              |
 //! |------------------|-----------------------------------------------------|
-//! | printable, Tab   | added to the line and echoed                        |
+//! | printable        | added to the line and echoed                        |
+//! | Tab              | added to the line, echoed as spaces to the next tab stop |
 //! | Enter (CR or LF) | completes the line, with `\n`                       |
 //! | Backspace, DEL   | erases one character (`\b \b`)                      |
 //! | Ctrl-U           | erases the whole line                               |
@@ -48,6 +49,10 @@ enum Record {
 pub struct LineDiscipline {
     /// The line being edited.
     line: Vec<u8>,
+    /// How many columns each character of `line` was echoed as (a Tab is
+    /// echoed as spaces to the next tab stop), so erasing takes back
+    /// exactly what was drawn.
+    widths: Vec<u8>,
     ready: VecDeque<Record>,
 }
 
@@ -55,6 +60,7 @@ impl LineDiscipline {
     pub const fn new() -> Self {
         Self {
             line: Vec::new(),
+            widths: Vec::new(),
             ready: VecDeque::new(),
         }
     }
@@ -76,12 +82,21 @@ impl LineDiscipline {
                 None => break,
             }
         }
-        echo.extend_from_slice(ERASE_ECHO);
+        for _ in 0..self.widths.pop().unwrap_or(1) {
+            echo.extend_from_slice(ERASE_ECHO);
+        }
         true
+    }
+
+    /// The column the next character is echoed at, counted from the
+    /// start of the line.
+    fn column(&self) -> usize {
+        self.widths.iter().map(|&width| usize::from(width)).sum()
     }
 
     fn complete(&mut self) {
         let line = core::mem::take(&mut self.line);
+        self.widths.clear();
         self.ready.push_back(Record::Line(line, 0));
     }
 
@@ -109,12 +124,24 @@ impl LineDiscipline {
             CONTROL_D => self.complete(),
             CONTROL_C => {
                 self.line.clear();
+                self.widths.clear();
                 echo.extend_from_slice(b"^C\n");
             }
             // Text, keeping room for the newline that completes the line;
-            // past that, characters are dropped.
-            b'\t' | 0x20.. if self.line.len() < LINE_MAX - 1 => {
+            // past that, characters are dropped. A Tab is echoed as spaces
+            // to the next tab stop (every 8 columns from the line start).
+            b'\t' if self.line.len() < LINE_MAX - 1 => {
+                let width = 8 - self.column() % 8;
                 self.line.push(byte);
+                self.widths.push(width as u8);
+                echo.resize(echo.len() + width, b' ');
+            }
+            0x20.. if self.line.len() < LINE_MAX - 1 => {
+                self.line.push(byte);
+                // UTF-8 continuation bytes add no column.
+                if byte & 0xc0 != 0x80 {
+                    self.widths.push(1);
+                }
                 echo.push(byte);
             }
             // Other control characters are ignored.
