@@ -186,3 +186,23 @@ pub fn active() -> Option<AddressSpaceId> {
 pub fn activation_count() -> u64 {
     ACTIVATION_COUNT.load(Ordering::Acquire)
 }
+
+/// A write fault at `address` in the active address space: if it hit a
+/// copy-on-write page, give this process its own copy. Called from the
+/// page-fault handler (interrupts off), so it never waits for a lock: if
+/// the registry is busy the fault is treated as a real one.
+pub fn resolve_cow(address: u64) -> crate::mm::paging::CowResolution {
+    use crate::mm::paging::CowResolution;
+    let Some(id) = active() else {
+        return CowResolution::NotCow;
+    };
+    let Some(owned) = OWNED.try_lock() else {
+        return CowResolution::NotCow;
+    };
+    owned
+        .iter()
+        .find(|(owned_id, _)| *owned_id == id)
+        .map_or(CowResolution::NotCow, |(_, owned)| {
+            owned.space.resolve_cow(crate::mm::VirtAddr(address))
+        })
+}

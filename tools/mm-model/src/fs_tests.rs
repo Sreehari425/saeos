@@ -648,3 +648,66 @@ fn concurrent_writers_keep_their_own_data() {
         }
     });
 }
+
+#[test]
+fn dup_dup2_and_fork_share_open_files() {
+    let (vfs, files) = setup();
+    write_file(&vfs, &files, "/f", b"0123456789");
+    let fd = vfs.open(&files, "/f", OpenFlags::READ).unwrap();
+    let copy = files.dup(fd).unwrap();
+    assert_eq!(copy, fd + 1, "lowest free");
+    let mut buffer = [0u8; 3];
+    vfs.read(&files, fd, &mut buffer).unwrap();
+    vfs.read(&files, copy, &mut buffer).unwrap();
+    assert_eq!(&buffer, b"345", "dup shares the offset");
+    // dup2 onto a free high descriptor, onto an open one, onto itself.
+    assert_eq!(files.dup2(fd, 40), Ok(40));
+    vfs.read(&files, 40, &mut buffer).unwrap();
+    assert_eq!(&buffer, b"678");
+    let other = vfs.open(&files, "/dev/zero", OpenFlags::READ).unwrap();
+    assert_eq!(files.dup2(fd, other), Ok(other));
+    assert_eq!(
+        vfs.fstat(&files, other).unwrap().kind,
+        InodeKind::File,
+        "replaced"
+    );
+    assert_eq!(files.dup2(fd, fd), Ok(fd));
+    assert_eq!(files.dup2(99, 3), Err(Errno::EBADF));
+    assert_eq!(
+        files.dup2(fd, crate::fs::file::MAX_FDS as u32),
+        Err(Errno::EBADF)
+    );
+    assert_eq!(files.dup(99), Err(Errno::EBADF));
+    // fork: same descriptors, shared offsets, independent tables.
+    let child = files.fork();
+    assert_eq!(child.open_count(), files.open_count());
+    vfs.lseek(&files, fd, 0, Whence::Set).unwrap();
+    vfs.read(&child, fd, &mut buffer).unwrap();
+    assert_eq!(&buffer, b"012", "the child sees the parent's offset");
+    vfs.read(&files, fd, &mut buffer).unwrap();
+    assert_eq!(&buffer, b"345", "and moves it for both");
+    vfs.close(&child, fd).unwrap();
+    assert!(
+        vfs.read(&files, fd, &mut buffer).is_ok(),
+        "closing in the child leaves the parent's"
+    );
+}
+
+#[test]
+fn relative_paths_resolve_against_the_cwd() {
+    use crate::fs::path::resolve;
+    for (cwd, path, expected) in [
+        ("/", "etc/hello", "/etc/hello"),
+        ("/etc", "hello", "/etc/hello"),
+        ("/etc", "/bin/sh", "/bin/sh"),
+        ("/a/b", "../c", "/a/c"),
+        ("/a/b", "../../../..", "/"),
+        ("/", "..", "/"),
+        ("/a", ".", "/a"),
+        ("/a", "", "/a"),
+        ("/a/", "b//c/./", "/a/b/c"),
+        ("/a/b", "./../b/./c", "/a/b/c"),
+    ] {
+        assert_eq!(resolve(cwd, path), expected, "{cwd} + {path}");
+    }
+}

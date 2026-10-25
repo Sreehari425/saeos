@@ -9,8 +9,10 @@
 #![no_main]
 
 use saeos_rt::{
-    ARCH_GET_FS, ARCH_SET_FS, Args, MAP_FIXED, PROT_EXEC, PROT_READ, PROT_WRITE, arch_prctl, brk,
-    close, entry, exit, getpid, mmap_anonymous, mprotect, munmap, open, read, write,
+    ARCH_GET_FS, ARCH_SET_FS, Args, MAP_FIXED, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, PROT_EXEC,
+    PROT_READ, PROT_WRITE, WNOHANG, arch_prctl, brk, chdir, close, dup2, entry, execve, exit,
+    exited_with, fork, getcwd, getpid, getppid, killed_by, mmap_anonymous, mprotect, munmap, open,
+    read, wait4, write,
 };
 
 entry!(main);
@@ -86,6 +88,7 @@ fn main(args: Args) -> i32 {
     memory();
     thread_pointer();
     floating_point();
+    processes();
     say(b"usertest: PASS\n");
     0
 }
@@ -299,5 +302,204 @@ fn thread_pointer() {
         if fs_word(0) != block as u64 || fs_word(8) != 0x5ae0_7155 {
             fail(53, b"FS base lost across a context switch");
         }
+    }
+}
+
+/// Spin for about `cycles` TSC cycles (no sleep syscall yet).
+fn spin(cycles: u64) {
+    let start = rdtsc();
+    while rdtsc().wrapping_sub(start) < cycles {
+        core::hint::spin_loop();
+    }
+}
+
+/// wait4 for `pid`; the status word, or fail with `code`.
+fn wait_for(pid: i64, code: i32) -> i32 {
+    let mut status = 0;
+    if wait4(pid, &mut status, 0) != pid {
+        fail(code, b"wait4");
+    }
+    status
+}
+
+/// Fork, run `child` in the child (its return value is the exit code),
+/// and return the child's pid in the parent.
+fn spawn(child: impl FnOnce() -> i32) -> i64 {
+    match fork() {
+        0 => exit(child()),
+        pid if pid > 1 => pid,
+        _ => fail(60, b"fork"),
+    }
+}
+
+/// Written by both sides after fork: copy-on-write keeps them apart.
+static mut SHARED: [u64; 512] = [0xa; 512];
+/// Filled by a read() in the child: the kernel's copy_to_user must copy
+/// this page too rather than write into the parent's.
+static mut READ_BUFFER: [u8; 4096] = [0; 4096];
+
+fn free_memory_kb() -> u64 {
+    let fd = open(b"/proc/meminfo\0", O_RDONLY);
+    let mut text = [0u8; 128];
+    let count = read(fd as u32, &mut text).max(0) as usize;
+    close(fd as u32);
+    // "MemTotal: N kB\nMemFree:  N kB\n": the second number.
+    let mut numbers = text[..count]
+        .split(|byte| !byte.is_ascii_digit())
+        .filter(|digits| !digits.is_empty());
+    numbers.nth(1).map_or(0, |digits| {
+        digits
+            .iter()
+            .fold(0, |value, digit| value * 10 + u64::from(digit - b'0'))
+    })
+}
+
+/// Free memory once exited children's kernel stacks are reaped.
+fn settled_free_memory() -> u64 {
+    let mut previous = u64::MAX;
+    for _ in 0..200 {
+        let free = free_memory_kb();
+        if free == previous {
+            return free;
+        }
+        previous = free;
+        spin(20_000_000);
+    }
+    previous
+}
+
+fn processes() {
+    let shared = &raw mut SHARED;
+    // fork, getppid, and copy-on-write from both user code and the kernel.
+    let child = spawn(|| {
+        if getppid() != 1 || getpid() <= 1 {
+            return 1;
+        }
+        unsafe { (*shared)[7] = 0xb };
+        if unsafe { (*shared)[7] } != 0xb {
+            return 2;
+        }
+        let fd = open(b"/etc/hello\0", O_RDONLY);
+        let buffer =
+            unsafe { core::slice::from_raw_parts_mut((&raw mut READ_BUFFER).cast::<u8>(), 4096) };
+        if read(fd as u32, buffer) <= 0 || !buffer.starts_with(b"Hello") {
+            return 3;
+        }
+        0
+    });
+    let status = wait_for(child, 61);
+    if exited_with(status) != Some(0) {
+        fail(62, b"forked child failed its checks");
+    }
+    let read_buffer = (&raw const READ_BUFFER).cast::<u8>();
+    if unsafe { (*shared)[7] } != 0xa || unsafe { read_buffer.read_volatile() } != 0 {
+        fail(63, b"the child's writes reached the parent (copy-on-write)");
+    }
+    unsafe { (*shared)[7] = 0xc };
+    if unsafe { (*shared)[7] } != 0xc {
+        fail(64, b"parent cannot write after the child exited");
+    }
+
+    // fork + execve: the child becomes /bin/hello and exits 0.
+    let child = spawn(|| {
+        execve(b"/bin/hello\0", &[b"hello\0"], &[b"FROM=usertest\0"]);
+        70
+    });
+    if exited_with(wait_for(child, 65)) != Some(0) {
+        fail(66, b"exec of /bin/hello");
+    }
+    // A failed execve returns, leaving the caller as it was.
+    if execve(b"/no/such/program\0", &[], &[]) != -2 {
+        fail(67, b"execve of a missing file is not ENOENT");
+    }
+
+    // wait4(-1) gets whichever child exits first; WNOHANG does not block.
+    let slow = spawn(|| {
+        spin(300_000_000);
+        1
+    });
+    let mut status = 0;
+    if wait4(-1, &mut status, WNOHANG) != 0 {
+        fail(68, b"WNOHANG returned a running child");
+    }
+    let fast = spawn(|| 2);
+    if wait4(-1, &mut status, 0) != fast || exited_with(status) != Some(2) {
+        fail(69, b"wait4(-1) did not return the first child to exit");
+    }
+    if wait4(-1, &mut status, 0) != slow || exited_with(status) != Some(1) {
+        fail(70, b"wait4(-1) second child");
+    }
+    if wait4(-1, &mut status, 0) != -10 {
+        fail(71, b"wait4 without children is not ECHILD");
+    }
+
+    // A child that faults is killed; the parent sees the signal.
+    let crasher = spawn(|| unsafe { core::ptr::read_volatile(core::ptr::null::<i32>()) });
+    if killed_by(wait_for(crasher, 72)) != Some(11) {
+        fail(73, b"faulting child not killed by SIGSEGV");
+    }
+
+    // Orphans are reparented to init (this process) and collected here.
+    let parent = spawn(|| {
+        spawn(|| {
+            spin(100_000_000);
+            5
+        });
+        3
+    });
+    if exited_with(wait_for(parent, 74)) != Some(3) {
+        fail(75, b"orphan's parent");
+    }
+    let orphan = wait4(-1, &mut status, 0);
+    if orphan <= 1 || exited_with(status) != Some(5) {
+        fail(76, b"the orphan was not reparented to init");
+    }
+
+    // Current directory and relative paths.
+    let mut cwd = [0u8; 64];
+    if chdir(b"/etc\0") != 0 || getcwd(&mut cwd) != 5 || &cwd[..5] != b"/etc\0" {
+        fail(77, b"chdir /etc");
+    }
+    let fd = open(b"hello\0", O_RDONLY);
+    if fd < 0 || close(fd as u32) != 0 {
+        fail(78, b"relative open");
+    }
+    if chdir(b"..\0") != 0 || getcwd(&mut cwd) != 2 || &cwd[..2] != b"/\0" {
+        fail(79, b"chdir ..");
+    }
+
+    // dup2 redirects a child's stdout into a file.
+    let child = spawn(|| {
+        let fd = open(b"/redirect.txt\0", O_WRONLY | O_CREAT | O_TRUNC);
+        if fd < 0 || dup2(fd as u32, 1) != 1 {
+            return 1;
+        }
+        write(1, b"redirected\n");
+        0
+    });
+    if exited_with(wait_for(child, 80)) != Some(0) {
+        fail(81, b"dup2 child");
+    }
+    let fd = open(b"/redirect.txt\0", O_RDONLY);
+    let mut text = [0u8; 32];
+    if read(fd as u32, &mut text) != 11 || &text[..11] != b"redirected\n" {
+        fail(82, b"output was not redirected");
+    }
+    close(fd as u32);
+
+    // fork/exit loops (with copy-on-write copies) give every frame back.
+    let cycle = || {
+        let child = spawn(|| {
+            unsafe { (*shared)[100] = 1 };
+            0
+        });
+        wait_for(child, 83);
+    };
+    (0..5).for_each(|_| cycle());
+    let before = settled_free_memory();
+    (0..30).for_each(|_| cycle());
+    let after = settled_free_memory();
+    if before != after {
+        fail(84, b"fork/exit leaked memory");
     }
 }

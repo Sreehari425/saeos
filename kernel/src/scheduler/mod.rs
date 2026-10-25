@@ -26,8 +26,8 @@ use dispatch::{
 };
 pub use dispatch::{TimerDispatch, user_preemptions};
 pub use lifecycle::{
-    collect_child_status, exit_current, register_child_waiter, release_reaped_spaces,
-    spawn_in_new_process, spawn_kernel_task, wait_child,
+    WaitError, collect_child_status, exit_current, register_child_waiter, release_reaped_spaces,
+    spawn_forked, spawn_in_new_process, spawn_kernel_task, wait_child, wait_for_child,
 };
 #[cfg(feature = "scheduler-selftest")]
 pub use selftest::{selftest_passed, start_selftest};

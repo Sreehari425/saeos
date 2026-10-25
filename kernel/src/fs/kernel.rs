@@ -60,6 +60,7 @@ pub fn init(boot_info: &BootInfo) {
         "/proc",
         ProcFs::new(alloc::vec![
             ("cmdline", generator(proc_cmdline)),
+            ("meminfo", generator(proc_meminfo)),
             ("mounts", generator(proc_mounts)),
         ]),
     );
@@ -87,6 +88,17 @@ fn proc_cmdline() -> Vec<u8> {
     let mut contents = Vec::from(crate::cmdline::raw().as_bytes());
     contents.push(b'\n');
     contents
+}
+
+/// `/proc/meminfo`: physical memory, in Linux's format (kB).
+fn proc_meminfo() -> Vec<u8> {
+    let stats = crate::mm::frame::stats();
+    alloc::format!(
+        "MemTotal: {:>8} kB\nMemFree:  {:>8} kB\n",
+        stats.usable_frames * 4,
+        stats.free_frames * 4
+    )
+    .into_bytes()
 }
 
 /// `/proc/mounts`: `device mountpoint type options 0 0`, as Linux.

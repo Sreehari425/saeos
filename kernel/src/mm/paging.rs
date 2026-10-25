@@ -238,6 +238,21 @@ pub enum MappingOwnership {
     Owned,
 }
 
+/// Software PTE bit (ignored by the CPU): this read-only page is writable
+/// for its process, but its frame is shared after `fork`; the first write
+/// fault copies it.
+pub const COPY_ON_WRITE: u64 = 1 << 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CowResolution {
+    /// Not a COW page: the fault is a real one.
+    NotCow,
+    /// Copied or made writable; retry the access.
+    Resolved,
+    /// No frame for the copy.
+    OutOfMemory,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnmappedMapping {
     pub frame: PhysFrame,
@@ -449,12 +464,8 @@ impl AddressSpace {
         self.set_leaf_flags(virtual_address, PRESENT | NO_EXECUTE)
     }
 
-    fn set_leaf_flags(
-        &mut self,
-        virtual_address: VirtAddr,
-        flags: u64,
-    ) -> Result<(), AddressSpaceError> {
-        let _guard = self.state.lock();
+    /// The leaf PTE for a 4 KiB user page. The caller holds `self.state`.
+    fn leaf_slot(&self, virtual_address: VirtAddr) -> Result<*mut u64, AddressSpaceError> {
         unsafe {
             let pml4 = &mut *table_ptr(self.root);
             let pdpt_entry = pml4.0[((virtual_address.0 >> 39) & 0x1ff) as usize];
@@ -484,10 +495,116 @@ impl AddressSpace {
             if *slot & PRESENT == 0 {
                 return Err(AddressSpaceError::NotMapped);
             }
-            *slot = (*slot & ADDRESS_MASK) | flags;
-            self.flush_if_active(virtual_address);
-            Ok(())
+            Ok(slot as *mut u64)
         }
+    }
+
+    /// Set a page's permission bits, keeping its frame. A writable request
+    /// on a frame still shared after `fork` becomes read-only + COW, so the
+    /// first write copies it instead of writing into the other process's
+    /// memory; a read-only request drops COW so a write faults normally.
+    fn set_leaf_flags(
+        &mut self,
+        virtual_address: VirtAddr,
+        flags: u64,
+    ) -> Result<(), AddressSpaceError> {
+        let _guard = self.state.lock();
+        let slot = self.leaf_slot(virtual_address)?;
+        unsafe {
+            let frame = PhysFrame(*slot & ADDRESS_MASK);
+            let shared = frame::frame_refcount(frame).unwrap_or(1) > 1;
+            let flags = if flags & WRITABLE != 0 && shared {
+                (flags & !WRITABLE) | COPY_ON_WRITE
+            } else {
+                flags & !COPY_ON_WRITE
+            };
+            *slot = frame.0 | flags;
+        }
+        self.flush_if_active(virtual_address);
+        Ok(())
+    }
+
+    /// The child's address space for `fork`: every user page refers to the
+    /// same frame as here (one more reference each). Writable pages become
+    /// read-only + COW in both spaces, so whichever side writes first gets
+    /// its own copy (`resolve_cow`); read-only pages are simply shared.
+    pub fn fork_cow(&self) -> Result<AddressSpace, AddressSpaceError> {
+        let child = AddressSpace::new()?;
+        let state = self.state.lock();
+        let mut child_owned = Vec::new();
+        child_owned
+            .try_reserve(state.owned.len())
+            .map_err(|_| AddressSpaceError::OutOfFrames)?;
+        for mapping in &state.owned {
+            let slot = self.leaf_slot(mapping.virtual_address)?;
+            let entry = unsafe { *slot };
+            let mut flags = entry & !ADDRESS_MASK;
+            if flags & WRITABLE != 0 {
+                flags = (flags & !WRITABLE) | COPY_ON_WRITE;
+                unsafe { *slot = (entry & ADDRESS_MASK) | flags };
+            }
+            frame::frame_get(mapping.frame).map_err(|_| AddressSpaceError::OutOfFrames)?;
+            let mapped = unsafe {
+                map_page_in_root(child.root, mapping.virtual_address, mapping.frame, flags)
+            };
+            if let Err(error) = mapped {
+                frame::free_frame(mapping.frame);
+                // `child` drops with what it has so far, releasing them.
+                drop(state);
+                child.state.lock().owned = child_owned;
+                return Err(error);
+            }
+            child_owned.push(*mapping);
+        }
+        drop(state);
+        child.state.lock().owned = child_owned;
+        // Writable entries changed under live translations.
+        if current_root() == self.root {
+            flush_current();
+        }
+        Ok(child)
+    }
+
+    /// Handle a write fault on a COW page: copy it (or, if this space is
+    /// now its only user, just make it writable again).
+    pub fn resolve_cow(&self, virtual_address: VirtAddr) -> CowResolution {
+        let page = VirtAddr(virtual_address.0 & !(PAGE_SIZE - 1));
+        let mut state = self.state.lock();
+        let Ok(slot) = self.leaf_slot(page) else {
+            return CowResolution::NotCow;
+        };
+        let entry = unsafe { *slot };
+        if entry & COPY_ON_WRITE == 0 {
+            return CowResolution::NotCow;
+        }
+        let old = PhysFrame(entry & ADDRESS_MASK);
+        let flags = (entry & !ADDRESS_MASK & !COPY_ON_WRITE) | WRITABLE;
+        if frame::frame_refcount(old).unwrap_or(1) <= 1 {
+            unsafe { *slot = old.0 | flags };
+        } else {
+            let Some(copy) = frame::alloc_frame() else {
+                return CowResolution::OutOfMemory;
+            };
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    phys_to_virt(PhysAddr(old.0)).0 as *const u8,
+                    phys_to_virt(PhysAddr(copy.0)).0 as *mut u8,
+                    PAGE_SIZE as usize,
+                );
+                *slot = copy.0 | flags;
+            }
+            if let Some(mapping) = state
+                .owned
+                .iter_mut()
+                .find(|mapping| mapping.virtual_address == page)
+            {
+                mapping.frame = copy;
+            }
+            frame::free_frame(old);
+        }
+        drop(state);
+        self.flush_if_active(page);
+        CowResolution::Resolved
     }
 
     pub fn query(&self, virtual_address: VirtAddr) -> Result<u64, AddressSpaceError> {

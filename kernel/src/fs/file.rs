@@ -125,6 +125,43 @@ impl FileTable {
     pub fn open_count(&self) -> usize {
         self.slots.lock().iter().flatten().count()
     }
+
+    /// `dup`: another descriptor (the lowest free one) for the same open
+    /// file, sharing its offset.
+    pub fn dup(&self, fd: Fd) -> FsResult<Fd> {
+        let file = self.get(fd)?;
+        self.insert(file)
+    }
+
+    /// `dup2`: make `new` refer to the same open file as `old`, closing
+    /// whatever `new` referred to. `dup2(fd, fd)` only checks `fd`.
+    pub fn dup2(&self, old: Fd, new: Fd) -> FsResult<Fd> {
+        let file = self.get(old)?;
+        if old == new {
+            return Ok(new);
+        }
+        let index = new as usize;
+        if index >= MAX_FDS {
+            return Err(Errno::EBADF);
+        }
+        let mut slots = self.slots.lock();
+        if slots.len() <= index {
+            slots.resize(index + 1, None);
+        }
+        // The previous file (if any) is dropped after the lock is released.
+        let previous = slots[index].replace(file);
+        drop(slots);
+        drop(previous);
+        Ok(new)
+    }
+
+    /// The child's table after `fork`: the same open files at the same
+    /// descriptors, sharing offsets with the parent's (POSIX).
+    pub fn fork(&self) -> Self {
+        Self {
+            slots: Mutex::new(self.slots.lock().clone()),
+        }
+    }
 }
 
 impl core::fmt::Debug for FileTable {

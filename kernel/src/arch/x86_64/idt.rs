@@ -435,6 +435,27 @@ pub struct PageFaultFrame {
 #[unsafe(no_mangle)]
 extern "sysv64" fn saeos_page_fault_rust(frame: &mut PageFaultFrame) {
     let address = read_cr2();
+    // A write to a present page in the user half may be copy-on-write
+    // (after fork), from user code or from a kernel copy_to_user.
+    const PRESENT_AND_WRITE: u64 = 0b11;
+    if frame.error_code & PRESENT_AND_WRITE == PRESENT_AND_WRITE
+        && address < crate::mm::uaccess::USER_TOP
+    {
+        match crate::mm::address_space::resolve_cow(address) {
+            crate::mm::paging::CowResolution::Resolved => return,
+            crate::mm::paging::CowResolution::OutOfMemory
+                if crate::arch::x86_64::syscall::from_user(frame.code_segment) =>
+            {
+                kill_user(
+                    "OUT OF MEMORY (copy-on-write)",
+                    SIGBUS,
+                    frame.instruction_pointer,
+                    Some(address),
+                );
+            }
+            _ => {}
+        }
+    }
     if let Some(fixup) = crate::mm::uaccess::fixup_for(frame.instruction_pointer, address) {
         frame.instruction_pointer = fixup;
         return;

@@ -23,7 +23,15 @@ pub mod nr {
     pub const MPROTECT: u64 = 10;
     pub const MUNMAP: u64 = 11;
     pub const BRK: u64 = 12;
+    pub const DUP: u64 = 32;
+    pub const DUP2: u64 = 33;
     pub const GETPID: u64 = 39;
+    pub const FORK: u64 = 57;
+    pub const EXECVE: u64 = 59;
+    pub const WAIT4: u64 = 61;
+    pub const GETCWD: u64 = 79;
+    pub const CHDIR: u64 = 80;
+    pub const GETPPID: u64 = 110;
     pub const ARCH_PRCTL: u64 = 158;
     pub const EXIT: u64 = 60;
 }
@@ -139,6 +147,89 @@ pub const ARCH_GET_FS: u64 = 0x1003;
 
 pub fn arch_prctl(code: u64, address: u64) -> i64 {
     unsafe { syscall3(nr::ARCH_PRCTL, code, address, 0) }
+}
+
+pub const O_RDONLY: u64 = 0;
+pub const O_WRONLY: u64 = 1;
+pub const O_RDWR: u64 = 2;
+pub const O_CREAT: u64 = 0o100;
+pub const O_TRUNC: u64 = 0o1000;
+
+/// The child's pid in the parent, 0 in the child, or a negative errno.
+pub fn fork() -> i64 {
+    unsafe { syscall3(nr::FORK, 0, 0, 0) }
+}
+
+/// `path`, `argv` and `envp` entries must end with a NUL byte. Only
+/// returns on failure (a negative errno).
+pub fn execve(path: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> i64 {
+    const MAX: usize = 32;
+    if argv.len() >= MAX || envp.len() >= MAX {
+        return -7; // E2BIG
+    }
+    let mut argv_pointers = [0u64; MAX];
+    let mut envp_pointers = [0u64; MAX];
+    for (slot, argument) in argv_pointers.iter_mut().zip(argv) {
+        *slot = argument.as_ptr() as u64;
+    }
+    for (slot, variable) in envp_pointers.iter_mut().zip(envp) {
+        *slot = variable.as_ptr() as u64;
+    }
+    unsafe {
+        syscall3(
+            nr::EXECVE,
+            path.as_ptr() as u64,
+            argv_pointers.as_ptr() as u64,
+            envp_pointers.as_ptr() as u64,
+        )
+    }
+}
+
+pub const WNOHANG: u64 = 1;
+
+/// `wait4(pid, &status, options, NULL)`: the collected child's pid (0 with
+/// `WNOHANG` if none has exited), or a negative errno.
+pub fn wait4(pid: i64, status: &mut i32, options: u64) -> i64 {
+    unsafe {
+        syscall6(
+            nr::WAIT4,
+            [pid as u64, status as *mut i32 as u64, options, 0, 0, 0],
+        )
+    }
+}
+
+/// Decoded `wait` status.
+pub fn exited_with(status: i32) -> Option<i32> {
+    (status & 0x7f == 0).then_some((status >> 8) & 0xff)
+}
+
+pub fn killed_by(status: i32) -> Option<i32> {
+    (status & 0x7f != 0).then_some(status & 0x7f)
+}
+
+pub fn getppid() -> i64 {
+    unsafe { syscall3(nr::GETPPID, 0, 0, 0) }
+}
+
+pub fn dup2(old: u32, new: u32) -> i64 {
+    unsafe { syscall3(nr::DUP2, u64::from(old), u64::from(new), 0) }
+}
+
+/// `path` must end with a NUL byte.
+pub fn chdir(path: &[u8]) -> i64 {
+    unsafe { syscall3(nr::CHDIR, path.as_ptr() as u64, 0, 0) }
+}
+
+/// The length written (with the NUL), or a negative errno.
+pub fn getcwd(buffer: &mut [u8]) -> i64 {
+    unsafe {
+        syscall3(
+            nr::GETCWD,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+        )
+    }
 }
 
 pub fn exit(code: i32) -> ! {

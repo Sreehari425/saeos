@@ -22,6 +22,11 @@ struct FakeProcess {
     waited: RefCell<Vec<Option<u64>>>,
     map: RefCell<MemoryMap>,
     fs_base: Cell<u64>,
+    cwd: RefCell<String>,
+    /// Whether child 9 has exited yet (for WNOHANG).
+    child_exited: Cell<bool>,
+    /// What execve was asked to run.
+    exec: RefCell<Option<(String, Vec<String>, Vec<String>)>>,
 }
 
 impl ProcessOps for FakeProcess {
@@ -29,12 +34,38 @@ impl ProcessOps for FakeProcess {
         5
     }
 
-    fn wait(&self, pid: Option<u64>) -> Result<(u64, i32), Errno> {
+    fn getppid(&self) -> u64 {
+        1
+    }
+
+    fn wait(&self, pid: Option<u64>, no_hang: bool) -> Result<Option<(u64, i32)>, Errno> {
         self.waited.borrow_mut().push(pid);
         match pid {
-            None | Some(9) => Ok((9, 3)),
+            None | Some(9) if no_hang && !self.child_exited.get() => Ok(None),
+            None | Some(9) => Ok(Some((9, 3))),
             Some(_) => Err(Errno::ECHILD),
         }
+    }
+
+    fn fork(&self) -> Result<u64, Errno> {
+        Ok(9)
+    }
+
+    fn execve(&self, path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Errno> {
+        if path == "/missing" {
+            return Err(Errno::ENOENT);
+        }
+        let owned = |strings: &[&str]| strings.iter().map(|string| string.to_string()).collect();
+        *self.exec.borrow_mut() = Some((path.to_string(), owned(argv), owned(envp)));
+        Ok(())
+    }
+
+    fn cwd(&self) -> String {
+        self.cwd.borrow().clone()
+    }
+
+    fn set_cwd(&self, path: String) {
+        *self.cwd.borrow_mut() = path;
     }
 
     fn brk(&self, address: u64) -> u64 {
@@ -99,6 +130,9 @@ impl World {
                 waited: RefCell::new(Vec::new()),
                 map: RefCell::new(MemoryMap::new(&[], 0x50_0000, 0x7000_0000).unwrap()),
                 fs_base: Cell::new(0),
+                cwd: RefCell::new("/".to_string()),
+                child_exited: Cell::new(true),
+                exec: RefCell::new(None),
             },
         }
     }
@@ -389,9 +423,9 @@ fn exit_and_wait4() {
     );
     assert_eq!(world.call(WAIT4, &[4, 0, 0, 0]), errno(Errno::ECHILD));
     assert_eq!(
-        world.call(WAIT4, &[9, 0, 1, 0]),
+        world.call(WAIT4, &[9, 0, 2, 0]),
         errno(Errno::EINVAL),
-        "WNOHANG"
+        "WUNTRACED"
     );
     assert_eq!(
         world.call(WAIT4, &[0, 0, 0, 0]),
@@ -506,4 +540,142 @@ fn arch_prctl_sets_and_reads_the_fs_base() {
         errno(Errno::EINVAL),
         "ARCH_SET_GS unsupported"
     );
+}
+
+/// Lay out a NULL-terminated pointer array of strings in user memory.
+fn string_array(world: &World, at: u64, strings: &[&str]) -> u64 {
+    let mut cursor = at + 8 * (strings.len() as u64 + 1);
+    let mut pointers = Vec::new();
+    for string in strings {
+        pointers.push(world.string(cursor, string));
+        cursor += string.len() as u64 + 1;
+    }
+    pointers.push(0);
+    let bytes: Vec<u8> = pointers
+        .iter()
+        .flat_map(|pointer| pointer.to_le_bytes())
+        .collect();
+    world.put(at, &bytes)
+}
+
+#[test]
+fn execve_reads_argv_and_envp_from_user_memory() {
+    let world = World::new();
+    let path = world.string(0, "/bin/hello");
+    let argv = string_array(&world, 1000, &["hello", "-x", ""]);
+    let envp = string_array(&world, 3000, &["A=B", "PATH=/bin"]);
+    assert_eq!(world.call(EXECVE, &[path, argv, envp]), 0);
+    assert_eq!(
+        *world.process.exec.borrow(),
+        Some((
+            "/bin/hello".to_string(),
+            vec!["hello".to_string(), "-x".to_string(), String::new()],
+            vec!["A=B".to_string(), "PATH=/bin".to_string()]
+        ))
+    );
+    // NULL arrays are empty; a relative path uses the cwd.
+    world.call(CHDIR, &[world.string(0, "/dev")]);
+    assert_eq!(world.call(EXECVE, &[world.string(0, "null"), 0, 0]), 0);
+    assert_eq!(world.process.exec.borrow().as_ref().unwrap().0, "/dev/null");
+    // Errors: missing file, bad pointers in the array, too many arguments.
+    assert_eq!(
+        world.call(EXECVE, &[world.string(0, "/missing"), 0, 0]),
+        errno(Errno::ENOENT)
+    );
+    let bad = world.put(5000, &[0xff; 8]);
+    world.put(5008, &[0; 8]);
+    assert_eq!(world.call(EXECVE, &[path, bad, 0]), errno(Errno::EFAULT));
+    assert_eq!(
+        world.call(EXECVE, &[path, BASE + 64 * 1024 - 4, 0]),
+        errno(Errno::EFAULT)
+    );
+    // 1024 copies of one pointer: too many entries.
+    let one = world.string(6000, "a");
+    let many: Vec<u8> = std::iter::repeat_n(one.to_le_bytes(), 1100)
+        .flatten()
+        .collect();
+    let array = world.put(8000, &many);
+    assert_eq!(world.call(EXECVE, &[path, array, 0]), errno(Errno::E2BIG));
+}
+
+#[test]
+fn cwd_chdir_and_relative_paths() {
+    let world = World::new();
+    let mut buffer_size = 64;
+    assert_eq!(
+        world.call(GETCWD, &[BASE, buffer_size]),
+        2,
+        "\"/\" and its NUL"
+    );
+    assert_eq!(world.user(0, 2), b"/\0");
+    world.vfs.mkdir("/etc").unwrap();
+    write_file_raw(&world, "/etc/hello", b"hi");
+    assert_eq!(world.call(CHDIR, &[world.string(100, "etc")]), 0);
+    assert_eq!(world.call(GETCWD, &[BASE, buffer_size]), 5);
+    assert_eq!(world.user(0, 5), b"/etc\0");
+    // Relative open, stat, mkdir, and ..
+    let fd = world.call(OPEN, &[world.string(100, "hello"), O_RDONLY]);
+    assert!(fd >= 0);
+    assert_eq!(world.call(MKDIR, &[world.string(100, "sub"), 0o755]), 0);
+    assert!(world.vfs.stat("/etc/sub").is_ok());
+    assert_eq!(world.call(CHDIR, &[world.string(100, "sub/../..")]), 0);
+    assert_eq!(world.process.cwd(), "/");
+    // Errors.
+    assert_eq!(
+        world.call(CHDIR, &[world.string(100, "/etc/hello")]),
+        errno(Errno::ENOTDIR)
+    );
+    assert_eq!(
+        world.call(CHDIR, &[world.string(100, "/nope")]),
+        errno(Errno::ENOENT)
+    );
+    buffer_size = 1;
+    assert_eq!(
+        world.call(GETCWD, &[BASE, buffer_size]),
+        errno(Errno::ERANGE)
+    );
+}
+
+fn write_file_raw(world: &World, path: &str, data: &[u8]) {
+    let fd = world
+        .vfs
+        .open(
+            &world.files,
+            path,
+            crate::fs::OpenFlags::WRITE | crate::fs::OpenFlags::CREATE,
+        )
+        .unwrap();
+    world.vfs.write(&world.files, fd, data).unwrap();
+    world.vfs.close(&world.files, fd).unwrap();
+}
+
+#[test]
+fn dup2_redirects_and_wait_nohang() {
+    let world = World::new();
+    let path = world.string(0, "/out");
+    let file = world.call(OPEN, &[path, O_RDWR_CREAT]) as u64;
+    // dup2(file, 5): writes to 5 land in the file.
+    assert_eq!(world.call(DUP2, &[file, 5]), 5);
+    let data = world.put(100, b"redirected");
+    assert_eq!(world.call(WRITE, &[5, data, 10]), 10);
+    assert_eq!(world.call(DUP, &[5]), (file + 1) as i64, "lowest free");
+    assert_eq!(world.call(DUP2, &[77, 5]), errno(Errno::EBADF));
+    assert_eq!(world.call(DUP2, &[file, u64::MAX]), errno(Errno::EBADF));
+    let contents = {
+        let fd = world
+            .vfs
+            .open(&world.files, "/out", crate::fs::OpenFlags::READ)
+            .unwrap();
+        let mut buffer = [0u8; 32];
+        let count = world.vfs.read(&world.files, fd, &mut buffer).unwrap();
+        buffer[..count].to_vec()
+    };
+    assert_eq!(contents, b"redirected");
+    // WNOHANG: 0 while the child runs, then its pid.
+    world.process.child_exited.set(false);
+    assert_eq!(world.call(WAIT4, &[u64::MAX, 0, 1, 0]), 0);
+    world.process.child_exited.set(true);
+    assert_eq!(world.call(WAIT4, &[u64::MAX, 0, 1, 0]), 9);
+    assert_eq!(world.call(FORK, &[]), 9);
+    assert_eq!(world.call(GETPPID, &[]), 1);
 }

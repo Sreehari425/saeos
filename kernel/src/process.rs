@@ -5,6 +5,7 @@
 //! of threads belonging to a process. User-mode creation is intentionally not
 //! part of this layer yet.
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -37,6 +38,8 @@ pub struct ProcessControlBlock {
     /// Open files. Shared through `Arc` so file I/O happens outside the
     /// (interrupt-disabling) process-table lock.
     pub files: Arc<FileTable>,
+    /// Current directory, an absolute normalised path (`fs::path::resolve`).
+    pub cwd: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +70,7 @@ impl ProcessControlBlock {
             child_waiters: Vec::new(),
             references: 0,
             files: Arc::new(FileTable::new()),
+            cwd: String::from("/"),
         }
     }
 }
@@ -161,6 +165,60 @@ mod tests {
         assert_eq!(init, INIT_PID);
         assert!(idle.0 > 1 && other.0 > 1 && idle != other);
         assert!(table.create_init(TaskId(4)).is_err(), "only one init");
+    }
+
+    #[test]
+    fn exited_children_are_found_oldest_first() {
+        let mut table = ProcessTable::new();
+        let parent = table.create(None, TaskId(1));
+        let first = table.create_child(parent, None, TaskId(2)).unwrap();
+        let second = table.create_child(parent, None, TaskId(3)).unwrap();
+        assert!(table.has_children(parent));
+        assert_eq!(table.exited_child(parent), None);
+        // The second exits first: it is the one wait4(-1) gets.
+        table.exit(second, ExitStatus(2)).unwrap();
+        assert_eq!(
+            table.exited_child(parent),
+            None,
+            "its thread is not retired yet"
+        );
+        table.remove_thread(second, TaskId(3)).unwrap();
+        assert_eq!(table.exited_child(parent), Some(second));
+        table.exit(first, ExitStatus(1)).unwrap();
+        table.remove_thread(first, TaskId(2)).unwrap();
+        assert_eq!(
+            table.exited_child(parent),
+            Some(first),
+            "creation order among exited"
+        );
+        assert_eq!(table.wait_child(parent, first), Ok(ExitStatus(1)));
+        assert_eq!(table.exited_child(parent), Some(second));
+        assert_eq!(table.wait_child(parent, second), Ok(ExitStatus(2)));
+        assert!(!table.has_children(parent));
+        assert_eq!(table.exited_child(parent), None);
+    }
+
+    #[test]
+    fn orphans_go_to_init_and_can_be_collected_there() {
+        let mut table = ProcessTable::new();
+        let init = table.create_init(TaskId(1)).unwrap();
+        let parent = table.create_child(init, None, TaskId(2)).unwrap();
+        let running = table.create_child(parent, None, TaskId(3)).unwrap();
+        let zombie = table.create_child(parent, None, TaskId(4)).unwrap();
+        table.exit(zombie, ExitStatus(9)).unwrap();
+        table.remove_thread(zombie, TaskId(4)).unwrap();
+        table.reparent_children(parent, init);
+        assert!(!table.has_children(parent));
+        assert_eq!(table.process(running).unwrap().parent, Some(init));
+        assert_eq!(table.exited_child(init), Some(zombie));
+        assert_eq!(table.wait_child(init, zombie), Ok(ExitStatus(9)));
+        assert_eq!(table.process(init).unwrap().children, [parent, running]);
+        table.reparent_children(init, init);
+        assert_eq!(
+            table.process(init).unwrap().children.len(),
+            2,
+            "init keeps its own"
+        );
     }
 
     #[test]
@@ -350,6 +408,41 @@ impl ProcessTable {
         // continue to keep the record alive.
         self.reap_if_empty(child);
         Ok(status)
+    }
+
+    /// A child of `parent` that has exited and whose last thread is gone
+    /// (ready for `wait4`), the oldest first.
+    pub fn exited_child(&self, parent: ProcessId) -> Option<ProcessId> {
+        let record = self.process(parent)?;
+        record.children.iter().copied().find(|&child| {
+            self.process(child)
+                .is_some_and(|child| child.exit_status.is_some() && child.threads.is_empty())
+        })
+    }
+
+    pub fn has_children(&self, parent: ProcessId) -> bool {
+        self.process(parent)
+            .is_some_and(|record| !record.children.is_empty())
+    }
+
+    /// Hand `process`'s children to `new_parent` (init), as Linux does when
+    /// a parent exits, so someone is left to collect them.
+    pub fn reparent_children(&mut self, process: ProcessId, new_parent: ProcessId) {
+        if process == new_parent {
+            return;
+        }
+        let children = match self.process_mut(process) {
+            Some(record) => core::mem::take(&mut record.children),
+            None => return,
+        };
+        for &child in &children {
+            if let Some(record) = self.process_mut(child) {
+                record.parent = Some(new_parent);
+            }
+        }
+        if let Some(parent) = self.process_mut(new_parent) {
+            parent.children.extend(children);
+        }
     }
 
     /// Address spaces whose processes were reaped since the last call. Each

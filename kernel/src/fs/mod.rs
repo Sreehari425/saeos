@@ -37,6 +37,7 @@ pub mod file;
 pub mod initramfs;
 pub mod inode;
 pub mod lock;
+pub mod path;
 pub mod procfs;
 pub mod ramfs;
 pub mod vfs;
