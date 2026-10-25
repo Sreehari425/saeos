@@ -116,7 +116,7 @@ check: olddefconfig check-std-lock
 	cargo check -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
 	cargo check -p ratconf
 	cargo check -p mkinitramfs
-	cargo check -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS))
+	cargo check -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p libsaeos $(addprefix -p ,$(USER_PROGRAMS))
 
 # The Nix build vendors the standard library's dependencies from this copy;
 # refresh it with the toolchain: cp "$$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.lock" userspace/std-library.Cargo.lock
@@ -217,7 +217,7 @@ clippy: olddefconfig
 	cargo clippy -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test -- -D warnings
 	cargo clippy -p ratconf -- -D warnings
 	cargo clippy -p mkinitramfs --all-targets -- -D warnings
-	cargo clippy -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS)) -- -D warnings
+	cargo clippy -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p libsaeos $(addprefix -p ,$(USER_PROGRAMS)) -- -D warnings
 
 menuconfig:
 	$(RATCONF) menuconfig

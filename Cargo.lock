@@ -163,7 +163,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "hello"
 version = "0.1.0"
 dependencies = [
- "saeos-rt",
+ "libsaeos",
 ]
 
 [[package]]
@@ -224,6 +224,10 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libsaeos"
+version = "0.1.0"
 
 [[package]]
 name = "linux-raw-sys"
@@ -400,10 +404,6 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "saeos"
-version = "0.1.0"
-
-[[package]]
-name = "saeos-rt"
 version = "0.1.0"
 
 [[package]]
@@ -623,7 +623,7 @@ checksum = "1fc81956842c57dac11422a97c3b8195a1ff727f06e85c84ed2e8aa277c9a0fd"
 name = "usertest"
 version = "0.1.0"
 dependencies = [
- "saeos-rt",
+ "libsaeos",
 ]
 
 [[package]]

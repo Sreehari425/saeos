@@ -42,6 +42,8 @@ pub mod holds;
 mod holds_tests;
 #[path = "../../../kernel/src/klog_ring.rs"]
 pub mod klog_ring;
+#[cfg(test)]
+mod libsaeos_tests;
 #[path = "../../../kernel/src/syscall/mod.rs"]
 pub mod syscall;
 #[cfg(test)]
@@ -54,6 +56,12 @@ mod tty_tests;
 pub mod uaccess;
 #[cfg(test)]
 mod uaccess_tests;
+#[path = "../../../userspace/libsaeos/src/heap.rs"]
+pub mod user_heap;
+#[path = "../../../userspace/libsaeos/src/lines.rs"]
+pub mod user_lines;
+#[path = "../../../userspace/libsaeos/src/startinfo.rs"]
+pub mod user_startinfo;
 #[path = "../../../kernel/src/mm/vma.rs"]
 pub mod vma;
 #[cfg(test)]

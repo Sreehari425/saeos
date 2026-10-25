@@ -11,4 +11,4 @@ test = false
 bench = false
 
 [dependencies]
-saeos-rt = { path = "../rt" }
+libsaeos = { path = "../libsaeos" }

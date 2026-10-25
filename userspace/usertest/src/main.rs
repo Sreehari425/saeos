@@ -8,7 +8,9 @@
 #![no_std]
 #![no_main]
 
-use saeos_rt::{
+extern crate alloc;
+
+use libsaeos::{
     ARCH_GET_FS, ARCH_SET_FS, Args, MAP_FIXED, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, PROT_EXEC,
     PROT_READ, PROT_WRITE, TIOCGWINSZ, WNOHANG, arch_prctl, brk, chdir, close, dup2, entry, execve,
     exit, exited_with, fork, getcwd, getpid, getppid, ioctl, killed_by, mmap_anonymous, mprotect,
@@ -90,6 +92,7 @@ fn main(args: Args) -> i32 {
     thread_pointer();
     floating_point();
     processes();
+    library();
     say(b"usertest: PASS\n");
     0
 }
@@ -286,6 +289,9 @@ fn fs_word(offset: u64) -> u64 {
 /// TLS setup does, then check `%fs`-relative loads stay right while the
 /// kernel switches to tasks with a different (zero) FS base and back.
 fn thread_pointer() {
+    // libsaeos's own TLS (errno) is put back at the end.
+    let mut runtime_tls = 0u64;
+    arch_prctl(ARCH_GET_FS, &raw mut runtime_tls as u64);
     let block = &raw mut THREAD;
     unsafe { (*block).this = block as u64 };
     if arch_prctl(ARCH_SET_FS, block as u64) != 0 {
@@ -303,6 +309,10 @@ fn thread_pointer() {
         if fs_word(0) != block as u64 || fs_word(8) != 0x5ae0_7155 {
             fail(53, b"FS base lost across a context switch");
         }
+    }
+    arch_prctl(ARCH_SET_FS, runtime_tls);
+    if runtime_tls == 0 || fs_word(0) != runtime_tls {
+        fail(54, b"libsaeos set no thread pointer (TLS)");
     }
 }
 
@@ -534,4 +544,148 @@ fn tty() -> ! {
     }
     say(b"usertest: tty PASS\n");
     exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// libsaeos: the Rust-facing library and its C interface.
+
+use libsaeos::prelude::*;
+use libsaeos::{env, fs, process};
+
+unsafe extern "C" {
+    fn malloc(size: usize) -> *mut u8;
+    fn calloc(count: usize, size: usize) -> *mut u8;
+    fn realloc(block: *mut u8, size: usize) -> *mut u8;
+    fn free(block: *mut u8);
+    fn strlen(text: *const core::ffi::c_char) -> usize;
+    fn strcmp(left: *const core::ffi::c_char, right: *const core::ffi::c_char) -> i32;
+    fn getenv(name: *const core::ffi::c_char) -> *const core::ffi::c_char;
+    fn memcmp(
+        left: *const core::ffi::c_void,
+        right: *const core::ffi::c_void,
+        length: usize,
+    ) -> i32;
+    #[link_name = "open"]
+    fn c_open(path: *const core::ffi::c_char, flags: i32, mode: u32) -> i32;
+    fn __errno_location() -> *mut i32;
+}
+
+fn library() {
+    // The allocator: many small blocks, growth, a large (mmap'd) block.
+    let mut numbers: Vec<u64> = Vec::new();
+    for value in 0..100_000u64 {
+        numbers.push(value * 3);
+    }
+    if numbers.iter().sum::<u64>() != 3 * (99_999 * 100_000 / 2) {
+        fail(100, b"Vec contents");
+    }
+    let words: Vec<String> = (0..2000).map(|index| format!("word-{index}")).collect();
+    if words[1234] != "word-1234" || words.concat().len() < 2000 * 6 {
+        fail(101, b"String formatting");
+    }
+    drop(words);
+    let large = vec![0xa5u8; 1 << 20];
+    if large.iter().any(|&byte| byte != 0xa5) {
+        fail(102, b"large allocation");
+    }
+    drop(large);
+    let boxed = Box::new([7u64; 512]);
+    if boxed.iter().sum::<u64>() != 7 * 512 {
+        fail(103, b"Box");
+    }
+
+    // Files and directories.
+    if fs::write("/libsaeos.txt", b"line one\nline two\n").is_err() {
+        fail(104, b"fs::write");
+    }
+    if fs::read_to_string("/libsaeos.txt").as_deref() != Ok("line one\nline two\n") {
+        fail(105, b"fs::read_to_string");
+    }
+    let entries = fs::read_dir("/etc").unwrap_or_default();
+    if !entries
+        .iter()
+        .any(|entry| entry.name == "hello" && entry.file_type == fs::FileType::File)
+    {
+        fail(106, b"read_dir /etc");
+    }
+    if fs::metadata("/libsaeos.txt").map(|metadata| metadata.size) != Ok(18)
+        || fs::metadata("/etc").map(|metadata| metadata.file_type) != Ok(fs::FileType::Directory)
+    {
+        fail(107, b"metadata");
+    }
+    if fs::read_to_string("/no/such/file") != Err(Errno::ENOENT) {
+        fail(108, b"missing file is not ENOENT");
+    }
+    if fs::remove_file("/libsaeos.txt").is_err() || fs::metadata("/libsaeos.txt").is_ok() {
+        fail(109, b"remove_file");
+    }
+
+    // Arguments and environment (init gets HOME, PATH, TERM).
+    if env::args().next().is_none()
+        || env::var("PATH") != Some("/bin:/sbin")
+        || env::var("NOPE").is_some()
+    {
+        fail(110, b"env");
+    }
+
+    // A child runs a closure-like task through fork + exec + wait.
+    match process::fork() {
+        Ok(process::Fork::Child) => {
+            let error = process::exec_inherit("/bin/hello", &["hello"]);
+            eprintln!("exec failed: {error}");
+            process::exit(9);
+        }
+        Ok(process::Fork::Parent(pid)) => {
+            if process::wait(Some(pid)).map(|(_, status)| status.success()) != Ok(true) {
+                fail(111, b"process::wait");
+            }
+        }
+        Err(_) => fail(112, b"process::fork"),
+    }
+    if process::current_dir().as_deref() != Ok("/") {
+        fail(113, b"current_dir");
+    }
+
+    // The C interface: malloc family, strings, getenv, errno (in TLS).
+    unsafe {
+        let block = malloc(100);
+        if block.is_null() || !(block as usize).is_multiple_of(16) {
+            fail(114, b"malloc");
+        }
+        core::ptr::write_bytes(block, 0x42, 100);
+        let grown = realloc(block, 100_000);
+        if grown.is_null() || *grown.add(99) != 0x42 {
+            fail(115, b"realloc kept the contents");
+        }
+        free(grown);
+        let zeroed = calloc(1000, 8);
+        if zeroed.is_null() || (0..8000).any(|index| *zeroed.add(index) != 0) {
+            fail(116, b"calloc");
+        }
+        free(zeroed);
+        free(core::ptr::null_mut());
+        let hello = c"hello";
+        if strlen(hello.as_ptr()) != 5 || strcmp(hello.as_ptr(), c"help".as_ptr()) >= 0 {
+            fail(117, b"strlen/strcmp");
+        }
+        if memcmp(b"abc".as_ptr().cast(), b"abd".as_ptr().cast(), 3) >= 0 {
+            fail(118, b"memcmp");
+        }
+        let path = getenv(c"PATH".as_ptr());
+        if path.is_null()
+            || strcmp(path, c"/bin:/sbin".as_ptr()) != 0
+            || !getenv(c"NOPE".as_ptr()).is_null()
+        {
+            fail(119, b"getenv");
+        }
+        *__errno_location() = 0;
+        if c_open(c"/no/such/file".as_ptr(), 0, 0) != -1 || *__errno_location() != 2 {
+            fail(120, b"open/errno");
+        }
+    }
+    println!(
+        "usertest: libsaeos {} numbers, {} directory entries in /etc",
+        numbers.len(),
+        entries.len()
+    );
 }

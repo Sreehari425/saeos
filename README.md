@@ -191,7 +191,7 @@ kernel/src/drivers/ Console and hardware drivers
 kernel/src/time/    Timer implementations
 tools/ratconf/      Configuration tool
 tools/mkinitramfs/  Initramfs (cpio) builder
-userspace/          User programs and their runtime (installed in /bin)
+userspace/          User programs and libsaeos, their C library in Rust (/bin)
 scripts/            QEMU runner scripts
 configs/            Example configuration files
 ```

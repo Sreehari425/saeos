@@ -1,24 +1,17 @@
-//! The SaeOS user runtime: program entry, raw syscalls (Linux x86_64
-//! convention), and a panic handler. No allocation, no libc.
-//!
-//! Programs build for `userspace/x86_64-saeos.json` (`make userspace`): a
-//! static, non-PIE target with SSE (hardware floating point; the kernel
-//! saves each process's FPU state), linked with `userspace/user.ld`.
-//!
-//! ```text
-//! kernel exec -> _start (rsp = argc, argv..., NULL, envp..., NULL, auxv...)
-//!             -> start(stack) -> saeos_main(Args) -> exit(code)
-//! ```
+//! Raw system calls (Linux x86_64 convention): rax = number, args in rdi,
+//! rsi, rdx, r10, r8, r9; the result in rax, negative errno on failure.
+//! The typed layer (`fs`, `io`, `process`, ...) is built on these.
 
-#![no_std]
-
-use core::arch::{asm, naked_asm};
+use core::arch::asm;
 
 pub mod nr {
     pub const READ: u64 = 0;
     pub const WRITE: u64 = 1;
     pub const OPEN: u64 = 2;
     pub const CLOSE: u64 = 3;
+    pub const STAT: u64 = 4;
+    pub const FSTAT: u64 = 5;
+    pub const LSEEK: u64 = 8;
     pub const MMAP: u64 = 9;
     pub const MPROTECT: u64 = 10;
     pub const MUNMAP: u64 = 11;
@@ -32,9 +25,15 @@ pub mod nr {
     pub const WAIT4: u64 = 61;
     pub const GETCWD: u64 = 79;
     pub const CHDIR: u64 = 80;
+    pub const RENAME: u64 = 82;
+    pub const MKDIR: u64 = 83;
+    pub const RMDIR: u64 = 84;
+    pub const UNLINK: u64 = 87;
     pub const GETPPID: u64 = 110;
+    pub const GETDENTS64: u64 = 217;
     pub const ARCH_PRCTL: u64 = 158;
     pub const EXIT: u64 = 60;
+    pub const EXIT_GROUP: u64 = 231;
 }
 
 /// Raw syscall: rax = number, args in rdi rsi rdx r10 r8 r9; the CPU
@@ -240,86 +239,58 @@ pub fn ioctl(fd: u32, request: u64, argument: u64) -> i64 {
     unsafe { syscall3(nr::IOCTL, u64::from(fd), request, argument) }
 }
 
-pub fn exit(code: i32) -> ! {
-    unsafe { syscall3(nr::EXIT, code as u64, 0, 0) };
+pub fn dup(fd: u32) -> i64 {
+    unsafe { syscall3(nr::DUP, u64::from(fd), 0, 0) }
+}
+
+/// `lseek(fd, offset, whence)`: 0 = SET, 1 = CUR, 2 = END.
+pub fn lseek(fd: u32, offset: i64, whence: u32) -> i64 {
+    unsafe { syscall3(nr::LSEEK, u64::from(fd), offset as u64, u64::from(whence)) }
+}
+
+/// `stat` into a 144-byte `struct stat`; `path` ends with a NUL byte.
+pub fn stat(path: &[u8], buffer: &mut [u8; 144]) -> i64 {
+    unsafe {
+        syscall3(
+            nr::STAT,
+            path.as_ptr() as u64,
+            buffer.as_mut_ptr() as u64,
+            0,
+        )
+    }
+}
+
+pub fn getdents64(fd: u32, buffer: &mut [u8]) -> i64 {
+    unsafe {
+        syscall3(
+            nr::GETDENTS64,
+            u64::from(fd),
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+        )
+    }
+}
+
+/// `path` ends with a NUL byte.
+pub fn mkdir(path: &[u8], mode: u32) -> i64 {
+    unsafe { syscall3(nr::MKDIR, path.as_ptr() as u64, u64::from(mode), 0) }
+}
+
+pub fn rmdir(path: &[u8]) -> i64 {
+    unsafe { syscall3(nr::RMDIR, path.as_ptr() as u64, 0, 0) }
+}
+
+pub fn unlink(path: &[u8]) -> i64 {
+    unsafe { syscall3(nr::UNLINK, path.as_ptr() as u64, 0, 0) }
+}
+
+pub fn rename(old: &[u8], new: &[u8]) -> i64 {
+    unsafe { syscall3(nr::RENAME, old.as_ptr() as u64, new.as_ptr() as u64, 0) }
+}
+
+/// End the process at once, without flushing buffered output (`_exit`).
+pub fn exit_now(code: i32) -> ! {
+    unsafe { syscall3(nr::EXIT_GROUP, code as u64, 0, 0) };
     // exit never returns; if it somehow did, never run on.
     unsafe { asm!("ud2", options(nomem, nostack, noreturn)) }
-}
-
-/// The program's arguments, from the initial stack.
-#[derive(Clone, Copy)]
-pub struct Args {
-    count: usize,
-    vector: *const *const u8,
-}
-
-impl Args {
-    pub fn count(&self) -> usize {
-        self.count
-    }
-
-    /// Argument `index` without its NUL.
-    pub fn get(&self, index: usize) -> Option<&'static [u8]> {
-        if index >= self.count {
-            return None;
-        }
-        unsafe {
-            let start = *self.vector.add(index);
-            let mut length = 0;
-            while *start.add(length) != 0 {
-                length += 1;
-            }
-            Some(core::slice::from_raw_parts(start, length))
-        }
-    }
-}
-
-unsafe extern "Rust" {
-    /// Defined by [`entry!`].
-    fn saeos_main(args: Args) -> i32;
-}
-
-/// Declare the program's `main(Args) -> i32`.
-#[macro_export]
-macro_rules! entry {
-    ($main:path) => {
-        #[unsafe(no_mangle)]
-        fn saeos_main(args: $crate::Args) -> i32 {
-            $main(args)
-        }
-    };
-}
-
-/// The ELF entry point. The kernel starts us with rsp at argc and nothing
-/// else set up; align the stack as the SysV ABI requires for a call.
-///
-/// # Safety
-/// Only the kernel may enter here, with the initial stack `exec` builds.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start() -> ! {
-    naked_asm!(
-        "mov rdi, rsp",
-        "and rsp, -16",
-        "xor ebp, ebp",
-        "call {start}",
-        "ud2",
-        start = sym start,
-    )
-}
-
-unsafe extern "C" fn start(stack: *const u64) -> ! {
-    let args = unsafe {
-        Args {
-            count: *stack as usize,
-            vector: stack.add(1) as *const *const u8,
-        }
-    };
-    exit(unsafe { saeos_main(args) })
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    write(2, b"panic\n");
-    exit(101)
 }
