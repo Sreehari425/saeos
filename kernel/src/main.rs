@@ -5,13 +5,17 @@
 extern crate alloc;
 
 pub mod arch;
+pub mod backtrace;
 pub mod boot;
 #[cfg(feature = "boot-test")]
 mod boot_test;
 pub mod collections;
 pub mod drivers;
 pub mod fatal;
+#[macro_use]
+pub mod klog;
 mod fault_tests;
+pub mod klog_ring;
 pub mod mm;
 pub mod process;
 pub mod scheduler;

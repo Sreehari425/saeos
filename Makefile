@@ -15,8 +15,8 @@ TEST_MEM ?= 6G
 BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL)
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
 
-.PHONY: all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test test help
+.PHONY: all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test test help
 
 all: bios
 
@@ -56,6 +56,26 @@ run-uefi-debug: olddefconfig
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
 	./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(QEMU_ARGS)
 
+# Start QEMU halted with a GDB stub on :1234, then attach with `make gdb`
+# (or `make gdb-uefi`) from a second terminal.
+debug: olddefconfig
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
+	./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -s -S -no-shutdown $(QEMU_ARGS)
+
+debug-uefi: olddefconfig
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
+	./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -s -S -no-shutdown $(QEMU_ARGS)
+
+gdb:
+	gdb -x scripts/gdbinit target/$(BIOS_TARGET)/debug/$(KERNEL)
+
+gdb-uefi:
+	gdb -x scripts/gdbinit-uefi
+
+# Resolve the backtrace in a saved log: make symbolize LOG=crash.log
+symbolize:
+	./scripts/symbolize.sh $(LOG)
+
 check: olddefconfig
 	cargo check -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
 	cargo check -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
@@ -64,9 +84,14 @@ check: olddefconfig
 mm-test:
 	cargo test -p mm-model
 
+# The host model (buddy core, scheduler, task code, log ring) under Miri,
+# which checks for undefined behaviour the normal tests cannot see.
+miri:
+	cargo miri test -p mm-model
+
 # Host tests plus every QEMU test on both boot paths; each run ends with the
 # kernel's own verdict through isa-debug-exit.
-test: mm-test boot-test mm-guard-test fault-test panic-lock-test
+test: mm-test miri boot-test mm-guard-test fault-test panic-lock-test
 
 boot-test:
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test
@@ -85,23 +110,23 @@ mm-stress-uefi:
 # A task executes ud2: the #UD report must name it.
 fault-test:
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),fault-test
-	QEMU_TEST_EXPECT="INVALID OPCODE \(#UD\).*task 'fault-test'" ./scripts/run-qemu-test.sh $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
+	QEMU_TEST_SYMBOLS="fault_tests::fault_test_task" QEMU_TEST_EXPECT="INVALID OPCODE \(#UD\).*task 'fault-test'" ./scripts/run-qemu-test.sh $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),fault-test
-	QEMU_TEST_EXPECT="INVALID OPCODE \(#UD\).*task 'fault-test'" ./scripts/run-qemu-test.sh $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
+	QEMU_TEST_SYMBOLS="fault_tests::fault_test_task" QEMU_TEST_EXPECT="INVALID OPCODE \(#UD\).*task 'fault-test'" ./scripts/run-qemu-test.sh $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
 
 # A task panics while holding the console and serial locks: the report must
 # still come out instead of deadlocking.
 panic-lock-test:
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),panic-lock-test
-	QEMU_TEST_EXPECT="panic-lock-test: deliberate panic" ./scripts/run-qemu-test.sh $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
+	QEMU_TEST_SYMBOLS="fault_tests::panic_lock_test_task" QEMU_TEST_EXPECT="panic-lock-test: deliberate panic" ./scripts/run-qemu-test.sh $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),panic-lock-test
-	QEMU_TEST_EXPECT="panic-lock-test: deliberate panic" ./scripts/run-qemu-test.sh $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
+	QEMU_TEST_SYMBOLS="fault_tests::panic_lock_test_task" QEMU_TEST_EXPECT="panic-lock-test: deliberate panic" ./scripts/run-qemu-test.sh $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
 
 mm-guard-test:
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),mm-guard-test
-	QEMU_TEST_EXPECT="KERNEL STACK OVERFLOW in task 'guard-test'" ./scripts/run-qemu-test.sh $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
+	QEMU_TEST_SYMBOLS="guard_test_task::recurse" QEMU_TEST_EXPECT="KERNEL STACK OVERFLOW in task 'guard-test'" ./scripts/run-qemu-test.sh $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),mm-guard-test
-	QEMU_TEST_EXPECT="KERNEL STACK OVERFLOW in task 'guard-test'" ./scripts/run-qemu-test.sh $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
+	QEMU_TEST_SYMBOLS="guard_test_task::recurse" QEMU_TEST_EXPECT="KERNEL STACK OVERFLOW in task 'guard-test'" ./scripts/run-qemu-test.sh $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
 
 fmt-check:
 	cargo fmt --all -- --check
@@ -149,6 +174,7 @@ help:
 	@echo "  all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check"
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\""
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
-	@echo "  test boot-test mm-test mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
+	@echo "  test boot-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"
+	@echo "  debug debug-uefi gdb gdb-uefi symbolize LOG=<file>"
 	@echo "  clean distclean mrproper nix-gc"

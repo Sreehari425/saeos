@@ -1,5 +1,10 @@
 [target.x86_64-unknown-none]
 runner = "scripts/runner-bios-x86_64.sh"
+# Frame pointers let the fatal path print a backtrace (kernel/src/backtrace.rs).
+rustflags = ["-C", "force-frame-pointers=yes"]
 
 [target.x86_64-unknown-uefi]
 runner = "scripts/runner-uefi-x86_64.sh"
+# The PE build unwinds with the Windows x64 tables in .pdata instead of a
+# plain frame-pointer chain (see kernel/src/backtrace.rs), so emit them.
+rustflags = ["-C", "force-frame-pointers=yes", "-C", "force-unwind-tables=yes"]

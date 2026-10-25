@@ -64,6 +64,17 @@ impl Rng {
 
 const ALL_ZONES: [Zone; 2] = [Zone::Normal, Zone::Dma32];
 
+// Miri is orders of magnitude slower; it checks the same code paths for
+// undefined behaviour on a smaller workload.
+const SEEDS: &[u64] = if cfg!(miri) {
+    &[1, 0x5eed]
+} else {
+    &[1, 0x5eed, 0xdead_beef, 42, 7777]
+};
+const BASE_FRAMES: usize = if cfg!(miri) { 512 } else { 4096 };
+const STEPS: usize = if cfg!(miri) { 600 } else { 20_000 };
+const VALIDATE_EVERY: usize = if cfg!(miri) { 61 } else { 97 };
+
 fn aligned_free_run_exists(store: &VecStore, order: usize) -> bool {
     let size = 1 << order;
     (0..store.frame_count() / size)
@@ -92,10 +103,10 @@ fn assert_consistent(lists: &BuddyLists, store: &mut VecStore, live: &BTreeMap<u
 
 #[test]
 fn randomized_alloc_free_matches_bitmap_oracle() {
-    for seed in [1u64, 0x5eed, 0xdead_beef, 42, 7777] {
+    for &seed in SEEDS {
         let mut rng = Rng(seed);
         // Odd size so the top of memory is not a power-of-two block.
-        let frames = 4096 + 37 + (seed as usize % 1000);
+        let frames = BASE_FRAMES + 37 + (seed as usize % (BASE_FRAMES / 4));
         let mut store = VecStore::new(frames, seed ^ 0xabcd);
         // A few reserved holes, as firmware maps have.
         for _ in 0..8 {
@@ -110,7 +121,7 @@ fn randomized_alloc_free_matches_bitmap_oracle() {
         let mut live = BTreeMap::new();
         assert_consistent(&lists, &mut store, &live);
 
-        for step in 0..20_000 {
+        for step in 0..STEPS {
             if live.is_empty() || rng.below(100) < 55 {
                 let order = match rng.below(10) {
                     0..=5 => 0,
@@ -140,7 +151,7 @@ fn randomized_alloc_free_matches_bitmap_oracle() {
                     .release(&mut store, start, order)
                     .expect("release of live block");
             }
-            if step % 97 == 0 {
+            if step % VALIDATE_EVERY == 0 {
                 assert_consistent(&lists, &mut store, &live);
             }
         }
@@ -222,6 +233,8 @@ fn isolate_and_reinsert_round_trip() {
 }
 
 #[test]
+// Needs a million-frame store; too slow under Miri.
+#[cfg_attr(miri, ignore)]
 fn zones_split_at_four_gib() {
     // Just past the Dma32 boundary, so both zones exist.
     let frames = (1 << 20) + 4096;

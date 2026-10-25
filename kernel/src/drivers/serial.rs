@@ -64,6 +64,7 @@ pub fn init() {
 #[doc(hidden)]
 #[cfg(feature = "serial")]
 pub fn _serial_print(args: fmt::Arguments) {
+    crate::klog::record(args);
     SERIAL1.lock().write_fmt(args).unwrap();
 }
 

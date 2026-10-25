@@ -22,6 +22,8 @@ pub fn run() -> ! {
     let irq_passed = irq_lock_test();
     let breakpoint_passed = breakpoint_test();
     let cache_passed = cache_attributes_test();
+    // Everything printed so far must also be in the kernel log ring.
+    let log_passed = crate::klog::contains("boot-test: starting.");
     let wait_passed = wait_event_test();
     let idle_passed = idle_test();
     let scheduler_passed = scheduler_test();
@@ -29,15 +31,17 @@ pub fn run() -> ! {
         && irq_passed
         && breakpoint_passed
         && cache_passed
+        && log_passed
         && wait_passed
         && idle_passed
         && scheduler_passed;
     serial_println!(
-        "boot-test: memory={} irq-locks={} breakpoint={} cache={} wait-event={} idle={} scheduler={} -> {}",
+        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} wait-event={} idle={} scheduler={} -> {}",
         verdict(mm_passed),
         verdict(irq_passed),
         verdict(breakpoint_passed),
         verdict(cache_passed),
+        verdict(log_passed),
         verdict(wait_passed),
         verdict(idle_passed),
         verdict(scheduler_passed),

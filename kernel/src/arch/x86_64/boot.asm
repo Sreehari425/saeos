@@ -223,18 +223,16 @@ long_mode_high:
 
     ; Set 64-bit stack
     mov rsp, stack_top
-
     ; Upper halves are undefined after the mode switch; the Multiboot info
     ; pointer is a 32-bit physical address.
     mov edi, edi
 
-    ; Call 64-bit Rust kernel entry point
-    call kernel_main_bios
-
-    ; If kernel returns, halt
-    cli
-.hlt_loop:
-    hlt
-    jmp .hlt_loop
+    ; Enter the never-returning Rust entry point with a null frame pointer
+    ; and a null return address, so debuggers and backtraces see the
+    ; outermost frame instead of unwinding into boot-stack garbage. The push
+    ; leaves the stack aligned exactly as a `call` would.
+    xor ebp, ebp
+    push 0
+    jmp kernel_main_bios
 
 section .note.GNU-stack noalloc noexec nowrite progbits

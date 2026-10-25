@@ -310,8 +310,9 @@ fn cpu_share_follows_nice_weights() {
     assert_eq!(scheduler.task(nicer).unwrap().scheduler_entity.weight, 335);
     let mut now = 0;
     scheduler.schedule(now).unwrap();
-    // 10 simulated seconds of 1 ms ticks.
-    for _ in 0..10_000 {
+    // 10 simulated seconds of 1 ms ticks (1 s under Miri).
+    let ticks = if cfg!(miri) { 1_000 } else { 10_000 };
+    for _ in 0..ticks {
         now += MS;
         if scheduler.tick(now) {
             scheduler.preempt(0x1000, now);
@@ -327,7 +328,7 @@ fn cpu_share_follows_nice_weights() {
     let ratio = a / b;
     let expected = 1024.0 / 335.0;
     assert!(
-        (ratio / expected - 1.0).abs() < 0.05,
+        (ratio / expected - 1.0).abs() < if cfg!(miri) { 0.15 } else { 0.05 },
         "runtime ratio {ratio:.3}, expected {expected:.3}"
     );
 }

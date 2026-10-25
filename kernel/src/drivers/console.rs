@@ -104,6 +104,7 @@ pub fn set_color(fg: Color, bg: Color) {
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
+    crate::klog::record(args);
     let state = CONSOLE_STATE.lock();
     match state.kind {
         #[cfg(feature = "vga-text")]

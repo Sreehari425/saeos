@@ -128,7 +128,9 @@ The checked-in configuration templates live in [`configs/`](configs/).
 make check         # Check BIOS and UEFI kernel builds
 make fmt-check     # Check formatting
 make clippy        # Run Clippy with warnings denied
+make test          # All tests below plus the fault tests, on BIOS and UEFI
 make mm-test       # Host tests for the buddy allocator, scheduler model, and lock order
+make miri          # The same host tests under Miri (undefined-behaviour checks)
 make mm-stress     # Boot with MM self-tests and stress runs (also mm-stress-uefi)
 make mm-guard-test # Overflow a kernel stack on purpose and check it is reported
 make asm           # Emit BIOS and UEFI assembly
@@ -137,6 +139,28 @@ make clean         # Remove Cargo build artifacts
 
 The kernel is written in Rust and owns the platform, memory, and driver layers
 it runs on.
+
+## Debugging
+
+Panics and CPU exceptions print a backtrace. Resolve it to functions and
+source lines with:
+
+```sh
+make symbolize LOG=crash.log   # or: scripts/symbolize.sh crash.log
+```
+
+Attach GDB by starting QEMU halted in one terminal and the debugger in
+another:
+
+```sh
+make debug     # BIOS kernel, waits for GDB on :1234
+make gdb       # source-level: breaks at kernel_main_bios
+```
+
+`make debug-uefi` / `make gdb-uefi` work the same way at the assembly level
+(the UEFI build's debug info is PDB, which GDB cannot read); `ksym [addr]`
+in that session resolves addresses to source. The shell's `dmesg` shows the
+kernel log, and `loglevel debug` enables debug tracing at runtime.
 
 ## Project layout
 

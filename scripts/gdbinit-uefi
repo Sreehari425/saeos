@@ -1,0 +1,30 @@
+# GDB setup for the UEFI kernel (used by `make gdb-uefi`; start QEMU with
+# `make debug-uefi` first).
+#
+# The UEFI target emits CodeView/PDB debug info, which GDB cannot read, so
+# debugging here is at the assembly level. `ksym [address]` (default: $pc)
+# resolves an address to function and line through scripts/symbolize.sh.
+# For source-level stepping, use the BIOS build (`make debug` / `make gdb`).
+set pagination off
+set confirm off
+set disassembly-flavor intel
+set architecture i386:x86-64
+target remote localhost:1234
+
+python
+import gdb, os, subprocess
+
+class KernelSymbol(gdb.Command):
+    """ksym [ADDRESS]: resolve a UEFI kernel address (default $pc)."""
+    def __init__(self):
+        super().__init__("ksym", gdb.COMMAND_DATA)
+    def invoke(self, argument, from_tty):
+        address = int(gdb.parse_and_eval(argument or "$pc")) & 0xffffffffffffffff
+        script = os.path.join(os.getcwd(), "scripts", "symbolize.sh")
+        log = "Backtrace (image=uefi)\n  #0 0x%x\n" % address
+        result = subprocess.run([script, "-", "uefi"], input=log, text=True,
+                                capture_output=True)
+        print(result.stdout.strip() or result.stderr.strip())
+
+KernelSymbol()
+end

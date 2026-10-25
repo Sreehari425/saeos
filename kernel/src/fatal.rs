@@ -39,7 +39,20 @@ pub fn report(message: fmt::Arguments, passed: bool) -> ! {
         crate::drivers::vga::Color::Black,
     );
     crate::println!("\n{}", message);
+    print_backtrace();
     halt(passed)
+}
+
+/// Print the call chain leading here. Addresses are kernel virtual
+/// addresses; `scripts/symbolize.sh` turns them into function names.
+fn print_backtrace() {
+    crate::println!(
+        "Backtrace (image={}; scripts/symbolize.sh):",
+        crate::backtrace::IMAGE
+    );
+    crate::backtrace::walk_current(|depth, address| {
+        crate::println!("  #{} {:#x}", depth, address);
+    });
 }
 
 /// End the run (QEMU test builds) or halt forever.

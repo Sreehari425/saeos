@@ -2,7 +2,9 @@
 # Run a test kernel (built with `qemu-exit`, e.g. `boot-test` or
 # `mm-guard-test`) in QEMU and turn its isa-debug-exit verdict into an exit
 # status. Optional log markers that must appear can be given in
-# QEMU_TEST_EXPECT, one regular expression per line.
+# QEMU_TEST_EXPECT, one regular expression per line. QEMU_TEST_SYMBOLS lists
+# function names (regular expressions, one per line) that must appear once
+# the log's backtrace is resolved with scripts/symbolize.sh.
 #
 # usage: run-qemu-test.sh <runner> <image> [qemu options...]
 set -euo pipefail
@@ -51,5 +53,17 @@ if [ -n "${QEMU_TEST_EXPECT:-}" ]; then
             exit 1
         fi
     done <<< "$QEMU_TEST_EXPECT"
+fi
+if [ -n "${QEMU_TEST_SYMBOLS:-}" ]; then
+    SYMBOLS="$("$(dirname "$0")/symbolize.sh" "$LOG_FILE")"
+    echo "qemu-test: backtrace:"
+    sed 's/^/    /' <<<"$SYMBOLS"
+    while IFS= read -r symbol; do
+        [ -z "$symbol" ] && continue
+        if ! grep -qE "$symbol" <<<"$SYMBOLS"; then
+            echo "qemu-test: backtrace does not reach $symbol" >&2
+            exit 1
+        fi
+    done <<< "$QEMU_TEST_SYMBOLS"
 fi
 echo "qemu-test: PASS"

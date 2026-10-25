@@ -1,0 +1,13 @@
+# GDB setup for the BIOS kernel (used by `make gdb`; start QEMU with
+# `make debug` first). The ELF is linked at its runtime addresses, so
+# source-level debugging works directly.
+set pagination off
+set confirm off
+set disassembly-flavor intel
+# QEMU starts in 32-bit mode; with the architecture fixed to x86-64 from the
+# start, GDB stays usable once the boot stub enters long mode. Use hardware
+# breakpoints for early code.
+set architecture i386:x86-64
+target remote localhost:1234
+hbreak kernel_main_bios
+continue

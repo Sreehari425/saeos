@@ -16,6 +16,8 @@ pub mod buddy;
 #[cfg(test)]
 mod buddy_tests;
 mod heap_model;
+#[path = "../../../kernel/src/klog_ring.rs"]
+pub mod klog_ring;
 pub use heap_model::*;
 mod lock_model;
 #[path = "../../../kernel/src/task/mod.rs"]

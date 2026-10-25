@@ -42,13 +42,11 @@ pub const BOOT_TEST_WAIT_ID: u64 = 3;
 /// The reaper sleeps here; `exit_current` wakes it.
 pub static REAPER_WAIT: IrqSpinMutex<WaitQueue> = IrqSpinMutex::new(WaitQueue::new(REAPER_WAIT_ID));
 
-#[cfg(feature = "scheduler-debug")]
+/// Scheduler tracing at `Debug` level; `loglevel debug` in the shell (or the
+/// `scheduler-debug` feature, which makes Debug the default) turns it on.
 fn scheduler_debug(message: core::fmt::Arguments<'_>) {
-    crate::serial_println!("[SCHED] {}", message);
+    crate::kdebug!("[SCHED] {}", message);
 }
-
-#[cfg(not(feature = "scheduler-debug"))]
-fn scheduler_debug(_: core::fmt::Arguments<'_>) {}
 /// Look up a stack's owner from a fault handler: never blocks, and gives up
 /// if the scheduler lock is held by the code that faulted.
 pub fn try_task_on_stack(base: u64) -> Option<(TaskId, &'static str)> {

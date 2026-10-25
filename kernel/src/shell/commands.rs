@@ -39,10 +39,23 @@ pub fn execute(cmd: &str) {
             println!("  waitqueues - Show wait-queue diagnostics");
             println!("  processes - Show PCB ownership");
             println!("  sleep N - Sleep for N seconds");
+            println!("  dmesg   - Show the kernel log");
+            println!("  loglevel [error|warn|info|debug] - Show or set the log threshold");
             println!("  <text>  - Echoes your input back to the screen");
         }
         "clear" => {
             console::clear_screen();
+        }
+        "dmesg" => crate::klog::replay(|line| println!("{}", line)),
+        "loglevel" => println!("loglevel={:?}", crate::klog::level()),
+        command if command.starts_with("loglevel ") => {
+            match crate::klog::Level::parse(command[9..].trim()) {
+                Some(level) => {
+                    crate::klog::set_level(level);
+                    println!("loglevel={:?}", level);
+                }
+                None => println!("Usage: loglevel [error|warn|info|debug]"),
+            }
         }
         "tasks" => {
             console::set_color(Color::LightCyan, Color::Black);
