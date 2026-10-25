@@ -27,12 +27,12 @@ BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
 
 .PHONY: userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test test help
 
 all: bios
 
 # User programs, linked with userspace/user.ld; installed by initramfs.toml.
-USER_PROGRAMS := hello
+USER_PROGRAMS := hello usertest
 userspace:
 	cargo build --release $(addprefix -p ,$(USER_PROGRAMS))
 
@@ -119,7 +119,7 @@ miri:
 
 # Host tests plus every QEMU test on both boot paths; each run ends with the
 # kernel's own verdict through isa-debug-exit.
-test: mm-test miri boot-test mm-guard-test fault-test panic-lock-test
+test: mm-test miri boot-test user-test mm-guard-test fault-test panic-lock-test
 
 # Each target boots twice: on QEMU's default CPU, and with -cpu max, where
 # SMEP/SMAP exist and the user-memory test checks they are enforced.
@@ -139,6 +139,26 @@ mm-stress: initramfs-test
 mm-stress-uefi: initramfs-test
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),boot-test,mm-stress,mm-allocator-stats,paging-debug
 	INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE)' ./scripts/run-mm-stress.sh $(UEFI_TEST_IMAGE) -m 16G
+
+# Userspace in ring 3: the test initramfs's usertest runs as init (PID 1)
+# and its exit status is the verdict (saeos.test.exit, default 0). Then a
+# user program that faults must be killed while the kernel survives, and a
+# missing init must give the "No working init found" panic. The log markers
+# matter as much as the exit status: if the syscall path itself broke, a
+# failing program's exit(code) could arrive as exit(0).
+USER_TEST_RUN = INITRAMFS=$(INITRAMFS_TEST_IMAGE) ./scripts/run-qemu-test.sh
+user-test: initramfs-test
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),user-test
+	$(call user_tests,$(BIOS_TEST_IMAGE))
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test
+	$(call user_tests,$(UEFI_TEST_IMAGE))
+
+define user_tests
+	CMDLINE='init=/test/bin/usertest' QEMU_TEST_EXPECT="$$(printf 'usertest: PASS\nuser-mode preemptions: [1-9]')" $(USER_TEST_RUN) $(1) -m 2G
+	CMDLINE='init=/test/bin/usertest saeos.test.exit=sig11 -- crash' QEMU_TEST_EXPECT="killed by SIGSEGV: PAGE FAULT at 0x0" $(USER_TEST_RUN) $(1) -m 2G
+	CMDLINE='init=/test/bin/usertest saeos.test.exit=sig4 -- ud' QEMU_TEST_EXPECT="killed by SIGILL" $(USER_TEST_RUN) $(1) -m 2G
+	CMDLINE='init=/missing saeos.test=no-init' QEMU_TEST_EXPECT="Requested init /missing failed \(error -2\)" $(USER_TEST_RUN) $(1) -m 2G
+endef
 
 # A task executes ud2: the #UD report must name it.
 fault-test: initramfs-test
@@ -210,7 +230,7 @@ help:
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\""
 	@echo "  userspace initramfs initramfs-test (from initramfs.toml)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
-	@echo "  test boot-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
+	@echo "  test boot-test user-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"
 	@echo "  debug debug-uefi gdb gdb-uefi symbolize LOG=<file>"
 	@echo "  clean distclean mrproper nix-gc"

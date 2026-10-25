@@ -7,6 +7,7 @@ members = [
     "tools/ratconf",
     "userspace/hello",
     "userspace/rt",
+    "userspace/usertest",
 ]
 
 [workspace.package]

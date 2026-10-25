@@ -61,6 +61,33 @@ pub fn write(fd: u32, bytes: &[u8]) -> i64 {
     }
 }
 
+pub fn read(fd: u32, buffer: &mut [u8]) -> i64 {
+    unsafe {
+        syscall3(
+            nr::READ,
+            u64::from(fd),
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+        )
+    }
+}
+
+/// `path` must end with a NUL byte.
+pub fn open(path: &[u8], flags: u64) -> i64 {
+    if path.last() != Some(&0) {
+        return -22; // EINVAL
+    }
+    unsafe { syscall3(nr::OPEN, path.as_ptr() as u64, flags, 0) }
+}
+
+pub fn close(fd: u32) -> i64 {
+    unsafe { syscall3(nr::CLOSE, u64::from(fd), 0, 0) }
+}
+
+pub fn getpid() -> i64 {
+    unsafe { syscall3(nr::GETPID, 0, 0, 0) }
+}
+
 pub fn exit(code: i32) -> ! {
     unsafe { syscall3(nr::EXIT, code as u64, 0, 0) };
     // exit never returns; if it somehow did, never run on.

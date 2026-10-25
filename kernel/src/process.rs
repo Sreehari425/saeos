@@ -11,6 +11,9 @@ use alloc::vec::Vec;
 use crate::fs::FileTable;
 use crate::task::{AddressSpaceId, ExitStatus, ProcessId, TaskId};
 
+/// The process init runs in.
+pub const INIT_PID: ProcessId = ProcessId(1);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessError {
     UnknownProcess,
@@ -150,6 +153,17 @@ mod tests {
     }
 
     #[test]
+    fn init_is_pid_one_whatever_the_creation_order() {
+        let mut table = ProcessTable::new();
+        let idle = table.create(None, TaskId(1));
+        let init = table.create_init(TaskId(2)).unwrap();
+        let other = table.create(None, TaskId(3));
+        assert_eq!(init, INIT_PID);
+        assert!(idle.0 > 1 && other.0 > 1 && idle != other);
+        assert!(table.create_init(TaskId(4)).is_err(), "only one init");
+    }
+
+    #[test]
     fn child_waiter_registration_rejects_duplicates_and_unknown_removal() {
         let mut table = ProcessTable::new();
         let parent = table.create(None, TaskId(1));
@@ -177,7 +191,8 @@ impl ProcessTable {
     pub const fn new() -> Self {
         Self {
             processes: Vec::new(),
-            next_id: 1,
+            // PID 1 is reserved for init (`create_init`).
+            next_id: 2,
             released_spaces: Vec::new(),
         }
     }
@@ -189,6 +204,17 @@ impl ProcessTable {
         self.processes
             .push(ProcessControlBlock::new(id, None, address_space, thread));
         id
+    }
+
+    /// Create PID 1, the process init runs in. Every other process gets a
+    /// higher id, whatever the creation order.
+    pub fn create_init(&mut self, thread: TaskId) -> Result<ProcessId, ProcessError> {
+        if self.process(INIT_PID).is_some() {
+            return Err(ProcessError::DuplicateThread);
+        }
+        self.processes
+            .push(ProcessControlBlock::new(INIT_PID, None, None, thread));
+        Ok(INIT_PID)
     }
 
     pub fn create_child(

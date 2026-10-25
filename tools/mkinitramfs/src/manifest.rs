@@ -9,6 +9,7 @@
 //! source = "target/userspace/init"
 //! target = "/bin/init"
 //! mode = 0o755          # optional, default 0o644
+//! test = true           # optional: only in the test image (--test-fixtures)
 //! ```
 
 use crate::Image;
@@ -16,16 +17,24 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_FILE_MODE: u32 = 0o644;
 
+/// Which entries to include: the normal image, or the test image (which
+/// also gets the `test = true` entries).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flavour {
+    Normal,
+    Test,
+}
+
 /// Build the image described by the manifest at `path`.
-pub fn load(path: &Path) -> Result<Image, String> {
+pub fn load(path: &Path, flavour: Flavour) -> Result<Image, String> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let base = path.parent().unwrap_or(Path::new("."));
-    parse(&text, base).map_err(|error| format!("{}: {error}", path.display()))
+    parse(&text, base, flavour).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Build the image from manifest `text`; sources are relative to `base`.
-pub fn parse(text: &str, base: &Path) -> Result<Image, String> {
+pub fn parse(text: &str, base: &Path, flavour: Flavour) -> Result<Image, String> {
     let table: toml::Table = text.parse().map_err(|error| format!("{error}"))?;
     let mut image = Image::default();
     for (key, value) in &table {
@@ -44,7 +53,14 @@ pub fn parse(text: &str, base: &Path) -> Result<Image, String> {
                     add_tree(&mut image, &source, target)?;
                 }
                 "file" => {
-                    reject_unknown(item, &["source", "target", "mode"])?;
+                    reject_unknown(item, &["source", "target", "mode", "test"])?;
+                    let test_only = match item.get("test") {
+                        None => false,
+                        Some(value) => value.as_bool().ok_or("`test` must be true or false")?,
+                    };
+                    if test_only && flavour == Flavour::Normal {
+                        continue;
+                    }
                     let mode = match item.get("mode") {
                         None => DEFAULT_FILE_MODE,
                         Some(mode) => mode

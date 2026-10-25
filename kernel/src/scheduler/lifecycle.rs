@@ -17,6 +17,9 @@ pub fn exit_current(status: ExitStatus) -> ! {
         (dispatch_for(scheduler, current, next), process)
     });
     scheduler_debug(format_args!("task exit status={}", status.0));
+    if process == Some(crate::process::INIT_PID) {
+        crate::init::init_exited(status);
+    }
     wake_one(&REAPER_WAIT);
     if let Some(process) = process {
         let waiters = {

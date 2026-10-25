@@ -109,3 +109,23 @@ fn boot_copy_trims_truncates_and_stays_utf8() {
     // Invalid UTF-8 keeps the valid prefix.
     assert_eq!(Cmdline::new(b"ok \xff bad").as_str(), "ok ");
 }
+
+#[test]
+fn words_after_double_dash_are_init_arguments() {
+    let params = Params::parse("quiet init=/bin/sh -- -x  script.sh loglevel=debug");
+    assert!(params.flag("quiet"));
+    assert_eq!(params.get("init"), Some("/bin/sh"));
+    assert_eq!(
+        params.init_args().collect::<Vec<_>>(),
+        ["-x", "script.sh", "loglevel=debug"]
+    );
+    assert_eq!(
+        params.get("loglevel"),
+        None,
+        "after -- is not a kernel parameter"
+    );
+    assert_eq!(Params::parse("quiet").init_args().count(), 0);
+    assert_eq!(Params::parse("quiet --").init_args().count(), 0);
+    // `--x` is an ordinary word.
+    assert!(Params::parse("--x").flag("--x"));
+}

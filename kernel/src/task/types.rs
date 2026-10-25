@@ -15,8 +15,22 @@ pub struct ProcessId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AddressSpaceId(pub u64);
 
+/// How a task or process ended: an exit code (`exit(code)`, 0..=255 for
+/// user programs), or, when negative, killed by signal `-value` (a user
+/// fault: SIGSEGV for a bad access, SIGILL for an invalid instruction, ...).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExitStatus(pub i32);
+
+impl ExitStatus {
+    pub const fn killed(signal: i32) -> Self {
+        Self(-signal)
+    }
+
+    /// The signal that killed the process, if it did not exit normally.
+    pub const fn signal(self) -> Option<i32> {
+        if self.0 < 0 { Some(-self.0) } else { None }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockReason {

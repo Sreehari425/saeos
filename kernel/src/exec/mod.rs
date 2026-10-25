@@ -160,3 +160,26 @@ pub fn prepare(path: &str, argv: &[&str], envp: &[&str]) -> Result<PreparedImage
         stack_pointer: stack.stack_pointer,
     })
 }
+
+/// Make `image` the current process's program: its address space replaces
+/// the process's previous one (freed here), the FPU starts clean, and the
+/// caller enters user mode at the returned `(entry, stack_pointer)`.
+pub fn install_current(image: PreparedImage) -> (u64, u64) {
+    let task = crate::scheduler::current().expect("exec without a current task");
+    let previous = crate::scheduler::with_scheduler(|scheduler| {
+        scheduler.task(task).and_then(|task| task.address_space)
+    });
+    let space = crate::mm::address_space::register_owned(image.space);
+    crate::scheduler::set_address_space(task, Some(space))
+        .expect("current task accepts an address space");
+    crate::mm::address_space::activate_if_changed(Some(space))
+        .expect("new address space is registered");
+    if let Some(previous) = previous {
+        // No longer active, and owned by nothing else.
+        if let Err(error) = crate::mm::address_space::release(previous) {
+            crate::kerror!("exec: cannot free the old address space: {:?}", error);
+        }
+    }
+    unsafe { crate::arch::x86_64::fpu::restore(&crate::task::FpuState::INITIAL) };
+    (image.entry, image.stack_pointer)
+}

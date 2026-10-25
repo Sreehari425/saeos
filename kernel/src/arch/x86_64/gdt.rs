@@ -81,6 +81,8 @@ pub fn set_kernel_stack(top: u64) {
             .cast::<u64>()
             .write_unaligned(top);
     }
+    // The syscall entry stub reads it from here.
+    super::syscall::KERNEL_STACK_TOP.store(top, core::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn kernel_stack() -> u64 {
@@ -159,11 +161,16 @@ pub fn init() {
             "push {tmp}",
             "retfq",
             "2:",
-            "mov ds, {data_sel:x}",
-            "mov es, {data_sel:x}",
+            // Long mode ignores DS/ES, and FS/GS bases come from MSRs, so
+            // they hold the null selector: it is valid at every privilege
+            // level, so returning to ring 3 never has to reload them (which
+            // could clear the user's FS base). Only SS needs a descriptor.
             "mov ss, {data_sel:x}",
-            "mov fs, {data_sel:x}",
-            "mov gs, {data_sel:x}",
+            "xor {tmp:e}, {tmp:e}",
+            "mov ds, {tmp:x}",
+            "mov es, {tmp:x}",
+            "mov fs, {tmp:x}",
+            "mov gs, {tmp:x}",
             code_sel = in(reg) u64::from(KERNEL_CODE),
             data_sel = in(reg) KERNEL_DATA,
             tmp = out(reg) _,

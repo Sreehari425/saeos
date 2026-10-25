@@ -30,6 +30,8 @@ mm-guard-test = ["qemu-exit"]
 fault-test = ["qemu-exit"]
 panic-lock-test = ["qemu-exit"]
 qemu-exit = []
+# Boots the test initramfs's init; its exit status is the QEMU verdict.
+user-test = ["qemu-exit"]
 boot-test = ["qemu-exit", "mm-selftest", "scheduler-selftest"]
 apic = []
 pit = []

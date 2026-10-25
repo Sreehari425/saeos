@@ -21,10 +21,10 @@ mod lifecycle;
 mod selftest;
 mod wait;
 
-pub use dispatch::TimerDispatch;
 use dispatch::{
     Dispatch, assert_switch_boundary_unlocked, dispatch_for, prepare_switch, switch_dispatch,
 };
+pub use dispatch::{TimerDispatch, user_preemptions};
 pub use lifecycle::{
     collect_child_status, exit_current, register_child_waiter, release_reaped_spaces,
     spawn_in_new_process, spawn_kernel_task, wait_child,
@@ -151,16 +151,18 @@ pub fn init() {
     let (idle, shell, reaper) = with_scheduler(|scheduler| {
         let [idle_stack, shell_stack, reaper_stack] = stacks;
         let idle = scheduler.spawn_kernel_task(idle_task, "idle", true, idle_stack);
-        // The unattended boot test replaces the interactive shell.
+        // PID 1: the unattended boot test, or kernel_init, which starts the
+        // userspace init program (or the kernel shell with saeos.kshell).
         #[cfg(feature = "boot-test")]
         let (shell_entry, shell_name): (TaskEntry, _) = (crate::boot_test::run, "boot-test");
         #[cfg(not(feature = "boot-test"))]
-        let (shell_entry, shell_name): (TaskEntry, _) = (crate::shell::run, "shell");
+        let (shell_entry, shell_name): (TaskEntry, _) = (crate::init::kernel_init, "init");
         let shell = scheduler.spawn_kernel_task(shell_entry, shell_name, false, shell_stack);
         let reaper = scheduler.spawn_kernel_task(reaper_task, "reaper", false, reaper_stack);
         (idle, shell, reaper)
     });
-    for task in [idle, shell, reaper] {
+    attach_task_to_init_process(shell);
+    for task in [idle, reaper] {
         attach_task_to_new_process(task);
     }
     #[cfg(any(
@@ -179,6 +181,19 @@ pub fn start_selftest() -> Result<(), &'static str> {
 #[cfg(not(feature = "scheduler-selftest"))]
 pub fn selftest_passed() -> bool {
     false
+}
+
+fn attach_task_to_init_process(task: TaskId) {
+    let process = PROCESSES
+        .lock()
+        .create_init(task)
+        .expect("PID 1 is created once");
+    with_scheduler(|scheduler| {
+        scheduler
+            .task_mut(task)
+            .expect("new task disappeared before process attachment")
+            .process_id = Some(process);
+    });
 }
 
 fn attach_task_to_new_process(task: TaskId) -> ProcessId {

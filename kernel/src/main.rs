@@ -15,6 +15,7 @@ pub mod drivers;
 pub mod exec;
 pub mod fatal;
 pub mod fs;
+pub mod init;
 #[macro_use]
 pub mod klog;
 mod fault_tests;

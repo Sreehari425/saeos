@@ -11,3 +11,10 @@ target = "/"
 source = "target/x86_64-unknown-none/release/hello"
 target = "/bin/hello"
 mode = 0o755
+
+# Test image only (`make initramfs-test`): the QEMU user-test init.
+[[file]]
+source = "target/x86_64-unknown-none/release/usertest"
+target = "/test/bin/usertest"
+mode = 0o755
+test = true

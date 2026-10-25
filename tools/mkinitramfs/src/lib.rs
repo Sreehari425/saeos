@@ -84,10 +84,8 @@ impl Image {
     /// boundaries, an empty file, a nested file, and `/test/MANIFEST` listing
     /// `path size fnv1a-hex` for each of them, so the kernel test reads its
     /// expectations from the image it boots with.
+    /// Fails if any fixture path is already taken.
     pub fn add_test_fixtures(&mut self) -> Result<(), String> {
-        if self.nodes.contains_key("test") {
-            return Err("`/test` already exists; it is reserved for test fixtures".to_string());
-        }
         let mut manifest = String::new();
         for (path, size) in [
             ("/test/empty", 0usize),

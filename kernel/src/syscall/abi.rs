@@ -109,7 +109,13 @@ pub fn encode_dirent(buffer: &mut Vec<u8>, entry: &DirEntry, next_offset: u64) {
     buffer.resize(start + size, 0);
 }
 
-/// The `wait` status word of a normal exit (`WIFEXITED`, `WEXITSTATUS`).
-pub fn exit_status_word(code: i32) -> i32 {
-    (code & 0xff) << 8
+/// The `wait` status word for an `ExitStatus` value: a normal exit is
+/// `code << 8` (`WIFEXITED`, `WEXITSTATUS`); a process killed by a signal
+/// has the signal number in the low 7 bits (`WIFSIGNALED`, `WTERMSIG`).
+pub fn exit_status_word(status: i32) -> i32 {
+    if status < 0 {
+        (-status) & 0x7f
+    } else {
+        (status & 0xff) << 8
+    }
 }

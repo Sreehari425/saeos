@@ -9,6 +9,7 @@ pub mod interrupt_controller;
 pub mod irq;
 pub mod pic;
 pub mod qemu;
+pub mod syscall;
 pub mod uefi;
 
 pub use interrupt_controller::ControllerKind;
@@ -21,6 +22,8 @@ pub fn init(topology: Option<&acpi::InterruptTopology>) -> ControllerKind {
     fpu::init();
     // SMEP/SMAP when the CPU has them.
     crate::mm::uaccess::init_protections();
+    // syscall/sysret.
+    syscall::init();
 
     // 2. Initialize 256-entry IDT
     idt::init();

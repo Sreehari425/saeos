@@ -220,14 +220,71 @@ fn report_exception(
     )
 }
 
+/// A fault in user mode kills the process with the matching signal, as on
+/// Linux; the kernel carries on. Never returns.
+fn kill_user(name: &str, signal: i32, instruction_pointer: u64, address: Option<u64>) -> ! {
+    let (pid, task) = crate::scheduler::with_scheduler(|scheduler| {
+        scheduler
+            .current()
+            .and_then(|task| scheduler.task(task))
+            .map_or((0, "?"), |task| {
+                (task.process_id.map_or(0, |pid| pid.0), task.name)
+            })
+    });
+    match address {
+        Some(address) => crate::kerror!(
+            "[pid {} '{}'] killed by {}: {} at {:#x}, rip={:#x}",
+            pid,
+            task,
+            crate::init::signal_name(signal),
+            name,
+            address,
+            instruction_pointer
+        ),
+        None => crate::kerror!(
+            "[pid {} '{}'] killed by {}: {}, rip={:#x}",
+            pid,
+            task,
+            crate::init::signal_name(signal),
+            name,
+            instruction_pointer
+        ),
+    }
+    crate::scheduler::exit_current(crate::task::ExitStatus::killed(signal))
+}
+
+const SIGILL: i32 = 4;
+const SIGTRAP: i32 = 5;
+const SIGBUS: i32 = 7;
+const SIGFPE: i32 = 8;
+const SIGSEGV: i32 = 11;
+
+/// The signal a user-mode exception delivers (Linux's mapping).
+const fn signal_for(vector: u8) -> i32 {
+    match vector {
+        0 | 16 | 19 => SIGFPE,
+        1 | 3 => SIGTRAP,
+        6 => SIGILL,
+        7 => SIGFPE,
+        11 | 12 | 17 => SIGBUS,
+        _ => SIGSEGV,
+    }
+}
+
 macro_rules! fatal_exception {
     ($handler:ident, $vector:expr, $name:expr) => {
         extern "x86-interrupt" fn $handler(frame: InterruptStackFrame) {
+            if crate::arch::x86_64::syscall::from_user(frame.code_segment) {
+                kill_user($name, signal_for($vector), frame.instruction_pointer, None);
+            }
             report_exception($vector, $name, None, &frame)
         }
     };
     ($handler:ident, $vector:expr, $name:expr, error_code) => {
         extern "x86-interrupt" fn $handler(frame: InterruptStackFrame, error_code: u64) {
+            if crate::arch::x86_64::syscall::from_user(frame.code_segment) {
+                kill_user($name, signal_for($vector), frame.instruction_pointer, None);
+            }
             report_exception($vector, $name, Some(error_code), &frame)
         }
     };
@@ -381,6 +438,14 @@ extern "sysv64" fn saeos_page_fault_rust(frame: &mut PageFaultFrame) {
     if let Some(fixup) = crate::mm::uaccess::fixup_for(frame.instruction_pointer, address) {
         frame.instruction_pointer = fixup;
         return;
+    }
+    if crate::arch::x86_64::syscall::from_user(frame.code_segment) {
+        kill_user(
+            "PAGE FAULT",
+            SIGSEGV,
+            frame.instruction_pointer,
+            Some(address),
+        );
     }
     // A large frame can touch the guard while RSP is still on the stack, in
     // which case the #PF itself is delivered normally.

@@ -37,7 +37,12 @@ fn build(arguments: &[String]) -> Result<(), String> {
         }
     }
     let (manifest, output) = manifest.zip(output).ok_or(USAGE)?;
-    let mut image = mkinitramfs::manifest::load(&manifest)?;
+    let flavour = if fixtures {
+        mkinitramfs::manifest::Flavour::Test
+    } else {
+        mkinitramfs::manifest::Flavour::Normal
+    };
+    let mut image = mkinitramfs::manifest::load(&manifest, flavour)?;
     if fixtures {
         image.add_test_fixtures()?;
     }

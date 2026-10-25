@@ -13,9 +13,21 @@ pub struct TimerDispatch {
 /// stub plus RIP, CS, RFLAGS, RSP, SS (always pushed in long mode).
 const INTERRUPT_FRAME_BYTES: u64 = 20 * 8;
 
+/// Timer interrupts that arrived while user code was running.
+static USER_PREEMPTIONS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn user_preemptions() -> u64 {
+    USER_PREEMPTIONS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 #[unsafe(no_mangle)]
 pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDispatch {
     let _irq = crate::arch::x86_64::irq::enter();
+    // The saved CS sits after the 15 registers and RIP.
+    let code_segment = unsafe { *((stack_pointer + 16 * 8) as *const u64) };
+    if crate::arch::x86_64::syscall::from_user(code_segment) {
+        USER_PREEMPTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
     crate::time::on_timer_interrupt();
     interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET);
     let now = crate::time::now_ns();

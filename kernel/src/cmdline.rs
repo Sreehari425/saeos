@@ -17,7 +17,9 @@
 //! |-------------------|---------------------------------------------------|
 //! | `loglevel=LEVEL`  | log threshold: `error`/`warn`/`info`/`debug`, or Linux's 0-8 |
 //! | `quiet`           | same as `loglevel=warn`                           |
-//! | `init=PATH`       | the first userspace program (recorded until userspace exists) |
+//! | `init=PATH`       | the program PID 1 runs (`kernel/src/init.rs`) |
+//! | `saeos.kshell`    | run the in-kernel debug shell instead of userspace init |
+//! | `-- ARGS...`      | everything after `--` is passed to init as arguments |
 //!
 //! The parser below is pure and is tested in the host model.
 
@@ -30,6 +32,8 @@ pub struct Params<'a> {
     params: [(&'a str, Option<&'a str>); MAX_PARAMS],
     count: usize,
     dropped: usize,
+    /// Everything after a `--` word: arguments for init.
+    init_args: &'a str,
 }
 
 /// Strip one pair of surrounding double quotes (or a lone leading one).
@@ -45,6 +49,7 @@ impl<'a> Params<'a> {
             params: [("", None); MAX_PARAMS],
             count: 0,
             dropped: 0,
+            init_args: "",
         };
         let mut rest = raw;
         loop {
@@ -65,6 +70,10 @@ impl<'a> Params<'a> {
                 .map_or(rest.len(), |(index, _)| index);
             let (word, tail) = rest.split_at(end);
             rest = tail;
+            if word == "--" {
+                params.init_args = rest.trim();
+                break;
+            }
             // `"key=value"` and `key="value"` both mean key=value.
             let word = word
                 .strip_prefix('"')
@@ -108,6 +117,13 @@ impl<'a> Params<'a> {
         self.params[..self.count].iter().copied()
     }
 
+    /// The words after `--`, which Linux passes to init as its arguments
+    /// (`init=/bin/sh -- -c "echo hi"` is not supported: words are split on
+    /// spaces only).
+    pub fn init_args(&self) -> impl Iterator<Item = &'a str> + 'a {
+        self.init_args.split_whitespace()
+    }
+
     /// Parameters past [`MAX_PARAMS`] that were ignored.
     pub fn dropped(&self) -> usize {
         self.dropped
@@ -133,7 +149,7 @@ pub fn level_name(value: &str) -> Option<&'static str> {
 }
 
 /// The parameters the kernel itself understands.
-pub const KNOWN: &[&str] = &["loglevel", "quiet", "init"];
+pub const KNOWN: &[&str] = &["loglevel", "quiet", "init", "saeos.kshell"];
 
 #[cfg(not(host_model))]
 mod kernel {
@@ -183,9 +199,6 @@ mod kernel {
                 Some(level) => klog::set_level(level),
                 None => crate::kwarn!("cmdline: bad loglevel={}", value),
             }
-        }
-        if let Some(init) = params.get("init") {
-            crate::kinfo!("cmdline: init={} (recorded; no userspace yet)", init);
         }
         for (key, _) in params.iter().filter(|(key, _)| !KNOWN.contains(key)) {
             crate::kdebug!("cmdline: unknown parameter {}", key);
