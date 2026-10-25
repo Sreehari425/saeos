@@ -26,15 +26,25 @@ QEMU_TEST := INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE)' ./scrip
 BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL)
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
 
-.PHONY: userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
+.PHONY: check-std-lock userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
 .PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test test help
 
 all: bios
 
-# User programs, linked with userspace/user.ld; installed by initramfs.toml.
+# User programs, built for the SaeOS target (userspace/x86_64-saeos.json:
+# static, SSE, linked with userspace/user.ld) with core and alloc built from
+# source; installed by initramfs.toml. Each must be a static executable
+# whose entry point is in its executable segment.
 USER_PROGRAMS := hello usertest
+USER_TARGET := userspace/x86_64-saeos.json
+USER_BUILD = cargo build --release -Zjson-target-spec \
+	-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
+	--target $(USER_TARGET)
 userspace:
-	cargo build --release $(addprefix -p ,$(USER_PROGRAMS))
+	$(USER_BUILD) $(addprefix -p ,$(USER_PROGRAMS))
+	@for program in $(USER_PROGRAMS); do \
+		./scripts/check-user-elf.sh target/x86_64-saeos/release/$$program || exit 1; \
+	done
 
 # The normal image must never carry the test fixtures.
 initramfs: userspace
@@ -101,12 +111,18 @@ gdb-uefi:
 symbolize:
 	./scripts/symbolize.sh $(LOG)
 
-check: olddefconfig
+check: olddefconfig check-std-lock
 	cargo check -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
 	cargo check -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
 	cargo check -p ratconf
 	cargo check -p mkinitramfs
-	cargo check -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS))
+	cargo check -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS))
+
+# The Nix build vendors the standard library's dependencies from this copy;
+# refresh it with the toolchain: cp "$$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.lock" userspace/std-library.Cargo.lock
+check-std-lock:
+	@cmp -s userspace/std-library.Cargo.lock "$$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.lock" \
+		|| { echo "userspace/std-library.Cargo.lock is stale for this toolchain" >&2; exit 1; }
 
 mm-test:
 	cargo test -p mm-model
@@ -189,7 +205,7 @@ clippy: olddefconfig
 	cargo clippy -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS) -- -D warnings
 	cargo clippy -p ratconf -- -D warnings
 	cargo clippy -p mkinitramfs --all-targets -- -D warnings
-	cargo clippy -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS)) -- -D warnings
+	cargo clippy -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS)) -- -D warnings
 
 menuconfig:
 	$(RATCONF) menuconfig

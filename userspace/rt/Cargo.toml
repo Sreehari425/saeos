@@ -1,16 +1,11 @@
-# `per-package-target`: user programs always build for the bare x86_64
-# target, even from the workspace root.
-cargo-features = ["per-package-target"]
-
 [package]
 name = "saeos-rt"
 version = "0.1.0"
 edition.workspace = true
-default-target = "x86_64-unknown-none"
 
 [lib]
 path = "src/lib.rs"
-# no_std, for the bare target: no test harness.
+# no_std, for the SaeOS target: no test harness.
 test = false
 bench = false
 doctest = false

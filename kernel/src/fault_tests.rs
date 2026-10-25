@@ -5,9 +5,12 @@
 #[cfg(any(
     feature = "mm-guard-test",
     feature = "fault-test",
-    feature = "panic-lock-test"
+    feature = "panic-lock-test",
+    feature = "user-test"
 ))]
 pub fn spawn() {
+    #[cfg(feature = "user-test")]
+    crate::scheduler::spawn_kernel_task(fpu_noise_task, "fpu-noise");
     #[cfg(feature = "mm-guard-test")]
     crate::scheduler::spawn_kernel_task(guard_test_task, "guard-test");
     #[cfg(feature = "fault-test")]
@@ -48,4 +51,40 @@ fn panic_lock_test_task() -> ! {
     let _console = crate::drivers::console::lock_for_panic_test();
     let _serial = crate::drivers::serial::SERIAL1.lock();
     panic!("panic-lock-test: deliberate panic");
+}
+
+/// Competition for the user-test init: without another runnable task, a
+/// timer interrupt just resumes the same task and FPU state is never
+/// switched. This task keeps loading its own register values and rounding
+/// mode (round down; usertest uses round toward zero) and alternates
+/// running with sleeping, so the user program is switched out and back in
+/// constantly. If the kernel failed to save or restore user FPU state, the
+/// program would see these values.
+#[cfg(feature = "user-test")]
+fn fpu_noise_task() -> ! {
+    #[repr(C, align(16))]
+    struct Noise([u8; 256], u32);
+    let noise = Noise([0xa5; 256], 0x1f80 | (1 << 13));
+    loop {
+        unsafe {
+            core::arch::asm!(
+                "movdqu xmm0, [{p}]", "movdqu xmm1, [{p} + 16]",
+                "movdqu xmm2, [{p} + 32]", "movdqu xmm3, [{p} + 48]",
+                "movdqu xmm4, [{p} + 64]", "movdqu xmm5, [{p} + 80]",
+                "movdqu xmm6, [{p} + 96]", "movdqu xmm7, [{p} + 112]",
+                "movdqu xmm8, [{p} + 128]", "movdqu xmm9, [{p} + 144]",
+                "movdqu xmm10, [{p} + 160]", "movdqu xmm11, [{p} + 176]",
+                "movdqu xmm12, [{p} + 192]", "movdqu xmm13, [{p} + 208]",
+                "movdqu xmm14, [{p} + 224]", "movdqu xmm15, [{p} + 240]",
+                "ldmxcsr [{p} + 256]",
+                p = in(reg) &noise,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        let until = crate::time::ticks() + 2;
+        while crate::time::ticks() < until {
+            core::hint::spin_loop();
+        }
+        crate::scheduler::sleep_ms(1);
+    }
 }

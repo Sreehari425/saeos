@@ -1,0 +1,33 @@
+{
+  "arch": "x86_64",
+  "os": "saeos",
+  "llvm-target": "x86_64-unknown-none-elf",
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+  "target-pointer-width": 64,
+  "max-atomic-width": 64,
+  "cpu": "x86-64",
+  "features": "+sse,+sse2",
+  "code-model": "small",
+  "relocation-model": "static",
+  "position-independent-executables": false,
+  "static-position-independent-executables": false,
+  "linker": "rust-lld",
+  "linker-flavor": "gnu-lld",
+  "pre-link-args": {
+    "gnu-lld": ["-static", "--no-pie", "--no-dynamic-linker"]
+  },
+  "panic-strategy": "abort",
+  "has-thread-local": true,
+  "tls-model": "local-exec",
+  "plt-by-default": false,
+  "relro-level": "off",
+  "stack-probes": { "kind": "inline" },
+  "executables": true,
+  "dynamic-linking": false,
+  "crt-objects-fallback": "false",
+  "metadata": {
+    "description": "SaeOS user programs (static, SSE, Linux syscall ABI)",
+    "host_tools": false,
+    "std": false
+  }
+}

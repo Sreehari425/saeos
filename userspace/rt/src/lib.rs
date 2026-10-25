@@ -1,6 +1,10 @@
 //! The SaeOS user runtime: program entry, raw syscalls (Linux x86_64
 //! convention), and a panic handler. No allocation, no libc.
 //!
+//! Programs build for `userspace/x86_64-saeos.json` (`make userspace`): a
+//! static, non-PIE target with SSE (hardware floating point; the kernel
+//! saves each process's FPU state), linked with `userspace/user.ld`.
+//!
 //! ```text
 //! kernel exec -> _start (rsp = argc, argv..., NULL, envp..., NULL, auxv...)
 //!             -> start(stack) -> saeos_main(Args) -> exit(code)

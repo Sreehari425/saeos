@@ -92,9 +92,10 @@ fn no_working_init(reason: core::fmt::Arguments) -> ! {
 pub fn init_exited(status: ExitStatus) -> ! {
     let description = describe(status);
     crate::kinfo!(
-        "init exited: {} (user-mode preemptions: {})",
+        "init exited: {} (user-mode preemptions: {}, context switches: {})",
         description,
-        crate::scheduler::user_preemptions()
+        crate::scheduler::user_preemptions(),
+        crate::scheduler::stats().context_switches
     );
     #[cfg(feature = "user-test")]
     {

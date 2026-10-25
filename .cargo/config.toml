@@ -8,3 +8,8 @@ runner = "scripts/runner-uefi-x86_64.sh"
 # The PE build unwinds with the Windows x64 tables in .pdata instead of a
 # plain frame-pointer chain (see kernel/src/backtrace.rs), so emit them.
 rustflags = ["-C", "force-frame-pointers=yes", "-C", "force-unwind-tables=yes"]
+
+# User programs (`make userspace`): the layout every SaeOS program shares.
+# Paths are relative to the workspace root, where the build runs.
+[target.x86_64-saeos]
+rustflags = ["-C", "link-arg=-Tuserspace/user.ld"]

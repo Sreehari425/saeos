@@ -10,5 +10,15 @@ members = [
     "userspace/usertest",
 ]
 
+# Plain `cargo build`/`cargo clippy` cover the kernel and host tools. User
+# programs only build for userspace/x86_64-saeos.json with core rebuilt
+# from source: `make userspace` (and `make clippy`) handle them.
+default-members = [
+    "kernel",
+    "tools/mkinitramfs",
+    "tools/mm-model",
+    "tools/ratconf",
+]
+
 [workspace.package]
 edition = "2024"

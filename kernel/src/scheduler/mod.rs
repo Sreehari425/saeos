@@ -168,7 +168,8 @@ pub fn init() {
     #[cfg(any(
         feature = "mm-guard-test",
         feature = "fault-test",
-        feature = "panic-lock-test"
+        feature = "panic-lock-test",
+        feature = "user-test"
     ))]
     crate::fault_tests::spawn();
 }

@@ -28,13 +28,27 @@
         cargoManifest = builtins.fromTOML (builtins.readFile ./kernel/Cargo.toml);
         packageMetadata = cargoManifest.package;
 
+        # User programs build `core` and `alloc` from source (-Zbuild-std),
+        # which needs the standard library workspace's own dependencies.
+        # Pure evaluation cannot read the toolchain's library/Cargo.lock, so
+        # a copy is kept in the repository (`make check` verifies it still
+        # matches rust-toolchain.toml's toolchain) and vendored next to ours.
+        vendor = pkgs.symlinkJoin {
+          # The name the generated cargo config points at.
+          name = "cargo-vendor-dir";
+          paths = [
+            (rustPlatform.importCargoLock { lockFile = ./Cargo.lock; })
+            (rustPlatform.importCargoLock { lockFile = ./userspace/std-library.Cargo.lock; })
+          ];
+        };
+
         cargoBuild =
           target:
           rustPlatform.buildRustPackage {
             pname = "${packageMetadata.name}-${target}";
             version = packageMetadata.version;
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoDeps = vendor;
 
             nativeBuildInputs = with pkgs; [
               nasm
@@ -62,7 +76,10 @@
               cargo build --frozen --locked -p ${packageMetadata.name} --target ${target} "''${feature_args[@]}"
               # The initramfs ships next to the kernel, not inside it; it
               # carries the user programs.
-              cargo build --frozen --locked --release -p hello
+              cargo build --frozen --locked --release -p hello -p usertest \
+                -Zjson-target-spec -Zbuild-std=core,alloc \
+                -Zbuild-std-features=compiler-builtins-mem \
+                --target userspace/x86_64-saeos.json
               cargo run --frozen --locked -p mkinitramfs -- build initramfs.toml -o initramfs.cpio
               runHook postBuild
             '';

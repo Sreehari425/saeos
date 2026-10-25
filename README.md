@@ -136,11 +136,13 @@ make check         # Check BIOS and UEFI kernel builds
 make fmt-check     # Check formatting
 make clippy        # Run Clippy with warnings denied
 make test          # All tests below plus the fault tests, on BIOS and UEFI
+make user-test     # Ring-3 tests: a test program runs as init (PID 1)
 make mm-test       # Host tests for the buddy allocator, scheduler model, and lock order
 make miri          # The same host tests under Miri (undefined-behaviour checks)
 make mm-stress     # Boot with MM self-tests and stress runs (also mm-stress-uefi)
 make mm-guard-test # Overflow a kernel stack on purpose and check it is reported
 make asm           # Emit BIOS and UEFI assembly
+make userspace     # Build user programs for userspace/x86_64-saeos.json
 make initramfs     # Build target/initramfs.cpio from initramfs.toml
 make clean         # Remove Cargo build artifacts
 ```

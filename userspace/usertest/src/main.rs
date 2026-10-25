@@ -80,11 +80,87 @@ fn main(args: Args) -> i32 {
     if close(fd as u32) != 0 {
         fail(8, b"close");
     }
-    // Spin in user mode long enough for timer preemptions to land here.
-    let start = rdtsc();
-    while rdtsc().wrapping_sub(start) < 400_000_000 {
-        core::hint::spin_loop();
-    }
+    floating_point();
     say(b"usertest: PASS\n");
     0
+}
+
+fn mxcsr() -> u32 {
+    let mut value = 0u32;
+    unsafe { core::arch::asm!("stmxcsr [{}]", in(reg) &raw mut value, options(nostack)) };
+    value
+}
+
+fn set_mxcsr(value: u32) {
+    unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack)) };
+}
+
+/// One step of a computation whose result depends on every bit of the
+/// previous value and on the rounding mode.
+fn step(x: f64) -> f64 {
+    core::hint::black_box(x * 1.000_000_119 + 0.333_333_333_333_3) / 1.000_000_071
+}
+
+/// Hardware floating point (SSE, from the SaeOS target) must survive
+/// preemption: the kernel saves this process's registers and MXCSR when it
+/// switches away and restores them when it comes back. Kernel tasks run
+/// with a clean FPU state, so a missing save or restore changes the result.
+fn floating_point() {
+    // Round toward zero: MXCSR is per-process state too.
+    let rounding = 0x1f80 | (3 << 13);
+    set_mxcsr(rounding);
+    // The reference result, computed without waiting.
+    const STEPS: u32 = 2_000;
+    let mut expected = 1.0f64;
+    for _ in 0..STEPS {
+        expected = step(expected);
+    }
+    // The same computation, spread over long enough for many timer
+    // preemptions to land in the middle of it.
+    let mut value = 1.0f64;
+    let start = rdtsc();
+    for _ in 0..STEPS {
+        value = step(value);
+        let pause = rdtsc();
+        while rdtsc().wrapping_sub(pause) < 200_000 {
+            core::hint::spin_loop();
+        }
+    }
+    if rdtsc().wrapping_sub(start) < 300_000_000 {
+        fail(20, b"floating-point spin too short to be preempted");
+    }
+    if value.to_bits() != expected.to_bits() {
+        fail(21, b"f64 result changed across preemption");
+    }
+    // The low six bits are sticky exception flags (inexact divisions set
+    // the precision flag); the control bits must be exactly ours.
+    if mxcsr() & !0x3f != rounding {
+        fail(22, b"MXCSR rounding mode lost across preemption");
+    }
+    // And MXCSR really drives the arithmetic (it would not in a soft-float
+    // build): rounding down and up give different results for any inexact
+    // division.
+    // Set the mode and divide in one asm block: LLVM assumes the default
+    // FP environment, so ordinary Rust divisions may be moved (or merged)
+    // across an MXCSR write.
+    let third = |mode: u32| {
+        let control = 0x1f80u32 | (mode << 13);
+        let mut value = 1.0f64;
+        unsafe {
+            core::arch::asm!(
+                "ldmxcsr [{control}]",
+                "divsd {value}, {divisor}",
+                control = in(reg) &control,
+                value = inout(xmm_reg) value,
+                divisor = in(xmm_reg) 3.0f64,
+                options(nostack),
+            );
+        }
+        value
+    };
+    let (down, up) = (third(1), third(2));
+    if down.to_bits() == up.to_bits() {
+        fail(23, b"MXCSR rounding mode has no effect (soft-float build?)");
+    }
+    set_mxcsr(0x1f80);
 }
