@@ -93,3 +93,60 @@ saeos_start_interrupt_context:
     pop rbx
     pop rax
     iretq
+
+extern saeos_page_fault_rust
+
+; Page fault (#PF) entry. The CPU pushed the error code above its return
+; frame. Save every general-purpose register (same order as the timer stub)
+; and hand Rust a pointer to the whole frame, so it can resume a faulting
+; user-memory copy at its fixup label by rewriting the saved RIP.
+global saeos_page_fault_entry
+saeos_page_fault_entry:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    ; RBX is saved above, so it can hold the unaligned stack pointer.
+    mov rbx, rsp
+%ifidn __OUTPUT_FORMAT__, elf64
+    ; BIOS backtraces walk frame pointers: add a frame record whose return
+    ; address is the faulting RIP (above the 15 saved registers and the
+    ; error code), so the function that faulted is shown. The UEFI build
+    ; unwinds with .pdata and finds it on its own.
+    push qword [rsp + 16 * 8]
+    push rbp
+    mov rbp, rsp
+%endif
+    and rsp, -16
+    call saeos_page_fault_rust
+    mov rsp, rbx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ; Drop the error code.
+    add rsp, 8
+    iretq

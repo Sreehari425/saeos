@@ -60,7 +60,9 @@
                 feature_args=(--features "$features")
               fi
               cargo build --frozen --locked -p ${packageMetadata.name} --target ${target} "''${feature_args[@]}"
-              # The initramfs ships next to the kernel, not inside it.
+              # The initramfs ships next to the kernel, not inside it; it
+              # carries the user programs.
+              cargo build --frozen --locked --release -p hello
               cargo run --frozen --locked -p mkinitramfs -- build initramfs.toml -o initramfs.cpio
               runHook postBuild
             '';

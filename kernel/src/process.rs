@@ -71,6 +71,9 @@ impl ProcessControlBlock {
 pub struct ProcessTable {
     processes: Vec<ProcessControlBlock>,
     next_id: u64,
+    /// Address spaces of reaped processes, for the caller to free once the
+    /// table lock is released (page-table teardown takes the frame lock).
+    released_spaces: Vec<AddressSpaceId>,
 }
 
 #[cfg(test)]
@@ -121,6 +124,32 @@ mod tests {
     }
 
     #[test]
+    fn reaping_releases_the_address_space_exactly_once() {
+        let mut table = ProcessTable::new();
+        let parent = table.create(None, TaskId(1));
+        let child = table
+            .create_child(parent, Some(AddressSpaceId(42)), TaskId(2))
+            .unwrap();
+        table.exit(child, ExitStatus(7)).unwrap();
+        table.remove_thread(child, TaskId(2)).unwrap();
+        assert!(
+            table.take_released_spaces().is_empty(),
+            "parent has not collected it"
+        );
+        assert_eq!(table.wait_child(parent, child), Ok(ExitStatus(7)));
+        assert_eq!(table.take_released_spaces(), [AddressSpaceId(42)]);
+        assert!(table.take_released_spaces().is_empty());
+        assert!(!table.reap_if_empty(child), "already gone");
+        assert!(table.take_released_spaces().is_empty());
+        // A process without its own space releases nothing.
+        let kernel = table.create(None, TaskId(3));
+        table.exit(kernel, ExitStatus(0)).unwrap();
+        table.remove_thread(kernel, TaskId(3)).unwrap();
+        assert!(table.reap_if_empty(kernel));
+        assert!(table.take_released_spaces().is_empty());
+    }
+
+    #[test]
     fn child_waiter_registration_rejects_duplicates_and_unknown_removal() {
         let mut table = ProcessTable::new();
         let parent = table.create(None, TaskId(1));
@@ -149,6 +178,7 @@ impl ProcessTable {
         Self {
             processes: Vec::new(),
             next_id: 1,
+            released_spaces: Vec::new(),
         }
     }
 
@@ -259,7 +289,10 @@ impl ProcessTable {
             .iter()
             .position(|record| record.id == process)
         {
-            self.processes.swap_remove(index);
+            let record = self.processes.swap_remove(index);
+            if let Some(space) = record.address_space {
+                self.released_spaces.push(space);
+            }
             for parent in &mut self.processes {
                 parent.children.retain(|child| *child != process);
             }
@@ -291,6 +324,12 @@ impl ProcessTable {
         // continue to keep the record alive.
         self.reap_if_empty(child);
         Ok(status)
+    }
+
+    /// Address spaces whose processes were reaped since the last call. Each
+    /// is returned exactly once; the caller frees it outside the lock.
+    pub fn take_released_spaces(&mut self) -> Vec<AddressSpaceId> {
+        core::mem::take(&mut self.released_spaces)
     }
 
     pub fn retain(&mut self, process: ProcessId) -> Result<(), ProcessError> {

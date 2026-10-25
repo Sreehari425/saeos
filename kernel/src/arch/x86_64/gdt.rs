@@ -51,8 +51,63 @@ struct GdtDescriptor {
     base: u64,
 }
 
-// 64-bit GDT: Null (0), Code (0x08), Data (0x10), TSS (0x18, takes 2 slots = 16 bytes)
-static mut GDT: [u64; 5] = [0; 5];
+/// Segment selectors. The user pair sits directly above the kernel pair in
+/// the order `SYSRET` requires: it loads SS from `STAR[63:48] + 8` and CS
+/// from `STAR[63:48] + 16`, so `STAR[63:48] = KERNEL_DATA` will select
+/// `USER_DATA` and `USER_CODE` (with RPL 3).
+pub const KERNEL_CODE: u16 = 0x08;
+pub const KERNEL_DATA: u16 = 0x10;
+pub const USER_DATA: u16 = 0x18 | 3;
+pub const USER_CODE: u16 = 0x20 | 3;
+pub const TSS_SELECTOR: u16 = 0x28;
+
+const GDT_ENTRIES: usize = 7;
+/// Null, kernel code, kernel data, user data, user code, TSS (two slots).
+static mut GDT: [u64; GDT_ENTRIES] = [0; GDT_ENTRIES];
+
+/// The descriptors `init` installs, for the boot test to compare against.
+pub const KERNEL_CODE_DESCRIPTOR: u64 = 0x0020_9A00_0000_0000;
+pub const KERNEL_DATA_DESCRIPTOR: u64 = 0x0000_9200_0000_0000;
+/// Present, DPL 3, writable data.
+pub const USER_DATA_DESCRIPTOR: u64 = 0x0000_F200_0000_0000;
+/// Present, DPL 3, executable, long mode.
+pub const USER_CODE_DESCRIPTOR: u64 = 0x0020_FA00_0000_0000;
+
+/// Kernel stack the CPU switches to when an interrupt or exception arrives
+/// in user mode. Set on every task switch to the incoming task's stack top.
+pub fn set_kernel_stack(top: u64) {
+    unsafe {
+        (&raw mut TSS.privilege_stack_table)
+            .cast::<u64>()
+            .write_unaligned(top);
+    }
+}
+
+pub fn kernel_stack() -> u64 {
+    unsafe {
+        (&raw const TSS.privilege_stack_table)
+            .cast::<u64>()
+            .read_unaligned()
+    }
+}
+
+/// The live GDT entries and task register, read back from the CPU.
+pub fn installed() -> ([u64; GDT_ENTRIES], u16) {
+    let mut descriptor = GdtDescriptor { limit: 0, base: 0 };
+    let task_register: u16;
+    unsafe {
+        core::arch::asm!("sgdt [{}]", in(reg) &raw mut descriptor, options(nostack, preserves_flags));
+        core::arch::asm!("str {0:x}", out(reg) task_register, options(nomem, nostack, preserves_flags));
+    }
+    let base = descriptor.base;
+    let mut entries = [0u64; GDT_ENTRIES];
+    if usize::from(descriptor.limit) + 1 == size_of::<[u64; GDT_ENTRIES]>() {
+        for (index, entry) in entries.iter_mut().enumerate() {
+            *entry = unsafe { (base as *const u64).add(index).read() };
+        }
+    }
+    (entries, task_register)
+}
 
 pub fn init() {
     unsafe {
@@ -68,13 +123,12 @@ pub fn init() {
         // Entry 0: Null descriptor
         GDT[0] = 0;
 
-        // Entry 1: 64-bit Kernel Code segment (Selector 0x08)
-        GDT[1] = 0x00209A0000000000;
+        GDT[1] = KERNEL_CODE_DESCRIPTOR;
+        GDT[2] = KERNEL_DATA_DESCRIPTOR;
+        GDT[3] = USER_DATA_DESCRIPTOR;
+        GDT[4] = USER_CODE_DESCRIPTOR;
 
-        // Entry 2: 64-bit Kernel Data segment (Selector 0x10)
-        GDT[2] = 0x0000920000000000;
-
-        // Entries 3 & 4: TSS Descriptor (16 bytes in 64-bit mode, Selector 0x18)
+        // Entries 5 & 6: TSS descriptor (16 bytes in long mode).
         let tss_ptr = (&raw const TSS) as u64;
         let tss_limit = (size_of::<TaskStateSegment>() - 1) as u64;
 
@@ -83,12 +137,11 @@ pub fn init() {
         tss_low |= 0x0000_8900_0000_0000; // Byte 5: Present (1), Ring 0 (00), Type 0x9 (64-bit TSS)
         tss_low |= ((tss_limit >> 16) & 0x0F) << 48; // Byte 6: Limit 16..19
         tss_low |= ((tss_ptr >> 24) & 0xFF) << 56; // Byte 7: Base 24..31
-        GDT[3] = tss_low;
-
-        GDT[4] = tss_ptr >> 32;
+        GDT[5] = tss_low;
+        GDT[6] = tss_ptr >> 32;
 
         let gdt_descriptor = GdtDescriptor {
-            limit: (size_of::<[u64; 5]>() - 1) as u16,
+            limit: (size_of::<[u64; GDT_ENTRIES]>() - 1) as u16,
             base: (&raw const GDT) as *const u64 as u64,
         };
 
@@ -111,15 +164,15 @@ pub fn init() {
             "mov ss, {data_sel:x}",
             "mov fs, {data_sel:x}",
             "mov gs, {data_sel:x}",
-            code_sel = in(reg) 0x08u64,
-            data_sel = in(reg) 0x10u16,
+            code_sel = in(reg) u64::from(KERNEL_CODE),
+            data_sel = in(reg) KERNEL_DATA,
             tmp = out(reg) _,
         );
 
         // Load Task State Segment (TSS) into Task Register (TR)
         core::arch::asm!(
             "ltr {tss_sel:x}",
-            tss_sel = in(reg) 0x18u16,
+            tss_sel = in(reg) TSS_SELECTOR,
             options(nomem, nostack, preserves_flags)
         );
     }

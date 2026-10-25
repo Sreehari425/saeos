@@ -10,8 +10,9 @@ use crate::sync::IrqSpinMutex;
 use alloc::vec::Vec;
 
 use crate::task::{
-    BlockReason, DispatchDecision, ExitStatus, ProcessId, ResumeContext, ResumeKind, Scheduler,
-    SchedulerStats, StackStorage, TaskEntry, TaskId, TaskSnapshot, VoluntaryContext, WaitQueue,
+    BlockReason, DispatchDecision, ExitStatus, FpuState, ProcessId, ResumeContext, ResumeKind,
+    Scheduler, SchedulerStats, StackStorage, SwitchTarget, TaskEntry, TaskId, TaskSnapshot,
+    VoluntaryContext, WaitQueue,
 };
 
 mod dispatch;
@@ -21,8 +22,13 @@ mod selftest;
 mod wait;
 
 pub use dispatch::TimerDispatch;
-use dispatch::{Dispatch, assert_switch_boundary_unlocked, dispatch_for, switch_dispatch};
-pub use lifecycle::{collect_child_status, exit_current, register_child_waiter, spawn_kernel_task};
+use dispatch::{
+    Dispatch, assert_switch_boundary_unlocked, dispatch_for, prepare_switch, switch_dispatch,
+};
+pub use lifecycle::{
+    collect_child_status, exit_current, register_child_waiter, release_reaped_spaces,
+    spawn_in_new_process, spawn_kernel_task, wait_child,
+};
 #[cfg(feature = "scheduler-selftest")]
 pub use selftest::{selftest_passed, start_selftest};
 pub use wait::exit;
@@ -38,9 +44,12 @@ static WAIT_QUEUE_SNAPSHOT: IrqSpinMutex<Vec<(u64, usize)>> = IrqSpinMutex::new(
 pub const REAPER_WAIT_ID: u64 = 1;
 pub const KEYBOARD_WAIT_ID: u64 = 2;
 pub const BOOT_TEST_WAIT_ID: u64 = 3;
+pub const CHILD_WAIT_ID: u64 = 4;
 
 /// The reaper sleeps here; `exit_current` wakes it.
 pub static REAPER_WAIT: IrqSpinMutex<WaitQueue> = IrqSpinMutex::new(WaitQueue::new(REAPER_WAIT_ID));
+/// Parents waiting for a child; woken whenever the reaper retires a thread.
+pub static CHILD_WAIT: IrqSpinMutex<WaitQueue> = IrqSpinMutex::new(WaitQueue::new(CHILD_WAIT_ID));
 
 /// Scheduler tracing at `Debug` level; `loglevel debug` in the shell (or the
 /// `scheduler-debug` feature, which makes Debug the default) turns it on.
@@ -196,6 +205,7 @@ pub fn start_first_task() -> ! {
             &task.cpu_context as *const VoluntaryContext,
             task.name,
             task.kernel_stack,
+            task.switch_target(),
         )
     });
     scheduler_debug(format_args!(
@@ -214,6 +224,8 @@ pub fn start_first_task() -> ! {
         next_context.1
     );
     let mut boot_context = VoluntaryContext::ZERO;
+    // The boot context is never resumed, so its FPU state is not saved.
+    unsafe { prepare_switch(core::ptr::null_mut(), &next_context.3) };
     unsafe { context::switch_context(&mut boot_context, &*next_context.0) };
     unreachable!("the boot context must never be scheduled");
 }
@@ -237,6 +249,9 @@ pub fn reaper_task() -> ! {
                 table.reap_if_empty(process);
             }
             // Dropping `task` here frees its stack outside every lock.
+            drop(task);
+            release_reaped_spaces();
+            wake_all(&CHILD_WAIT);
         }
     }
 }

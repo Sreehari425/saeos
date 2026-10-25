@@ -28,6 +28,9 @@ run inside QEMU. The current codebase includes:
   per-process file descriptors
 - A cpio initramfs loaded by the bootloader, and a Linux-style kernel
   command line (`/proc/cmdline`)
+- Userspace groundwork, tested in ring 0: Linux-numbered syscalls, safe
+  user-memory access (SMEP/SMAP when available), per-task FPU state, and an
+  ELF loader for the programs in `userspace/`
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
 - PIT, RTC, TSC, and local APIC timer support
@@ -186,6 +189,7 @@ kernel/src/drivers/ Console and hardware drivers
 kernel/src/time/    Timer implementations
 tools/ratconf/      Configuration tool
 tools/mkinitramfs/  Initramfs (cpio) builder
+userspace/          User programs and their runtime (installed in /bin)
 scripts/            QEMU runner scripts
 configs/            Example configuration files
 ```

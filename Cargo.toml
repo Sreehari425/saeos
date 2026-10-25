@@ -5,6 +5,8 @@ members = [
     "tools/mkinitramfs",
     "tools/mm-model",
     "tools/ratconf",
+    "userspace/hello",
+    "userspace/rt",
 ]
 
 [workspace.package]

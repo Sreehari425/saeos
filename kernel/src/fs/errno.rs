@@ -1,13 +1,18 @@
-//! Error numbers, with Linux's values so syscalls can return `-(errno)`
-//! unchanged once userspace exists.
+//! Error numbers, with Linux's values so syscalls return `-(errno)`
+//! unchanged.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Errno {
     ENOENT = 2,
     EIO = 5,
+    E2BIG = 7,
+    ENOEXEC = 8,
     EBADF = 9,
+    ECHILD = 10,
     ENOMEM = 12,
+    EACCES = 13,
+    EFAULT = 14,
     EBUSY = 16,
     EEXIST = 17,
     EXDEV = 18,
@@ -32,8 +37,13 @@ impl Errno {
         match self {
             Errno::ENOENT => "ENOENT",
             Errno::EIO => "EIO",
+            Errno::E2BIG => "E2BIG",
+            Errno::ENOEXEC => "ENOEXEC",
             Errno::EBADF => "EBADF",
+            Errno::ECHILD => "ECHILD",
             Errno::ENOMEM => "ENOMEM",
+            Errno::EACCES => "EACCES",
+            Errno::EFAULT => "EFAULT",
             Errno::EBUSY => "EBUSY",
             Errno::EEXIST => "EEXIST",
             Errno::EXDEV => "EXDEV",

@@ -26,18 +26,23 @@ QEMU_TEST := INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE)' ./scrip
 BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL)
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
 
-.PHONY: initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
+.PHONY: userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
 .PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test test help
 
 all: bios
 
+# User programs, linked with userspace/user.ld; installed by initramfs.toml.
+USER_PROGRAMS := hello
+userspace:
+	cargo build --release $(addprefix -p ,$(USER_PROGRAMS))
+
 # The normal image must never carry the test fixtures.
-initramfs:
+initramfs: userspace
 	$(MKINITRAMFS) build initramfs.toml -o $(INITRAMFS_IMAGE)
 	@if $(MKINITRAMFS) list $(INITRAMFS_IMAGE) | grep -q ' /test/'; then \
 		echo "initramfs: $(INITRAMFS_IMAGE) contains /test" >&2; exit 1; fi
 
-initramfs-test:
+initramfs-test: userspace
 	$(MKINITRAMFS) build initramfs.toml -o $(INITRAMFS_TEST_IMAGE) --test-fixtures
 
 bios: olddefconfig
@@ -101,6 +106,7 @@ check: olddefconfig
 	cargo check -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
 	cargo check -p ratconf
 	cargo check -p mkinitramfs
+	cargo check -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS))
 
 mm-test:
 	cargo test -p mm-model
@@ -115,11 +121,16 @@ miri:
 # kernel's own verdict through isa-debug-exit.
 test: mm-test miri boot-test mm-guard-test fault-test panic-lock-test
 
+# Each target boots twice: on QEMU's default CPU, and with -cpu max, where
+# SMEP/SMAP exist and the user-memory test checks they are enforced.
+SMAP_EXPECT := QEMU_TEST_EXPECT="uaccess smap=true smep=true"
 boot-test: initramfs-test
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test
 	$(QEMU_TEST) $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
+	$(SMAP_EXPECT) $(QEMU_TEST) $(BIOS_TEST_IMAGE) -m $(TEST_MEM) -cpu max
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),boot-test
 	$(QEMU_TEST) $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
+	$(SMAP_EXPECT) $(QEMU_TEST) $(UEFI_TEST_IMAGE) -m $(TEST_MEM) -cpu max
 
 mm-stress: initramfs-test
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test,mm-stress,mm-allocator-stats,paging-debug
@@ -158,6 +169,7 @@ clippy: olddefconfig
 	cargo clippy -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS) -- -D warnings
 	cargo clippy -p ratconf -- -D warnings
 	cargo clippy -p mkinitramfs --all-targets -- -D warnings
+	cargo clippy -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS)) -- -D warnings
 
 menuconfig:
 	$(RATCONF) menuconfig
@@ -196,7 +208,7 @@ help:
 	@echo "SaeOS build targets:"
 	@echo "  all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check"
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\""
-	@echo "  initramfs initramfs-test (from initramfs.toml)"
+	@echo "  userspace initramfs initramfs-test (from initramfs.toml)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
 	@echo "  test boot-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"

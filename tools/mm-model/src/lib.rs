@@ -21,6 +21,14 @@ mod buddy_tests;
 pub mod cmdline;
 #[cfg(test)]
 mod cmdline_tests;
+#[path = "../../../kernel/src/exec/elf.rs"]
+pub mod elf;
+#[path = "../../../kernel/src/exec/stack.rs"]
+pub mod exec_stack;
+#[cfg(test)]
+mod exec_tests;
+#[cfg(test)]
+mod fake_user;
 #[path = "../../../kernel/src/fs/mod.rs"]
 pub mod fs;
 #[cfg(test)]
@@ -34,6 +42,14 @@ pub mod holds;
 mod holds_tests;
 #[path = "../../../kernel/src/klog_ring.rs"]
 pub mod klog_ring;
+#[path = "../../../kernel/src/syscall/mod.rs"]
+pub mod syscall;
+#[cfg(test)]
+mod syscall_tests;
+#[path = "../../../kernel/src/mm/uaccess.rs"]
+pub mod uaccess;
+#[cfg(test)]
+mod uaccess_tests;
 pub use heap_model::*;
 mod lock_model;
 #[path = "../../../kernel/src/task/mod.rs"]

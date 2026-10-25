@@ -103,7 +103,7 @@ pub fn init() {
             (11, segment_not_present_handler as *const () as u64),
             (12, stack_segment_handler as *const () as u64),
             (13, general_protection_fault_handler as *const () as u64),
-            (14, page_fault_handler as *const () as u64),
+            (14, context::PAGE_FAULT_ENTRY as *const () as u64),
             (16, x87_floating_point_handler as *const () as u64),
             (17, alignment_check_handler as *const () as u64),
             (19, simd_floating_point_handler as *const () as u64),
@@ -360,8 +360,28 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error
     report_exception(8, "DOUBLE FAULT (#DF)", Some(error_code), &frame)
 }
 
-extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
+/// Registers saved by `saeos_page_fault_entry`, then the CPU's frame.
+#[repr(C)]
+pub struct PageFaultFrame {
+    pub registers: [u64; 15],
+    pub error_code: u64,
+    pub instruction_pointer: u64,
+    pub code_segment: u64,
+    pub cpu_flags: u64,
+    pub stack_pointer: u64,
+    pub stack_segment: u64,
+}
+
+/// Called by `saeos_page_fault_entry` with interrupts disabled. A fault in
+/// a user-memory copy routine resumes at its fixup (the copy returns
+/// EFAULT); anything else is a kernel bug and is reported as before.
+#[unsafe(no_mangle)]
+extern "sysv64" fn saeos_page_fault_rust(frame: &mut PageFaultFrame) {
     let address = read_cr2();
+    if let Some(fixup) = crate::mm::uaccess::fixup_for(frame.instruction_pointer, address) {
+        frame.instruction_pointer = fixup;
+        return;
+    }
     // A large frame can touch the guard while RSP is still on the stack, in
     // which case the #PF itself is delivered normally.
     check_stack_overflow(address, frame.instruction_pointer);
@@ -369,8 +389,8 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
         format_args!(
             "[EXCEPTION 14: PAGE FAULT (#PF)] address={:#x} err={:#x} ({}) RIP={:#x} RSP={:#x} {}",
             address,
-            error_code,
-            PageFaultCause(error_code),
+            frame.error_code,
+            PageFaultCause(frame.error_code),
             frame.instruction_pointer,
             frame.stack_pointer,
             CurrentTask

@@ -128,6 +128,48 @@ pub struct InterruptContext {
     pub stack_segment: u64,
 }
 
+/// A task's x87/SSE register state in the `FXSAVE` layout (512 bytes,
+/// 16-byte aligned). The kernel itself is soft-float, so this is only ever
+/// live for code that uses floating point or SIMD (future user programs).
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+pub struct FpuState(pub [u8; 512]);
+
+impl FpuState {
+    /// The state after `fninit` plus the default MXCSR: x87 control word
+    /// 0x037f, all exceptions masked, empty register stack, zeroed `xmm`.
+    /// A new task starts from this, never from another task's registers.
+    pub const INITIAL: Self = {
+        let mut bytes = [0u8; 512];
+        let control_word = 0x037fu16.to_le_bytes();
+        bytes[0] = control_word[0];
+        bytes[1] = control_word[1];
+        let mxcsr = 0x1f80u32.to_le_bytes();
+        bytes[24] = mxcsr[0];
+        bytes[25] = mxcsr[1];
+        bytes[26] = mxcsr[2];
+        bytes[27] = mxcsr[3];
+        Self(bytes)
+    };
+}
+
+impl core::fmt::Debug for FpuState {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("FpuState { .. }")
+    }
+}
+
+/// Everything the CPU needs to run a task besides its registers: which page
+/// tables, which kernel stack an interrupt from user mode lands on, and its
+/// FPU state. Taken under the scheduler lock, applied after it is released.
+/// The pointer refers to the task's boxed TCB, which outlives the switch.
+#[derive(Clone, Copy, Debug)]
+pub struct SwitchTarget {
+    pub address_space: Option<AddressSpaceId>,
+    pub kernel_stack_top: u64,
+    pub fpu: *const FpuState,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KernelStack {
     pub base: u64,

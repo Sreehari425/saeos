@@ -15,6 +15,7 @@ unsafe extern "sysv64" {
     fn saeos_switch_context(current: *mut VoluntaryContext, next: *const VoluntaryContext);
     fn saeos_switch_to_interrupt_context(current: *mut VoluntaryContext, stack_pointer: u64);
     fn saeos_timer_interrupt_entry();
+    fn saeos_page_fault_entry();
     fn saeos_start_interrupt_context(stack_pointer: u64) -> !;
     fn saeos_start_kernel_task(entry: u64, stack_top: u64) -> !;
     fn saeos_task_bootstrap();
@@ -34,6 +35,7 @@ pub fn task_bootstrap_ip() -> u64 {
 }
 
 pub const TIMER_INTERRUPT_ENTRY: unsafe extern "sysv64" fn() = saeos_timer_interrupt_entry;
+pub const PAGE_FAULT_ENTRY: unsafe extern "sysv64" fn() = saeos_page_fault_entry;
 
 /// Switch between two kernel contexts.
 ///

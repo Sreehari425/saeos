@@ -336,6 +336,30 @@ impl Vfs {
         Ok(remaining)
     }
 
+    /// Like [`Self::readdir`], but offers entries one at a time, with each
+    /// entry's position, and advances only past those `take` accepts. The
+    /// first entry it refuses (say, because a `getdents` buffer is full)
+    /// stays next.
+    pub fn readdir_with(
+        &self,
+        files: &FileTable,
+        fd: Fd,
+        mut take: impl FnMut(u64, &DirEntry) -> bool,
+    ) -> FsResult<()> {
+        let file = files.get(fd)?;
+        if file.inode.kind() != InodeKind::Directory {
+            return Err(Errno::ENOTDIR);
+        }
+        let mut position = file.offset.lock();
+        for entry in file.inode.entries()?.iter().skip(*position as usize) {
+            if !take(*position, entry) {
+                break;
+            }
+            *position += 1;
+        }
+        Ok(())
+    }
+
     pub fn mkdir(&self, path: &str) -> FsResult<()> {
         let parent = match self.parent(path) {
             // `mkdir /` and `mkdir /a/..`: the target exists.

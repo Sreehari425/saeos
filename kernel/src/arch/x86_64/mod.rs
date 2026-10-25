@@ -2,6 +2,7 @@ pub mod acpi;
 pub mod apic;
 pub mod context;
 pub mod cpu;
+pub mod fpu;
 pub mod gdt;
 pub mod idt;
 pub mod interrupt_controller;
@@ -16,6 +17,10 @@ pub use interrupt_controller::ControllerKind;
 pub fn init(topology: Option<&acpi::InterruptTopology>) -> ControllerKind {
     // 1. Initialize 64-bit GDT & TSS (with IST 0 for Double Fault stack)
     gdt::init();
+    // x87/SSE on, with the clean state tasks start from.
+    fpu::init();
+    // SMEP/SMAP when the CPU has them.
+    crate::mm::uaccess::init_protections();
 
     // 2. Initialize 256-entry IDT
     idt::init();

@@ -33,6 +33,7 @@ pub mod mapping_model;
 pub mod multiboot;
 pub mod paging;
 pub mod selftest;
+pub mod uaccess;
 
 pub use frame::{
     PhysAddr, PhysFrame, VirtAddr, alloc_frame, alloc_frame_at_or_above, free_frame, reserve_range,

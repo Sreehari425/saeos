@@ -1,6 +1,7 @@
 use super::{
-    AddressSpaceId, BlockReason, EevdfEntity, ExitStatus, KernelStack, Nanos, ProcessId,
-    ResumeKind, StackStorage, TaskEntry, TaskId, TaskState, VirtualTime, VoluntaryContext,
+    AddressSpaceId, BlockReason, EevdfEntity, ExitStatus, FpuState, KernelStack, Nanos, ProcessId,
+    ResumeKind, StackStorage, SwitchTarget, TaskEntry, TaskId, TaskState, VirtualTime,
+    VoluntaryContext,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +67,8 @@ pub struct TaskControlBlock {
     pub slice_start: Nanos,
     pub is_idle: bool,
     pub name: &'static str,
+    /// x87/SSE registers while the task is not running.
+    pub fpu: FpuState,
 }
 
 impl TaskControlBlock {
@@ -89,6 +92,16 @@ impl TaskControlBlock {
             slice_start: 0,
             is_idle: false,
             name,
+            fpu: FpuState::INITIAL,
+        }
+    }
+
+    /// What the CPU must load to run this task (see [`SwitchTarget`]).
+    pub fn switch_target(&self) -> SwitchTarget {
+        SwitchTarget {
+            address_space: self.address_space,
+            kernel_stack_top: self.kernel_stack.top,
+            fpu: &self.fpu,
         }
     }
 

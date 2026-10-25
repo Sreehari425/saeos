@@ -40,9 +40,15 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
                 "timer interrupt frame is outside the current task's kernel stack"
             );
         }
+        let outgoing_fpu = previous.map_or(core::ptr::null_mut(), |current| {
+            &mut scheduler
+                .task_mut(current)
+                .expect("current task disappeared")
+                .fpu as *mut FpuState
+        });
         let next = scheduler.preempt(stack_pointer, now);
         let task = scheduler.task(next).expect("selected task disappeared");
-        let address_space = task.address_space;
+        let target = task.switch_target();
         let resume_kind = task.resume_kind;
         let interrupt_stack_pointer = task.interrupt_stack_pointer;
         let selected_stack = task.kernel_stack;
@@ -80,64 +86,79 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
                 .expect("selected task disappeared")
                 .resume_kind = ResumeKind::Voluntary;
         }
-        Some((dispatch, address_space))
+        Some((dispatch, outgoing_fpu, target))
     });
-    let Some((dispatch, address_space)) = selected else {
+    let Some((dispatch, outgoing_fpu, target)) = selected else {
         // Keep running the interrupted task.
         return TimerDispatch {
             context_pointer: stack_pointer,
             voluntary: 0,
         };
     };
-    crate::mm::address_space::activate_if_changed(address_space)
-        .expect("selected address space is not registered");
+    unsafe { prepare_switch(outgoing_fpu, &target) };
     dispatch
+}
+
+/// Load everything the incoming task needs besides its registers. Every
+/// switch goes through here: the timer path, voluntary switches, exit, and
+/// the first task. `outgoing_fpu` is null when the outgoing task never runs
+/// again (exit, boot).
+///
+/// # Safety
+/// The pointers in `target` and `outgoing_fpu` must refer to live TCBs, and
+/// the context switch must follow without any FPU use in between.
+pub(super) unsafe fn prepare_switch(outgoing_fpu: *mut FpuState, target: &SwitchTarget) {
+    crate::mm::address_space::activate_if_changed(target.address_space)
+        .expect("selected address space is not registered");
+    crate::arch::x86_64::gdt::set_kernel_stack(target.kernel_stack_top);
+    unsafe { crate::arch::x86_64::fpu::switch(outgoing_fpu, target.fpu) };
 }
 
 pub(super) enum Dispatch {
     Voluntary(
         *mut VoluntaryContext,
         *const VoluntaryContext,
-        Option<crate::task::AddressSpaceId>,
+        *mut FpuState,
+        SwitchTarget,
     ),
-    Interrupt(
-        *mut VoluntaryContext,
-        u64,
-        Option<crate::task::AddressSpaceId>,
-    ),
+    Interrupt(*mut VoluntaryContext, u64, *mut FpuState, SwitchTarget),
 }
 
 pub(super) fn dispatch_for(scheduler: &mut Scheduler, current: TaskId, next: TaskId) -> Dispatch {
-    let current_context = &mut scheduler
+    let current_task = scheduler
         .task_mut(current)
-        .expect("current task disappeared")
-        .cpu_context as *mut VoluntaryContext;
+        .expect("current task disappeared");
+    let current_context = &mut current_task.cpu_context as *mut VoluntaryContext;
+    let outgoing_fpu = &mut current_task.fpu as *mut FpuState;
+    let target = scheduler
+        .task(next)
+        .expect("next task disappeared")
+        .switch_target();
     let decision = scheduler
         .dispatch_decision(next)
         .expect("next task disappeared");
     match decision {
         DispatchDecision {
             resume_context: ResumeContext::Voluntary(_),
-            address_space,
             ..
         } => {
             let next_task = scheduler.task(next).expect("next task disappeared");
             Dispatch::Voluntary(
                 current_context,
                 &next_task.cpu_context as *const VoluntaryContext,
-                address_space,
+                outgoing_fpu,
+                target,
             )
         }
         DispatchDecision {
             resume_context: ResumeContext::Interrupt { stack_pointer },
-            address_space,
             ..
         } => {
             scheduler
                 .task_mut(next)
                 .expect("next task disappeared")
                 .resume_kind = ResumeKind::Voluntary;
-            Dispatch::Interrupt(current_context, stack_pointer, address_space)
+            Dispatch::Interrupt(current_context, stack_pointer, outgoing_fpu, target)
         }
     }
 }
@@ -145,17 +166,15 @@ pub(super) fn dispatch_for(scheduler: &mut Scheduler, current: TaskId, next: Tas
 pub(super) fn switch_dispatch(dispatch: Dispatch, interrupts_were_enabled: bool) {
     assert_switch_boundary_unlocked();
     match dispatch {
-        Dispatch::Voluntary(current, next, address_space) => unsafe {
-            crate::mm::address_space::activate_if_changed(address_space)
-                .expect("selected address space is not registered");
+        Dispatch::Voluntary(current, next, outgoing_fpu, target) => unsafe {
+            prepare_switch(outgoing_fpu, &target);
             context::switch_context(&mut *current, &*next);
             if interrupts_were_enabled {
                 cpu::sti();
             }
         },
-        Dispatch::Interrupt(current, stack_pointer, address_space) => unsafe {
-            crate::mm::address_space::activate_if_changed(address_space)
-                .expect("selected address space is not registered");
+        Dispatch::Interrupt(current, stack_pointer, outgoing_fpu, target) => unsafe {
+            prepare_switch(outgoing_fpu, &target);
             context::switch_to_interrupt_context(&mut *current, stack_pointer);
             if interrupts_were_enabled {
                 cpu::sti();

@@ -12,6 +12,7 @@ mod boot_test;
 pub mod cmdline;
 pub mod collections;
 pub mod drivers;
+pub mod exec;
 pub mod fatal;
 pub mod fs;
 #[macro_use]
@@ -23,6 +24,7 @@ pub mod process;
 pub mod scheduler;
 pub mod shell;
 pub mod sync;
+pub mod syscall;
 pub mod task;
 pub mod time;
 

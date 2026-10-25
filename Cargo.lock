@@ -160,6 +160,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hello"
+version = "0.1.0"
+dependencies = [
+ "saeos-rt",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -393,6 +400,10 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "saeos"
+version = "0.1.0"
+
+[[package]]
+name = "saeos-rt"
 version = "0.1.0"
 
 [[package]]

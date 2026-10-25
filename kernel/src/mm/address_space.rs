@@ -1,8 +1,10 @@
-//! Non-owning address-space registry used by task dispatch.
+//! Address-space registry used by task dispatch.
 //!
-//! The registry owns IDs and root-frame bindings only. `paging::AddressSpace`
-//! remains owned by the future process layer; the scheduler stores an
-//! `AddressSpaceId` and never frees an address space through this table.
+//! The scheduler and process table refer to address spaces by
+//! `AddressSpaceId`; this registry maps an id to its root frame for CR3
+//! switches. Spaces registered with [`register_owned`] are also owned here:
+//! the process that runs in one keeps its id, and when the process is
+//! reaped [`release`] tears the page tables and owned frames down.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -84,6 +86,50 @@ impl AddressSpaceRegistry {
 
 pub fn register(root: PhysFrame) -> AddressSpaceId {
     ADDRESS_SPACES.lock().register(root)
+}
+
+/// Owned spaces, by id. Separate from the root table so dispatch (which only
+/// needs roots) never contends with teardown.
+static OWNED: IrqSpinMutex<Vec<(AddressSpaceId, crate::mm::paging::AddressSpace)>> =
+    IrqSpinMutex::new(Vec::new());
+
+/// Register `space` and keep it until [`release`].
+pub fn register_owned(space: crate::mm::paging::AddressSpace) -> AddressSpaceId {
+    let id = register(space.root_frame());
+    OWNED.lock().push((id, space));
+    id
+}
+
+/// Run `operation` on an owned space (for example, to map more pages).
+pub fn with_owned<R>(
+    id: AddressSpaceId,
+    operation: impl FnOnce(&crate::mm::paging::AddressSpace) -> R,
+) -> Result<R, AddressSpaceError> {
+    let owned = OWNED.lock();
+    let (_, space) = owned
+        .iter()
+        .find(|(owned_id, _)| *owned_id == id)
+        .ok_or(AddressSpaceError::Unknown)?;
+    Ok(operation(space))
+}
+
+/// Unregister an owned space and free its page tables and owned frames.
+/// It must not be the active space (its process has exited, and the caller
+/// runs on another root).
+pub fn release(id: AddressSpaceId) -> Result<(), AddressSpaceError> {
+    assert_ne!(active(), Some(id), "releasing the active address space");
+    let space = {
+        let mut owned = OWNED.lock();
+        let index = owned
+            .iter()
+            .position(|(owned_id, _)| *owned_id == id)
+            .ok_or(AddressSpaceError::Unknown)?;
+        owned.swap_remove(index).1
+    };
+    unregister(id)?;
+    // Teardown takes the frame lock; no registry lock is held here.
+    drop(space);
+    Ok(())
 }
 
 pub fn unregister(id: AddressSpaceId) -> Result<PhysFrame, AddressSpaceError> {

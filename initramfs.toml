@@ -6,8 +6,8 @@
 source = "initramfs"
 target = "/"
 
-# A single file, e.g. a future userspace init:
-# [[file]]
-# source = "target/userspace/init"
-# target = "/bin/init"
-# mode = 0o755
+# User programs (built by `make userspace`).
+[[file]]
+source = "target/x86_64-unknown-none/release/hello"
+target = "/bin/hello"
+mode = 0o755
