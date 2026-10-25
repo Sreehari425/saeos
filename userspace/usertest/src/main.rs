@@ -51,6 +51,7 @@ fn main(args: Args) -> i32 {
             )
         }
         Some(b"tty") => tty(),
+        Some(b"shell") => shell(),
         Some(b"ud") => {
             say(b"usertest: executing ud2\n");
             unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
@@ -688,4 +689,51 @@ fn library() {
         numbers.len(),
         entries.len()
     );
+}
+
+/// `usertest shell`: run the shell on a script with its stdout in a file,
+/// and compare that with the expected transcript.
+fn shell() -> ! {
+    let output = "/shell-output.txt";
+    match process::fork() {
+        Ok(process::Fork::Child) => {
+            let file = match libsaeos::io::File::create(output) {
+                Ok(file) => file,
+                Err(_) => process::exit(90),
+            };
+            dup2(file.fd(), 1);
+            drop(file);
+            let error = process::exec_inherit("/bin/sh", &["sh", "/test/script.sh"]);
+            eprintln!("usertest: exec /bin/sh: {error}");
+            process::exit(91)
+        }
+        Ok(process::Fork::Parent(pid)) => {
+            let status = process::wait(Some(pid)).map(|(_, status)| status);
+            let actual = fs::read_to_string(output).unwrap_or_default();
+            let expected = fs::read_to_string("/test/script.expected").unwrap_or_default();
+            if status.map(|status| status.code()) != Ok(Some(0)) || actual != expected {
+                println!("usertest: shell status {:?}", status.map(|status| status.0));
+                println!("--- expected\n{expected}--- actual\n{actual}---");
+                fail(95, b"shell script output differs");
+            }
+            // `sh -c`, and the exit status of the last command.
+            let status = match process::fork() {
+                Ok(process::Fork::Child) => {
+                    let error = process::exec_inherit("/bin/sh", &["sh", "-c", "true; exit 7"]);
+                    eprintln!("usertest: exec /bin/sh: {error}");
+                    process::exit(91)
+                }
+                Ok(process::Fork::Parent(pid)) => {
+                    process::wait(Some(pid)).map(|(_, status)| status.code())
+                }
+                Err(error) => Err(error),
+            };
+            if status != Ok(Some(7)) {
+                fail(97, b"sh -c exit status");
+            }
+            println!("usertest: shell PASS ({} lines)", actual.lines().count());
+            exit(0)
+        }
+        Err(_) => fail(96, b"fork"),
+    }
 }

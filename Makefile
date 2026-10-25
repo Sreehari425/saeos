@@ -35,14 +35,16 @@ all: bios
 # static, SSE, linked with userspace/user.ld) with core and alloc built from
 # source; installed by initramfs.toml. Each must be a static executable
 # whose entry point is in its executable segment.
-USER_PROGRAMS := hello usertest
+USER_PROGRAMS := hello usertest init sh coreutils
+# The executables they produce (checked, and installed by initramfs.toml).
+USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false
 USER_TARGET := userspace/x86_64-saeos.json
 USER_BUILD = cargo build --release -Zjson-target-spec \
 	-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
 	--target $(USER_TARGET)
 userspace:
 	$(USER_BUILD) $(addprefix -p ,$(USER_PROGRAMS))
-	@for program in $(USER_PROGRAMS); do \
+	@for program in $(USER_BINARIES); do \
 		./scripts/check-user-elf.sh target/x86_64-saeos/release/$$program || exit 1; \
 	done
 
@@ -176,7 +178,13 @@ define user_tests
 	CMDLINE='init=/missing saeos.test=no-init' QEMU_TEST_EXPECT="Requested init /missing failed \(error -2\)" $(USER_TEST_RUN) $(1) -m 2G
 	CMDLINE='init=/test/bin/usertest -- tty' $(TTY_INPUT) QEMU_TEST_KEYS='$(TTY_KEYS)' QEMU_TEST_EXPECT="usertest: tty PASS" $(USER_TEST_RUN) $(1) -m 2G
 	CMDLINE='init=/test/bin/usertest -- tty' $(TTY_INPUT) QEMU_TEST_SERIAL='$(TTY_SERIAL)' QEMU_TEST_EXPECT="usertest: tty PASS" $(USER_TEST_RUN) $(1) -m 2G
+	CMDLINE='init=/test/bin/usertest -- shell' QEMU_TEST_EXPECT="usertest: shell PASS" $(USER_TEST_RUN) $(1) -m 2G
+	CMDLINE='init=/bin/sh saeos.test.exit=5' QEMU_TEST_INPUT_AFTER='saeos:/$$ ' QEMU_TEST_KEYS='$(SHELL_KEYS)' QEMU_TEST_EXPECT="$$(printf '^typed-ok$$\n^/etc$$')" $(USER_TEST_RUN) $(1) -m 2G
 endef
+
+# The interactive shell as init, typed at: "echo typed-ok", "cd /etc",
+# "pwd", "exit 5" (the exit status is the verdict).
+SHELL_KEYS := e c h o spc t y p e d minus o k ret c d spc slash e t c ret p w d ret e x i t spc 5 ret
 
 # Console input, typed once usertest is reading: "hello tty", Enter,
 # "abx", Backspace, "c", Enter, Ctrl-D; on the PS/2 keyboard, then on the

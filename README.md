@@ -28,9 +28,10 @@ run inside QEMU. The current codebase includes:
   per-process file descriptors
 - A cpio initramfs loaded by the bootloader, and a Linux-style kernel
   command line (`/proc/cmdline`)
-- Userspace groundwork, tested in ring 0: Linux-numbered syscalls, safe
-  user-memory access (SMEP/SMAP when available), per-task FPU state, and an
-  ELF loader for the programs in `userspace/`
+- Userspace in ring 3: boots to `/sbin/init` and an interactive `/bin/sh`
+  with `ls`, `cat`, `echo`, `mkdir`, `rm`, `mv`, `stat`; Linux-numbered
+  syscalls (`fork` with copy-on-write, `execve`, `wait4`, `mmap`, ...),
+  console line editing, and libsaeos, a C library in Rust
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
 - PIT, RTC, TSC, and local APIC timer support
@@ -149,6 +150,13 @@ make clean         # Remove Cargo build artifacts
 
 The kernel is written in Rust and owns the platform, memory, and driver layers
 it runs on.
+
+## Userspace
+
+A normal boot starts `/sbin/init`, which runs `/bin/sh` on the console
+(type `help` there). Boot with `CMDLINE="init=/bin/sh"` to skip init, or
+`CMDLINE=saeos.kshell` for the in-kernel debug shell. Programs live in
+`userspace/` and build with `make userspace`.
 
 ## Initramfs and command line
 

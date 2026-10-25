@@ -1,0 +1,19 @@
+hello world
+quoted   spaces single $HOME /
+no newline
+/shell-test
+content
+more
+content
+more
+file.txt
+file          13 file.txt
+status 1
+status 0
+not found 127
+hi there hi there!
+[]
+renamed.txt
+stat status 0
+gone 1
+done

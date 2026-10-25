@@ -76,7 +76,8 @@
               cargo build --frozen --locked -p ${packageMetadata.name} --target ${target} "''${feature_args[@]}"
               # The initramfs ships next to the kernel, not inside it; it
               # carries the user programs.
-              cargo build --frozen --locked --release -p hello -p usertest \
+              cargo build --frozen --locked --release \
+                -p hello -p usertest -p init -p sh -p coreutils \
                 -Zjson-target-spec -Zbuild-std=core,alloc \
                 -Zbuild-std-features=compiler-builtins-mem \
                 --target userspace/x86_64-saeos.json

@@ -44,6 +44,10 @@ mod holds_tests;
 pub mod klog_ring;
 #[cfg(test)]
 mod libsaeos_tests;
+#[path = "../../../userspace/sh/src/parse.rs"]
+pub mod sh_parse;
+#[cfg(test)]
+mod sh_tests;
 #[path = "../../../kernel/src/syscall/mod.rs"]
 pub mod syscall;
 #[cfg(test)]

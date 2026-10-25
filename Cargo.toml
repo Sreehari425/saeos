@@ -5,8 +5,11 @@ members = [
     "tools/mkinitramfs",
     "tools/mm-model",
     "tools/ratconf",
+    "userspace/coreutils",
     "userspace/hello",
+    "userspace/init",
     "userspace/libsaeos",
+    "userspace/sh",
     "userspace/usertest",
 ]
 

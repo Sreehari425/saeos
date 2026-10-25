@@ -18,3 +18,70 @@ source = "target/x86_64-saeos/release/usertest"
 target = "/test/bin/usertest"
 mode = 0o755
 test = true
+
+# Userspace: init, the shell, and the tools.
+[[file]]
+source = "target/x86_64-saeos/release/init"
+target = "/sbin/init"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/sh"
+target = "/bin/sh"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/ls"
+target = "/bin/ls"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/cat"
+target = "/bin/cat"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/echo"
+target = "/bin/echo"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/mkdir"
+target = "/bin/mkdir"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/rm"
+target = "/bin/rm"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/mv"
+target = "/bin/mv"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/stat"
+target = "/bin/stat"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/true"
+target = "/bin/true"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/false"
+target = "/bin/false"
+mode = 0o755
+
+# Test image only: the shell test script and its expected output.
+[[file]]
+source = "userspace/tests/script.sh"
+target = "/test/script.sh"
+test = true
+
+[[file]]
+source = "userspace/tests/script.expected"
+target = "/test/script.expected"
+test = true
