@@ -6,6 +6,7 @@
 //! Panics and faults end the run as failures (see the panic handler and the
 //! exception handlers).
 
+mod pci;
 mod user;
 
 use crate::arch::x86_64::{cpu, interrupt_controller, qemu};
@@ -27,6 +28,7 @@ pub fn run() -> ! {
     // Everything printed so far must also be in the kernel log ring.
     let log_passed = crate::klog::contains("boot-test: starting.");
     let fs_passed = filesystem_test();
+    let pci_passed = pci::pci_test();
     let gdt_passed = user::gdt_test();
     let fpu_passed = user::fpu_test();
     let space_passed = user::process_space_test();
@@ -43,6 +45,7 @@ pub fn run() -> ! {
         && cache_passed
         && log_passed
         && fs_passed
+        && pci_passed
         && gdt_passed
         && fpu_passed
         && space_passed
@@ -54,13 +57,14 @@ pub fn run() -> ! {
         && idle_passed
         && scheduler_passed;
     serial_println!(
-        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} fs={} gdt-tss={} fpu={} process-space={} uaccess={} syscalls={} exec-prepare={} user-memory={} wait-event={} idle={} scheduler={} -> {}",
+        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} fs={} pci={} gdt-tss={} fpu={} process-space={} uaccess={} syscalls={} exec-prepare={} user-memory={} wait-event={} idle={} scheduler={} -> {}",
         verdict(mm_passed),
         verdict(irq_passed),
         verdict(breakpoint_passed),
         verdict(cache_passed),
         verdict(log_passed),
         verdict(fs_passed),
+        verdict(pci_passed),
         verdict(gdt_passed),
         verdict(fpu_passed),
         verdict(space_passed),

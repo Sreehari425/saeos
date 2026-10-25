@@ -44,6 +44,10 @@ mod holds_tests;
 pub mod klog_ring;
 #[cfg(test)]
 mod libsaeos_tests;
+#[path = "../../../kernel/src/drivers/pci/mod.rs"]
+pub mod pci;
+#[cfg(test)]
+mod pci_tests;
 #[path = "../../../userspace/sh/src/parse.rs"]
 pub mod sh_parse;
 #[cfg(test)]

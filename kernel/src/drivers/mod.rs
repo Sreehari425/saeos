@@ -3,6 +3,7 @@ pub mod font;
 #[cfg(feature = "framebuffer")]
 pub mod framebuffer;
 pub mod keyboard;
+pub mod pci;
 pub mod serial;
 pub mod tty;
 pub mod vga;

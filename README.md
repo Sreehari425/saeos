@@ -32,6 +32,8 @@ run inside QEMU. The current codebase includes:
   with `ls`, `cat`, `echo`, `mkdir`, `rm`, `mv`, `stat`; Linux-numbered
   syscalls (`fork` with copy-on-write, `execve`, `wait4`, `mmap`, ...),
   console line editing, and libsaeos, a C library in Rust
+- PCI enumeration (buses behind bridges, BARs, capabilities) with a
+  driver-matching layer; `lspci` and `/proc/pci`
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
 - PIT, RTC, TSC, and local APIC timer support

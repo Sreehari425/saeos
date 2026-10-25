@@ -37,7 +37,7 @@ all: bios
 # whose entry point is in its executable segment.
 USER_PROGRAMS := hello usertest init sh coreutils
 # The executables they produce (checked, and installed by initramfs.toml).
-USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false
+USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false lspci
 USER_TARGET := userspace/x86_64-saeos.json
 USER_BUILD = cargo build --release -Zjson-target-spec \
 	-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
@@ -142,13 +142,20 @@ test: mm-test miri boot-test user-test mm-guard-test fault-test panic-lock-test
 # Each target boots twice: on QEMU's default CPU, and with -cpu max, where
 # SMEP/SMAP exist and the user-memory test checks they are enforced.
 SMAP_EXPECT := QEMU_TEST_EXPECT="uaccess smap=true smep=true"
+# The boot test also checks PCI enumeration: an AC'97 sound card is added,
+# and the q35 runs put it behind a PCI-to-PCI bridge (bus 1).
+PCI_TEST_DEVICES := -device AC97
+Q35_TEST := INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE) saeos.test.pci=q35' ./scripts/run-qemu-test.sh
+Q35_DEVICES := -machine q35 -device pci-bridge,id=br1,chassis_nr=1,bus=pcie.0 -device AC97,bus=br1
 boot-test: initramfs-test
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test
-	$(QEMU_TEST) $(BIOS_TEST_IMAGE) -m $(TEST_MEM)
-	$(SMAP_EXPECT) $(QEMU_TEST) $(BIOS_TEST_IMAGE) -m $(TEST_MEM) -cpu max
+	$(QEMU_TEST) $(BIOS_TEST_IMAGE) -m $(TEST_MEM) $(PCI_TEST_DEVICES)
+	$(SMAP_EXPECT) $(QEMU_TEST) $(BIOS_TEST_IMAGE) -m $(TEST_MEM) -cpu max $(PCI_TEST_DEVICES)
+	$(Q35_TEST) $(BIOS_TEST_IMAGE) -m $(TEST_MEM) $(Q35_DEVICES)
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),boot-test
-	$(QEMU_TEST) $(UEFI_TEST_IMAGE) -m $(TEST_MEM)
-	$(SMAP_EXPECT) $(QEMU_TEST) $(UEFI_TEST_IMAGE) -m $(TEST_MEM) -cpu max
+	$(QEMU_TEST) $(UEFI_TEST_IMAGE) -m $(TEST_MEM) $(PCI_TEST_DEVICES)
+	$(SMAP_EXPECT) $(QEMU_TEST) $(UEFI_TEST_IMAGE) -m $(TEST_MEM) -cpu max $(PCI_TEST_DEVICES)
+	$(Q35_TEST) $(UEFI_TEST_IMAGE) -m $(TEST_MEM) $(Q35_DEVICES)
 
 mm-stress: initramfs-test
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test,mm-stress,mm-allocator-stats,paging-debug

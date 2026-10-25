@@ -262,6 +262,9 @@ pub fn kernel_main_high(handoff: Handoff) -> ! {
     // GDT, IDT, TSS, and every MMIO pointer now use upper-half addresses, so
     // the boot identity map can go; the lower half belongs to processes.
     mm::finish_boot();
+    // Find PCI devices (needs the heap; drivers that need interrupts come
+    // after the interrupt controller, which is up now).
+    drivers::pci::init();
     drivers::console::set_color(Color::LightGreen, Color::Black);
     println!("[OK] GDT & TSS with IST loaded.");
     println!("[OK] IDT loaded (256 vectors).");

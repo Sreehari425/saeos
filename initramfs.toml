@@ -85,3 +85,8 @@ test = true
 source = "userspace/tests/script.expected"
 target = "/test/script.expected"
 test = true
+
+[[file]]
+source = "target/x86_64-saeos/release/lspci"
+target = "/bin/lspci"
+mode = 0o755

@@ -62,6 +62,7 @@ pub fn init(boot_info: &BootInfo) {
             ("cmdline", generator(proc_cmdline)),
             ("meminfo", generator(proc_meminfo)),
             ("mounts", generator(proc_mounts)),
+            ("pci", generator(crate::drivers::pci::proc_text)),
         ]),
     );
 }
