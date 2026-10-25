@@ -24,6 +24,8 @@ run inside QEMU. The current codebase includes:
 - A kernel heap (small-object classes plus a page-backed heap)
 - Guarded kernel stacks with stack-overflow detection
 - A preemptive kernel task scheduler (EEVDF)
+- A VFS with ramfs (`/`), devfs (`/dev`), per-process file descriptors, and
+  a tar initramfs built from `initramfs/`
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
 - PIT, RTC, TSC, and local APIC timer support
@@ -139,6 +141,15 @@ make clean         # Remove Cargo build artifacts
 
 The kernel is written in Rust and owns the platform, memory, and driver layers
 it runs on.
+
+## Filesystem
+
+At boot the kernel mounts ramfs at `/`, unpacks the initramfs into it, and
+mounts devfs at `/dev`. Anything placed in the repository's `initramfs/`
+directory is packed into the kernel image at build time (a deterministic
+ustar archive written by `kernel/build.rs`). The kernel API in
+`kernel/src/fs` mirrors the Linux file system calls, errno values included;
+the shell's `ls`, `cat`, `stat`, `write`, `mkdir`, and `rm` use it.
 
 ## Debugging
 

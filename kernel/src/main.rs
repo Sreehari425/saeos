@@ -12,6 +12,7 @@ mod boot_test;
 pub mod collections;
 pub mod drivers;
 pub mod fatal;
+pub mod fs;
 #[macro_use]
 pub mod klog;
 mod fault_tests;
@@ -164,6 +165,7 @@ pub fn kernel_main_high(handoff: Handoff) -> ! {
     let boot_info = &handoff.boot_info;
     let bios_acpi = handoff.bios_acpi;
     mm::init_late(boot_info);
+    fs::init();
 
     let acpi_topology = bios_acpi.or_else(|| match boot_info.rsdp_addr {
         Some(address) => match unsafe { acpi::parse_rsdp(address) } {

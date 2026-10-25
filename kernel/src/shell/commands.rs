@@ -18,6 +18,9 @@ use crate::task::TaskState;
 use crate::time;
 
 pub fn execute(cmd: &str) {
+    if super::fs_commands::execute(cmd) {
+        return;
+    }
     match cmd {
         "help" => {
             console::set_color(Color::Yellow, Color::Black);
@@ -39,6 +42,8 @@ pub fn execute(cmd: &str) {
             println!("  waitqueues - Show wait-queue diagnostics");
             println!("  processes - Show PCB ownership");
             println!("  sleep N - Sleep for N seconds");
+            println!("  ls [path] / cat / stat / mkdir / rm <path> - Files");
+            println!("  write <path> <text> - Create or replace a file");
             println!("  dmesg   - Show the kernel log");
             println!("  loglevel [error|warn|info|debug] - Show or set the log threshold");
             println!("  <text>  - Echoes your input back to the screen");

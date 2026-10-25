@@ -5,8 +5,10 @@
 //! of threads belonging to a process. User-mode creation is intentionally not
 //! part of this layer yet.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::fs::FileTable;
 use crate::task::{AddressSpaceId, ExitStatus, ProcessId, TaskId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +31,9 @@ pub struct ProcessControlBlock {
     pub threads: Vec<TaskId>,
     pub child_waiters: Vec<TaskId>,
     pub references: usize,
+    /// Open files. Shared through `Arc` so file I/O happens outside the
+    /// (interrupt-disabling) process-table lock.
+    pub files: Arc<FileTable>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +63,7 @@ impl ProcessControlBlock {
             threads: alloc::vec![thread],
             child_waiters: Vec::new(),
             references: 0,
+            files: Arc::new(FileTable::new()),
         }
     }
 }

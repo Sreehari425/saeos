@@ -24,6 +24,7 @@ pub fn run() -> ! {
     let cache_passed = cache_attributes_test();
     // Everything printed so far must also be in the kernel log ring.
     let log_passed = crate::klog::contains("boot-test: starting.");
+    let fs_passed = filesystem_test();
     let wait_passed = wait_event_test();
     let idle_passed = idle_test();
     let scheduler_passed = scheduler_test();
@@ -32,16 +33,18 @@ pub fn run() -> ! {
         && breakpoint_passed
         && cache_passed
         && log_passed
+        && fs_passed
         && wait_passed
         && idle_passed
         && scheduler_passed;
     serial_println!(
-        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} wait-event={} idle={} scheduler={} -> {}",
+        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} fs={} wait-event={} idle={} scheduler={} -> {}",
         verdict(mm_passed),
         verdict(irq_passed),
         verdict(breakpoint_passed),
         verdict(cache_passed),
         verdict(log_passed),
+        verdict(fs_passed),
         verdict(wait_passed),
         verdict(idle_passed),
         verdict(scheduler_passed),
@@ -153,6 +156,203 @@ fn cache_attributes_test() -> bool {
         );
     }
     pat_ok && lapic_ok && display_ok
+}
+
+fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// Filesystem checks through the same fd API userspace will use: the
+/// embedded initramfs, a write/read round trip, device files, and
+/// concurrent tasks.
+fn filesystem_test() -> bool {
+    use crate::fs::{self, Errno, OpenFlags, Whence};
+    let check = |name: &str, passed: bool| {
+        if !passed {
+            serial_println!("boot-test: fs: {} FAILED", name);
+        }
+        passed
+    };
+
+    // (a) Every initramfs file, read in awkward chunk sizes.
+    let manifest = fs::INITRAMFS_MANIFEST.iter().all(|&(path, size, hash)| {
+        let Ok(fd) = fs::open(path, OpenFlags::READ) else {
+            serial_println!("boot-test: fs: cannot open {}", path);
+            return false;
+        };
+        let mut buffer = [0u8; 4096];
+        let (mut total, mut digest) = (0u64, FNV_OFFSET);
+        for chunk in [1usize, 7, 509, 4096].iter().cycle() {
+            match fs::read(fd, &mut buffer[..*chunk]) {
+                Ok(0) => break,
+                Ok(count) => {
+                    total += count as u64;
+                    digest = fnv1a(digest, &buffer[..count]);
+                }
+                Err(_) => return false,
+            }
+        }
+        let _ = fs::close(fd);
+        let matches = total == size && digest == hash;
+        if !matches {
+            serial_println!("boot-test: fs: {} size {} (want {})", path, total, size);
+        }
+        matches
+    });
+
+    // (b) Round trip, including reading on after the name is gone.
+    let round_trip = (|| -> Result<bool, Errno> {
+        let fd = fs::open(
+            "/boot-test.tmp",
+            OpenFlags::READ_WRITE | OpenFlags::CREATE | OpenFlags::EXCL,
+        )?;
+        let pattern: alloc::vec::Vec<u8> = (0..10_000u32).map(|i| (i * 13) as u8).collect();
+        let written = fs::write(fd, &pattern)? == pattern.len();
+        fs::lseek(fd, 1234, Whence::Set)?;
+        let mut buffer = [0u8; 100];
+        let read_back = fs::read(fd, &mut buffer)? == 100 && buffer[..] == pattern[1234..1334];
+        fs::unlink("/boot-test.tmp")?;
+        let gone = fs::stat("/boot-test.tmp") == Err(Errno::ENOENT);
+        let still_readable = fs::read(fd, &mut buffer)? == 100 && buffer[..] == pattern[1334..1434];
+        fs::close(fd)?;
+        Ok(written && read_back && gone && still_readable)
+    })()
+    .unwrap_or(false);
+
+    // (d) Device files.
+    let devices = (|| -> Result<bool, Errno> {
+        let null = fs::open("/dev/null", OpenFlags::READ_WRITE)?;
+        let mut buffer = [7u8; 16];
+        let null_ok = fs::read(null, &mut buffer)? == 0 && fs::write(null, b"x")? == 1;
+        fs::close(null)?;
+        let zero = fs::open("/dev/zero", OpenFlags::READ)?;
+        let zero_ok = fs::read(zero, &mut buffer)? == 16 && buffer == [0; 16];
+        fs::close(zero)?;
+        let console = fs::open("/dev/console", OpenFlags::WRITE)?;
+        fs::write(console, b"boot-test: written through /dev/console\n")?;
+        fs::close(console)?;
+        let console_ok = crate::klog::contains("written through /dev/console");
+        Ok(null_ok && zero_ok && console_ok)
+    })()
+    .unwrap_or(false);
+
+    // (c) Concurrent tasks, each with its own process file table.
+    let concurrent = concurrent_files_test();
+
+    check("initramfs manifest", manifest)
+        & check("round trip", round_trip)
+        & check("devices", devices)
+        & check("concurrency", concurrent)
+}
+
+static FS_WORKERS_DONE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static FS_WORKERS_FAILED: AtomicBool = AtomicBool::new(false);
+const FS_WORKERS: usize = 5;
+
+fn fs_worker(index: usize) {
+    use crate::fs::{self, OpenFlags};
+    let path = alloc::format!("/worker-{index}");
+    for round in 0..50usize {
+        let data = alloc::vec![(index * 31 + round) as u8; 200 + round * 17];
+        let result = (|| -> Result<bool, crate::fs::Errno> {
+            let fd = fs::open(
+                &path,
+                OpenFlags::READ_WRITE | OpenFlags::CREATE | OpenFlags::TRUNC,
+            )?;
+            fs::write(fd, &data)?;
+            fs::lseek(fd, 0, crate::fs::Whence::Set)?;
+            let mut back = alloc::vec![0u8; data.len()];
+            let mut filled = 0;
+            while filled < back.len() {
+                let count = fs::read(fd, &mut back[filled..])?;
+                if count == 0 {
+                    break;
+                }
+                filled += count;
+            }
+            fs::close(fd)?;
+            Ok(back == data)
+        })();
+        if result != Ok(true) {
+            serial_println!(
+                "boot-test: fs worker {} round {}: {:?}",
+                index,
+                round,
+                result
+            );
+            FS_WORKERS_FAILED.store(true, Ordering::Release);
+        }
+        scheduler::yield_now();
+    }
+    let _ = fs::unlink(&path);
+}
+
+fn fs_reader() {
+    use crate::fs::{self, OpenFlags};
+    for _ in 0..100 {
+        let mut buffer = [0u8; 64];
+        let ok = fs::open("/etc/hello", OpenFlags::READ)
+            .and_then(|fd| {
+                let count = fs::read(fd, &mut buffer);
+                fs::close(fd)?;
+                count
+            })
+            .is_ok_and(|count| buffer[..count].starts_with(b"Hello from the SaeOS initramfs!"));
+        if !ok {
+            FS_WORKERS_FAILED.store(true, Ordering::Release);
+        }
+        scheduler::yield_now();
+    }
+}
+
+macro_rules! fs_worker_task {
+    ($name:ident, $index:expr) => {
+        fn $name() -> ! {
+            fs_worker($index);
+            FS_WORKERS_DONE.fetch_add(1, Ordering::AcqRel);
+            scheduler::exit(ExitStatus(0))
+        }
+    };
+}
+fs_worker_task!(fs_worker_0, 0);
+fs_worker_task!(fs_worker_1, 1);
+fs_worker_task!(fs_worker_2, 2);
+fs_worker_task!(fs_worker_3, 3);
+
+fn fs_reader_task() -> ! {
+    fs_reader();
+    FS_WORKERS_DONE.fetch_add(1, Ordering::AcqRel);
+    scheduler::exit(ExitStatus(0))
+}
+
+fn concurrent_files_test() -> bool {
+    for (entry, name) in [
+        (fs_worker_0 as crate::task::TaskEntry, "fs-worker-0"),
+        (fs_worker_1, "fs-worker-1"),
+        (fs_worker_2, "fs-worker-2"),
+        (fs_worker_3, "fs-worker-3"),
+        (fs_reader_task, "fs-reader"),
+    ] {
+        scheduler::spawn_kernel_task(entry, name);
+    }
+    let deadline = time::ticks().saturating_add(10_000);
+    while FS_WORKERS_DONE.load(Ordering::Acquire) < FS_WORKERS && time::ticks() < deadline {
+        scheduler::sleep_ms(10);
+    }
+    let done = FS_WORKERS_DONE.load(Ordering::Acquire);
+    let failed = FS_WORKERS_FAILED.load(Ordering::Acquire);
+    if done != FS_WORKERS || failed {
+        serial_println!(
+            "boot-test: fs concurrency done={}/{} failed={}",
+            done,
+            FS_WORKERS,
+            failed
+        );
+    }
+    done == FS_WORKERS && !failed
 }
 
 /// `int3` must be reported and resumed, not halt the kernel.

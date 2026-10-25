@@ -15,6 +15,12 @@ pub use model::*;
 pub mod buddy;
 #[cfg(test)]
 mod buddy_tests;
+#[path = "../../../kernel/src/fs/mod.rs"]
+pub mod fs;
+#[cfg(test)]
+mod fs_model;
+#[cfg(test)]
+mod fs_tests;
 mod heap_model;
 #[path = "../../../kernel/src/klog_ring.rs"]
 pub mod klog_ring;

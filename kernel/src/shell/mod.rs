@@ -1,4 +1,5 @@
 pub mod commands;
+mod fs_commands;
 
 use crate::drivers::console;
 use crate::drivers::keyboard;

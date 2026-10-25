@@ -84,9 +84,19 @@ pub fn collect_child_status(
     Ok(status)
 }
 
+/// Spawn a kernel task in a new process. The process is attached in the
+/// same scheduler critical section that makes the task runnable, so the task
+/// can never run (and look up its file table) without one.
 pub fn spawn_kernel_task(entry: TaskEntry, name: &'static str) -> TaskId {
     let stack = new_kernel_stack(name);
-    let task = with_scheduler(|scheduler| scheduler.spawn_kernel_task(entry, name, false, stack));
-    attach_task_to_new_process(task);
-    task
+    with_scheduler(|scheduler| {
+        let task = scheduler.spawn_kernel_task(entry, name, false, stack);
+        // Lock order: scheduler, then the process table.
+        let process = PROCESSES.lock().create(None, task);
+        scheduler
+            .task_mut(task)
+            .expect("task spawned under this lock")
+            .process_id = Some(process);
+        task
+    })
 }
