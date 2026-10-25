@@ -6,6 +6,11 @@
 # function names (regular expressions, one per line) that must appear once
 # the log's backtrace is resolved with scripts/symbolize.sh.
 #
+# Typed input, once QEMU_TEST_INPUT_AFTER (a log marker) appears:
+# QEMU_TEST_KEYS is QEMU key names typed on the PS/2 keyboard
+# ("h i ret ctrl-d"); QEMU_TEST_SERIAL is text (with \r, \x7f escapes)
+# sent to the serial port. See scripts/qemu-input.py.
+#
 # usage: run-qemu-test.sh <runner> <image> [qemu options...]
 set -euo pipefail
 
@@ -19,14 +24,33 @@ PASS_STATUS=33
 FAIL_STATUS=35
 
 LOG_FILE="$(mktemp -t saeos-qemu-test.XXXXXX)"
-trap 'rm -f "$LOG_FILE"' EXIT
+WORK_DIR="$(mktemp -d -t saeos-qemu-input.XXXXXX)"
+trap 'rm -rf "$LOG_FILE" "$WORK_DIR"' EXIT
+
+EXTRA=()
+INPUT_MARKER="${QEMU_TEST_INPUT_AFTER:-}"
+if [ -n "${QEMU_TEST_KEYS:-}" ]; then
+    MONITOR="$WORK_DIR/monitor.sock"
+    EXTRA+=(-monitor "unix:$MONITOR,server,nowait")
+    "$(dirname "$0")/qemu-input.py" "$LOG_FILE" "$INPUT_MARKER" keys "$MONITOR" "$QEMU_TEST_KEYS" &
+fi
+# The guest's serial input is QEMU's stdin: a FIFO when there is text to
+# send (held open here so QEMU never sees end of file), else nothing.
+if [ -n "${QEMU_TEST_SERIAL:-}" ]; then
+    mkfifo "$WORK_DIR/serial"
+    exec 3<>"$WORK_DIR/serial"
+    "$(dirname "$0")/qemu-input.py" "$LOG_FILE" "$INPUT_MARKER" serial "$WORK_DIR/serial" "$QEMU_TEST_SERIAL" &
+else
+    exec 3</dev/null
+fi
 
 set +e
 timeout "${QEMU_TEST_TIMEOUT:-180}" "$@" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -display none 2>&1 | tee "$LOG_FILE"
+    -display none "${EXTRA[@]}" <&3 2>&1 | tee "$LOG_FILE"
 STATUS=${PIPESTATUS[0]}
 set -e
+exec 3<&-
 
 case "$STATUS" in
     "$PASS_STATUS") ;;

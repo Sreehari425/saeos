@@ -10,9 +10,9 @@
 
 use saeos_rt::{
     ARCH_GET_FS, ARCH_SET_FS, Args, MAP_FIXED, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, PROT_EXEC,
-    PROT_READ, PROT_WRITE, WNOHANG, arch_prctl, brk, chdir, close, dup2, entry, execve, exit,
-    exited_with, fork, getcwd, getpid, getppid, killed_by, mmap_anonymous, mprotect, munmap, open,
-    read, wait4, write,
+    PROT_READ, PROT_WRITE, TIOCGWINSZ, WNOHANG, arch_prctl, brk, chdir, close, dup2, entry, execve,
+    exit, exited_with, fork, getcwd, getpid, getppid, ioctl, killed_by, mmap_anonymous, mprotect,
+    munmap, open, read, wait4, write,
 };
 
 entry!(main);
@@ -48,6 +48,7 @@ fn main(args: Args) -> i32 {
                 },
             )
         }
+        Some(b"tty") => tty(),
         Some(b"ud") => {
             say(b"usertest: executing ud2\n");
             unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
@@ -502,4 +503,35 @@ fn processes() {
     if before != after {
         fail(84, b"fork/exit leaked memory");
     }
+}
+
+/// `usertest tty`: read typed lines from the console (fd 0), as edited by
+/// the kernel's line discipline. The test types "hello tty", Enter,
+/// "abx", Backspace, "c", Enter, then Ctrl-D, on the keyboard or serial.
+fn tty() -> ! {
+    say(b"usertest: tty ready\n");
+    let mut line = [0u8; 128];
+    let mut reads = |expected: &[u8]| {
+        let count = read(0, &mut line);
+        count >= 0 && &line[..count as usize] == expected
+    };
+    if !reads(b"hello tty\n") {
+        fail(90, b"first line");
+    }
+    if !reads(b"abc\n") {
+        fail(91, b"edited line (backspace)");
+    }
+    if !reads(b"") {
+        fail(92, b"Ctrl-D is not end of file");
+    }
+    let mut size = [0u16; 4];
+    if ioctl(0, TIOCGWINSZ, size.as_mut_ptr() as u64) != 0 || size[0] == 0 || size[1] == 0 {
+        fail(93, b"TIOCGWINSZ on the console");
+    }
+    let fd = open(b"/etc/hello\0", O_RDONLY);
+    if ioctl(fd as u32, TIOCGWINSZ, size.as_mut_ptr() as u64) != -25 {
+        fail(94, b"a regular file is a terminal");
+    }
+    say(b"usertest: tty PASS\n");
+    exit(0)
 }

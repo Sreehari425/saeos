@@ -64,7 +64,7 @@ impl IoApic {
         self.set_redirection_with_flags(irq, vector, dest_apic_id, 0, masked);
     }
 
-    fn set_redirection_with_flags(
+    pub fn set_redirection_with_flags(
         &mut self,
         irq: u8,
         vector: u8,

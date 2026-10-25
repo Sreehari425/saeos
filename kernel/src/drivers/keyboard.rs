@@ -1,10 +1,12 @@
 use crate::sync::IrqSpinMutex;
 use crate::task::WaitQueue;
 
-const KEY_BUFFER_CAPACITY: usize = 128;
+const KEY_BUFFER_CAPACITY: usize = 256;
 
+/// Raw console input bytes, from the keyboard and the serial port, before
+/// line editing (`drivers::tty` reads them in the reader's context).
 pub struct KeyQueue {
-    buffer: [char; KEY_BUFFER_CAPACITY],
+    buffer: [u8; KEY_BUFFER_CAPACITY],
     head: usize,
     tail: usize,
     count: usize,
@@ -13,14 +15,14 @@ pub struct KeyQueue {
 impl KeyQueue {
     pub const fn new() -> Self {
         Self {
-            buffer: ['\0'; KEY_BUFFER_CAPACITY],
+            buffer: [0; KEY_BUFFER_CAPACITY],
             head: 0,
             tail: 0,
             count: 0,
         }
     }
 
-    pub fn push(&mut self, c: char) {
+    pub fn push(&mut self, c: u8) {
         if self.count < KEY_BUFFER_CAPACITY {
             self.buffer[self.tail] = c;
             self.tail = (self.tail + 1) % KEY_BUFFER_CAPACITY;
@@ -32,7 +34,7 @@ impl KeyQueue {
         self.count == 0
     }
 
-    pub fn pop(&mut self) -> Option<char> {
+    pub fn pop(&mut self) -> Option<u8> {
         if self.count == 0 {
             None
         } else {
@@ -57,6 +59,9 @@ struct KeyboardState {
     lshift: bool,
     rshift: bool,
     caps_lock: bool,
+    /// Either Ctrl key (the right one arrives as E0 1D, and the E0 prefix
+    /// is ignored).
+    control: bool,
 }
 
 impl KeyboardState {
@@ -65,6 +70,7 @@ impl KeyboardState {
             lshift: false,
             rshift: false,
             caps_lock: false,
+            control: false,
         }
     }
 
@@ -83,8 +89,19 @@ pub fn has_key() -> bool {
     !KEY_QUEUE.lock().is_empty()
 }
 
+/// The next input byte as a character (the kernel shell is ASCII-only).
 pub fn pop_key() -> Option<char> {
+    KEY_QUEUE.lock().pop().map(char::from)
+}
+
+pub fn pop_byte() -> Option<u8> {
     KEY_QUEUE.lock().pop()
+}
+
+/// Queue one input byte and wake a reader. Safe from interrupt handlers.
+pub fn push_input(byte: u8) {
+    KEY_QUEUE.lock().push(byte);
+    crate::scheduler::wake_one(&KEY_WAIT);
 }
 
 /// Initialize the 8042 PS/2 keyboard controller.
@@ -185,6 +202,14 @@ pub fn handle_scancode(scancode: u8) {
             state.caps_lock = !state.caps_lock;
             return;
         }
+        0x1D => {
+            state.control = true;
+            return;
+        }
+        0x9D => {
+            state.control = false;
+            return;
+        }
         _ => {}
     }
 
@@ -197,7 +222,7 @@ pub fn handle_scancode(scancode: u8) {
     let is_symbol_shifted = state.lshift || state.rshift;
 
     let char_opt = match scancode {
-        0x01 => None, // Esc
+        0x01 => Some('\x1b'), // Esc
         0x02 => Some(if is_symbol_shifted { '!' } else { '1' }),
         0x03 => Some(if is_symbol_shifted { '@' } else { '2' }),
         0x04 => Some(if is_symbol_shifted { '#' } else { '3' }),
@@ -252,8 +277,17 @@ pub fn handle_scancode(scancode: u8) {
         _ => None,
     };
 
+    // Ctrl+letter gives the control character (Ctrl-C = 0x03, Ctrl-D =
+    // 0x04, ...), as a terminal does.
+    let control = state.control;
+    drop(state);
     if let Some(c) = char_opt {
-        KEY_QUEUE.lock().push(c);
-        crate::scheduler::wake_one(&KEY_WAIT);
+        let byte = c as u8;
+        let byte = if control && byte.is_ascii_alphabetic() {
+            byte.to_ascii_lowercase() & 0x1f
+        } else {
+            byte
+        };
+        push_input(byte);
     }
 }

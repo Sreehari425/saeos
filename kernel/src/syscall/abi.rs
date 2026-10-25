@@ -119,3 +119,50 @@ pub fn exit_status_word(status: i32) -> i32 {
         (status & 0xff) << 8
     }
 }
+
+pub const TCGETS: u64 = 0x5401;
+pub const TIOCGWINSZ: u64 = 0x5413;
+
+/// `sizeof(struct termios)` as the kernel copies it (x86_64).
+pub const TERMIOS_SIZE: usize = 36;
+
+/// The console's settings for `TCGETS`: canonical mode with echo, the
+/// editing characters `drivers/tty.rs` implements, CR mapped to NL on
+/// input and NL to CR-NL on output. Changing them (`TCSETS`) is not
+/// supported yet.
+pub fn console_termios() -> [u8; TERMIOS_SIZE] {
+    const ICRNL: u32 = 0o400;
+    const OPOST: u32 = 0o1;
+    const ONLCR: u32 = 0o4;
+    const B38400: u32 = 0o17;
+    const CS8: u32 = 0o60;
+    const CREAD: u32 = 0o200;
+    const ICANON: u32 = 0o2;
+    const ECHO: u32 = 0o10;
+    const ECHOE: u32 = 0o20;
+    const ECHOK: u32 = 0o40;
+    let mut termios = [0u8; TERMIOS_SIZE];
+    termios[0..4].copy_from_slice(&ICRNL.to_le_bytes()); // c_iflag
+    termios[4..8].copy_from_slice(&(OPOST | ONLCR).to_le_bytes()); // c_oflag
+    termios[8..12].copy_from_slice(&(B38400 | CS8 | CREAD).to_le_bytes()); // c_cflag
+    termios[12..16].copy_from_slice(&(ICANON | ECHO | ECHOE | ECHOK).to_le_bytes()); // c_lflag
+    // c_line = 0; c_cc[]: VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN,
+    // ..., VWERASE (index 14).
+    let control = &mut termios[17..];
+    control[0] = 0x03;
+    control[1] = 0x1c;
+    control[2] = 0x7f;
+    control[3] = 0x15;
+    control[4] = 0x04;
+    control[6] = 1;
+    control[14] = 0x17;
+    termios
+}
+
+/// `struct winsize` for `TIOCGWINSZ`: 25 rows, 80 columns.
+pub fn console_window_size() -> [u8; 8] {
+    let mut size = [0u8; 8];
+    size[0..2].copy_from_slice(&25u16.to_le_bytes());
+    size[2..4].copy_from_slice(&80u16.to_le_bytes());
+    size
+}

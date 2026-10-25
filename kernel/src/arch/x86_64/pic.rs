@@ -53,12 +53,15 @@ pub fn init() {
 
 pub fn unmask_legacy_irqs() {
     unsafe {
-        // Unmask the timer, and only unmask the keyboard when it is enabled.
-        let master_mask = if cfg!(feature = "keyboard") {
-            0xFC
-        } else {
-            0xFE
-        };
+        // Unmask the timer, and the keyboard (IRQ 1) and COM1 (IRQ 4) when
+        // their drivers are built in.
+        let mut master_mask = 0xFE;
+        if cfg!(feature = "keyboard") {
+            master_mask &= !(1 << 1);
+        }
+        if cfg!(feature = "serial") {
+            master_mask &= !(1 << 4);
+        }
         cpu::outb(DATA_PIC1, master_mask);
         cpu::outb(DATA_PIC2, 0xFF);
     }

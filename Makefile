@@ -174,7 +174,16 @@ define user_tests
 	CMDLINE='init=/test/bin/usertest saeos.test.exit=sig11 -- crash' QEMU_TEST_EXPECT="killed by SIGSEGV: PAGE FAULT at 0x0" $(USER_TEST_RUN) $(1) -m 2G
 	CMDLINE='init=/test/bin/usertest saeos.test.exit=sig4 -- ud' QEMU_TEST_EXPECT="killed by SIGILL" $(USER_TEST_RUN) $(1) -m 2G
 	CMDLINE='init=/missing saeos.test=no-init' QEMU_TEST_EXPECT="Requested init /missing failed \(error -2\)" $(USER_TEST_RUN) $(1) -m 2G
+	CMDLINE='init=/test/bin/usertest -- tty' $(TTY_INPUT) QEMU_TEST_KEYS='$(TTY_KEYS)' QEMU_TEST_EXPECT="usertest: tty PASS" $(USER_TEST_RUN) $(1) -m 2G
+	CMDLINE='init=/test/bin/usertest -- tty' $(TTY_INPUT) QEMU_TEST_SERIAL='$(TTY_SERIAL)' QEMU_TEST_EXPECT="usertest: tty PASS" $(USER_TEST_RUN) $(1) -m 2G
 endef
+
+# Console input, typed once usertest is reading: "hello tty", Enter,
+# "abx", Backspace, "c", Enter, Ctrl-D; on the PS/2 keyboard, then on the
+# serial port (CR for Enter, DEL for Backspace, as a terminal sends).
+TTY_INPUT := QEMU_TEST_INPUT_AFTER="usertest: tty ready"
+TTY_KEYS := h e l l o spc t t y ret a b x backspace c ret ctrl-d
+TTY_SERIAL := hello tty\rabx\x7fc\r\x04
 
 # A task executes ud2: the #UD report must name it.
 fault-test: initramfs-test

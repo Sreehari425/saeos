@@ -4,6 +4,7 @@ pub mod font;
 pub mod framebuffer;
 pub mod keyboard;
 pub mod serial;
+pub mod tty;
 pub mod vga;
 
 pub use console::{backspace, clear_screen, set_color};

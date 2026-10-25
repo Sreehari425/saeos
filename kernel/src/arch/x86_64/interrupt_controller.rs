@@ -102,6 +102,47 @@ impl InterruptController {
                     // Completely mask 8259 PIC to disable legacy IRQ routing
                     pic::mask_all();
 
+                    // COM1 receive (ISA IRQ 4), on whichever IOAPIC has it.
+                    #[cfg(feature = "serial")]
+                    {
+                        let (serial_gsi, serial_flags) = topology.gsi_for_irq(4);
+                        let lapic_id = self.lapic.id() as u8;
+                        let vector = crate::drivers::serial::RECEIVE_VECTOR;
+                        match topology.ioapic_for_gsi(serial_gsi) {
+                            Some(ioapic) if ioapic.address == timer_ioapic.address => {
+                                let index = (serial_gsi - ioapic.gsi_base) as u8;
+                                self.ioapic.set_redirection_with_flags(
+                                    index,
+                                    vector,
+                                    lapic_id,
+                                    serial_flags,
+                                    false,
+                                );
+                            }
+                            Some(ioapic) => {
+                                if let Some(secondary) = self
+                                    .secondary_ioapic
+                                    .as_mut()
+                                    .filter(|other| other.base_address() == ioapic.address)
+                                {
+                                    let index = (serial_gsi - ioapic.gsi_base) as u8;
+                                    secondary.set_redirection_with_flags(
+                                        index,
+                                        vector,
+                                        lapic_id,
+                                        serial_flags,
+                                        false,
+                                    );
+                                } else {
+                                    crate::serial_println!(
+                                        "[APIC] COM1 IRQ on another IOAPIC; serial input disabled"
+                                    );
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+
                     // Remember the IOAPIC table index for timer IRQ so that
                     // apic_timer::init() can mask it once the LAPIC timer is live.
                     self.timer_irq_index = timer_gsi.saturating_sub(timer_ioapic.gsi_base) as u8;

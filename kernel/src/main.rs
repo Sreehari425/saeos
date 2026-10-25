@@ -324,6 +324,9 @@ pub fn kernel_main_high(handoff: Handoff) -> ! {
     // 4. Initialize Keyboard Controller & Enable CPU Hardware Interrupts
     #[cfg(feature = "keyboard")]
     drivers::keyboard::init();
+    // Typed serial input goes to the console too.
+    #[cfg(feature = "serial")]
+    drivers::serial::enable_receive_interrupts();
     scheduler::init();
     println!("[OK] Scheduler initialized; starting the first task.\n");
 

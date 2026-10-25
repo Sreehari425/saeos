@@ -15,7 +15,9 @@ enum Device {
     Null,
     /// Reads return zeros; writes are discarded.
     Zero,
-    /// Writes go to the screen and serial console.
+    /// Reads are lines typed at the keyboard or serial port (through the
+    /// line discipline, `drivers/tty.rs`); writes go to the screen and the
+    /// serial console.
     Console,
 }
 
@@ -53,8 +55,7 @@ impl Inode for DeviceNode {
                 buf.fill(0);
                 Ok(buf.len())
             }
-            // Console input arrives with the TTY layer.
-            Device::Console => Err(Errno::ENOSYS),
+            Device::Console => Ok(console_read(buf)),
         }
     }
 
@@ -69,9 +70,39 @@ impl Inode for DeviceNode {
         Err(Errno::EINVAL)
     }
 
+    fn is_terminal(&self) -> bool {
+        self.device == Device::Console
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+#[cfg(not(host_model))]
+fn console_read(buffer: &mut [u8]) -> usize {
+    crate::drivers::tty::read_console(buffer)
+}
+
+/// Host model: console input comes from this queue, through the same line
+/// discipline the kernel uses; an empty queue reads as end of file rather
+/// than blocking.
+#[cfg(host_model)]
+pub static CONSOLE_INPUT: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(host_model)]
+static CONSOLE_DISCIPLINE: std::sync::Mutex<crate::tty::LineDiscipline> =
+    std::sync::Mutex::new(crate::tty::LineDiscipline::new());
+
+#[cfg(host_model)]
+fn console_read(buffer: &mut [u8]) -> usize {
+    let mut discipline = CONSOLE_DISCIPLINE.lock().unwrap();
+    let mut echo = Vec::new();
+    for byte in CONSOLE_INPUT.lock().unwrap().drain(..) {
+        discipline.input(byte, &mut echo);
+    }
+    console_write(&echo);
+    discipline.read(buffer).unwrap_or(0)
 }
 
 #[cfg(not(host_model))]

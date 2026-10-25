@@ -23,8 +23,8 @@ pub fn run() -> ! {
     loop {
         if let Some(c) = keyboard::pop_key() {
             match c {
-                '\x08' => {
-                    // Backspace
+                // Backspace (a serial terminal sends DEL).
+                '\x08' | '\x7f' => {
                     if cursor > 0 {
                         cursor -= 1;
                         console::backspace();
@@ -34,8 +34,8 @@ pub fn run() -> ! {
                             .write_str("\x08 \x08");
                     }
                 }
-                '\n' => {
-                    // Enter / Execute
+                // Enter (a serial terminal sends CR).
+                '\n' | '\r' => {
                     println!();
 
                     if cursor > 0 {

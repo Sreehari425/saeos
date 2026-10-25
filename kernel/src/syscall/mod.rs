@@ -112,6 +112,7 @@ pub fn dispatch<M: UserMemory>(context: &Context<M>, number: u64, args: [u64; 6]
         MPROTECT => memory::mprotect(context.process, a0, a1, a2),
         MUNMAP => memory::munmap(context.process, a0, a1),
         BRK => Ok(memory::brk(context.process, a0)),
+        IOCTL => ioctl(context, a0, a1, a2),
         ARCH_PRCTL => memory::arch_prctl(context, a0, a1),
         GETPID => Ok(context.process.getpid()),
         GETPPID => Ok(context.process.getppid()),
@@ -202,6 +203,29 @@ fn execve<M: UserMemory>(
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     let envp: Vec<&str> = envp.iter().map(String::as_str).collect();
     context.process.execve(&path, &argv, &envp)?;
+    Ok(0)
+}
+
+/// `ioctl(fd, request, arg)`: the terminal queries a libc needs (`isatty`
+/// uses TIOCGWINSZ). `ENOTTY` for anything that is not the console, and
+/// for requests a terminal does not support yet.
+fn ioctl<M: UserMemory>(
+    context: &Context<M>,
+    fd_value: u64,
+    request: u64,
+    argument: u64,
+) -> Result<u64, Errno> {
+    let file = context.files.get(fd(fd_value)?)?;
+    if !file.inode.is_terminal() {
+        return Err(Errno::ENOTTY);
+    }
+    match request {
+        abi::TCGETS => context.memory.write(argument, &abi::console_termios())?,
+        abi::TIOCGWINSZ => context
+            .memory
+            .write(argument, &abi::console_window_size())?,
+        _ => return Err(Errno::ENOTTY),
+    }
     Ok(0)
 }
 

@@ -23,6 +23,7 @@ pub mod nr {
     pub const MPROTECT: u64 = 10;
     pub const MUNMAP: u64 = 11;
     pub const BRK: u64 = 12;
+    pub const IOCTL: u64 = 16;
     pub const DUP: u64 = 32;
     pub const DUP2: u64 = 33;
     pub const GETPID: u64 = 39;
@@ -230,6 +231,13 @@ pub fn getcwd(buffer: &mut [u8]) -> i64 {
             0,
         )
     }
+}
+
+pub const TIOCGWINSZ: u64 = 0x5413;
+
+/// `ioctl(fd, request, argument)`: 0 or a negative errno.
+pub fn ioctl(fd: u32, request: u64, argument: u64) -> i64 {
+    unsafe { syscall3(nr::IOCTL, u64::from(fd), request, argument) }
 }
 
 pub fn exit(code: i32) -> ! {

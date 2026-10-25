@@ -139,6 +139,9 @@ pub fn init() {
         #[cfg(feature = "keyboard")]
         IDT.entries[(pic::PIC_1_OFFSET + 1) as usize]
             .set_handler_addr(keyboard_interrupt_handler as *const () as u64);
+        #[cfg(feature = "serial")]
+        IDT.entries[crate::drivers::serial::RECEIVE_VECTOR as usize]
+            .set_handler_addr(serial_interrupt_handler as *const () as u64);
 
         // 3. APIC Spurious Interrupt Handler (Vector 0xFF = 255)
         IDT.entries[SPURIOUS_INTERRUPT_VECTOR as usize]
@@ -519,6 +522,16 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     keyboard::handle_scancode(scancode);
 
     interrupt_controller::notify_end_of_interrupt(pic::PIC_1_OFFSET + 1);
+}
+
+/// COM1 received data: queue it as console input.
+#[cfg(feature = "serial")]
+extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _irq = crate::arch::x86_64::irq::enter();
+    crate::drivers::serial::drain_input();
+    crate::arch::x86_64::interrupt_controller::notify_end_of_interrupt(
+        crate::drivers::serial::RECEIVE_VECTOR,
+    );
 }
 
 // APIC Spurious Interrupt Handler (Intel specification states no EOI should be generated)

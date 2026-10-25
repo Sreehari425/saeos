@@ -61,6 +61,25 @@ pub fn init() {
     SERIAL1.lock().init();
 }
 
+/// The vector COM1's receive interrupt (ISA IRQ 4) is routed to.
+pub const RECEIVE_VECTOR: u8 = crate::arch::x86_64::pic::PIC_1_OFFSET + 4;
+
+/// Interrupt on received data, so typed input reaches the console (call
+/// once the IDT entry and IRQ routing are in place).
+pub fn enable_receive_interrupts() {
+    unsafe { cpu::outb(PORT_COM1 + 1, 0x01) };
+}
+
+/// Move every byte the UART holds into the console input queue. Called by
+/// the receive interrupt handler.
+pub fn drain_input() {
+    unsafe {
+        while cpu::inb(PORT_COM1 + LINE_STATUS) & 0x01 != 0 {
+            crate::drivers::keyboard::push_input(cpu::inb(PORT_COM1));
+        }
+    }
+}
+
 #[doc(hidden)]
 #[cfg(feature = "serial")]
 pub fn _serial_print(args: fmt::Arguments) {

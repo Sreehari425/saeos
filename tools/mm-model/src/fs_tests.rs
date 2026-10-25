@@ -1,7 +1,7 @@
 //! Unit tests for the VFS, ramfs, devfs, the cpio parser, and RamDisk.
 
 use crate::fs::block::{BlockDevice, RamDisk};
-use crate::fs::devfs::{CONSOLE_CAPTURE, DevFs};
+use crate::fs::devfs::{CONSOLE_CAPTURE, CONSOLE_INPUT, DevFs};
 use crate::fs::initramfs::{self, CpioError, EntryKind};
 use crate::fs::procfs::{Generator, ProcFs};
 use crate::fs::ramfs::RamFs;
@@ -710,4 +710,31 @@ fn relative_paths_resolve_against_the_cwd() {
     ] {
         assert_eq!(resolve(cwd, path), expected, "{cwd} + {path}");
     }
+}
+
+#[test]
+fn console_reads_lines_through_the_discipline() {
+    let (vfs, files) = setup();
+    let console = vfs
+        .open(&files, "/dev/console", OpenFlags::READ_WRITE)
+        .unwrap();
+    assert!(vfs.lookup("/dev/console").unwrap().is_terminal());
+    assert!(!vfs.lookup("/dev/null").unwrap().is_terminal());
+    CONSOLE_CAPTURE.lock().unwrap().clear();
+    CONSOLE_INPUT
+        .lock()
+        .unwrap()
+        .extend_from_slice(b"ls -l\x7f\x7fa\rnext\n");
+    let mut buffer = [0u8; 64];
+    let count = vfs.read(&files, console, &mut buffer).unwrap();
+    assert_eq!(&buffer[..count], b"ls a\n");
+    let count = vfs.read(&files, console, &mut buffer).unwrap();
+    assert_eq!(&buffer[..count], b"next\n");
+    assert!(
+        CONSOLE_CAPTURE
+            .lock()
+            .unwrap()
+            .starts_with(b"ls -l\x08 \x08"),
+        "echoed"
+    );
 }

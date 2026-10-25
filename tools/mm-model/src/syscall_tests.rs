@@ -679,3 +679,43 @@ fn dup2_redirects_and_wait_nohang() {
     assert_eq!(world.call(FORK, &[]), 9);
     assert_eq!(world.call(GETPPID, &[]), 1);
 }
+
+#[test]
+fn ioctl_answers_terminal_queries_only_for_the_console() {
+    let world = World::new();
+    let console = world.call(OPEN, &[world.string(0, "/dev/console"), abi::O_RDWR]) as u64;
+    let file = world.call(OPEN, &[world.string(0, "/plain"), O_RDWR_CREAT]) as u64;
+    // TIOCGWINSZ: rows, cols.
+    assert_eq!(
+        world.call(IOCTL, &[console, abi::TIOCGWINSZ, BASE + 100]),
+        0
+    );
+    assert_eq!(world.user(100, 4), [25, 0, 80, 0]);
+    // TCGETS: canonical mode with echo, ^C/^D/DEL as the control chars.
+    assert_eq!(world.call(IOCTL, &[console, abi::TCGETS, BASE + 200]), 0);
+    let termios = world.user(200, abi::TERMIOS_SIZE);
+    let lflag = u32::from_le_bytes(termios[12..16].try_into().unwrap());
+    assert_eq!(lflag & 0o12, 0o12, "ICANON | ECHO");
+    assert_eq!(
+        (termios[17], termios[17 + 2], termios[17 + 4]),
+        (0x03, 0x7f, 0x04)
+    );
+    // Not a terminal, unknown request, bad fd, bad pointer.
+    assert_eq!(
+        world.call(IOCTL, &[file, abi::TIOCGWINSZ, BASE + 100]),
+        errno(Errno::ENOTTY)
+    );
+    assert_eq!(
+        world.call(IOCTL, &[console, 0x5402, BASE + 100]),
+        errno(Errno::ENOTTY),
+        "TCSETS"
+    );
+    assert_eq!(
+        world.call(IOCTL, &[77, abi::TCGETS, BASE + 100]),
+        errno(Errno::EBADF)
+    );
+    assert_eq!(
+        world.call(IOCTL, &[console, abi::TCGETS, 0]),
+        errno(Errno::EFAULT)
+    );
+}

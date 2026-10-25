@@ -12,6 +12,7 @@ pub const MMAP: u64 = 9;
 pub const MPROTECT: u64 = 10;
 pub const MUNMAP: u64 = 11;
 pub const BRK: u64 = 12;
+pub const IOCTL: u64 = 16;
 pub const DUP: u64 = 32;
 pub const DUP2: u64 = 33;
 pub const GETPID: u64 = 39;

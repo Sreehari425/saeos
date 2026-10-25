@@ -46,6 +46,10 @@ pub mod klog_ring;
 pub mod syscall;
 #[cfg(test)]
 mod syscall_tests;
+#[path = "../../../kernel/src/drivers/tty.rs"]
+pub mod tty;
+#[cfg(test)]
+mod tty_tests;
 #[path = "../../../kernel/src/mm/uaccess.rs"]
 pub mod uaccess;
 #[cfg(test)]

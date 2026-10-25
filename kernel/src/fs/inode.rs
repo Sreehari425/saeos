@@ -88,6 +88,11 @@ pub trait Inode: Send + Sync + Any {
         Err(Errno::ENOTDIR)
     }
 
+    /// Whether this is a terminal (`isatty`, terminal `ioctl`s).
+    fn is_terminal(&self) -> bool {
+        false
+    }
+
     /// For filesystems that downcast directories (`rename`).
     fn as_any(&self) -> &dyn Any;
 }
