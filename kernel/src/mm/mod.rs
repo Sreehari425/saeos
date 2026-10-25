@@ -3,7 +3,8 @@
 //! Address layout: see [`layout`]. Physical frames: [`frame`] (bitmap
 //! ownership, [`buddy`] free lists, reference counts). Page tables:
 //! [`paging`]. Kernel heap: [`heap`] (static small-object heap plus a
-//! page-backed heap). Guarded kernel stacks: [`kvm`].
+//! page-backed heap). Guarded kernel stacks: [`kvm`]. Device memory:
+//! [`dma`].
 //!
 //! # Lock order
 //!
@@ -24,6 +25,7 @@
 pub mod address_space;
 pub mod allocator_model;
 pub mod buddy;
+pub mod dma;
 pub mod frame;
 pub mod heap;
 pub mod holds;

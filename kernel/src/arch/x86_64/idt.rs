@@ -143,6 +143,12 @@ pub fn init() {
         IDT.entries[crate::drivers::serial::RECEIVE_VECTOR as usize]
             .set_handler_addr(serial_interrupt_handler as *const () as u64);
 
+        // Vectors for MSI, handed out by `vectors::allocate`.
+        for (index, stub) in super::vectors::STUBS.iter().enumerate() {
+            IDT.entries[usize::from(super::vectors::FIRST) + index]
+                .set_handler_addr(*stub as *const () as u64);
+        }
+
         // 3. APIC Spurious Interrupt Handler (Vector 0xFF = 255)
         IDT.entries[SPURIOUS_INTERRUPT_VECTOR as usize]
             .set_handler_addr(spurious_interrupt_handler as *const () as u64);
@@ -437,6 +443,8 @@ pub struct PageFaultFrame {
 /// EFAULT); anything else is a kernel bug and is reported as before.
 #[unsafe(no_mangle)]
 extern "sysv64" fn saeos_page_fault_rust(frame: &mut PageFaultFrame) {
+    // The entry stub clears DF (user code may have set it).
+    debug_assert!(crate::arch::x86_64::cpu::direction_flag_clear());
     let address = read_cr2();
     // A write to a present page in the user half may be copy-on-write
     // (after fork), from user code or from a kernel copy_to_user.

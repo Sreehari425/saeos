@@ -60,6 +60,10 @@ pub fn init(boot_info: &BootInfo) {
         "/proc",
         ProcFs::new(alloc::vec![
             ("cmdline", generator(proc_cmdline)),
+            (
+                "interrupts",
+                generator(crate::arch::x86_64::vectors::proc_text)
+            ),
             ("meminfo", generator(proc_meminfo)),
             ("mounts", generator(proc_mounts)),
             ("pci", generator(crate::drivers::pci::proc_text)),

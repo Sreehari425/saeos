@@ -255,7 +255,7 @@ fn space_child() -> ! {
 /// Free frames once the system is quiet: the reaper frees exited tasks'
 /// kernel stacks asynchronously, so wait until nothing is left to reap and
 /// the count holds still, or frame comparisons race with it.
-fn settled_free_frames() -> u64 {
+pub(super) fn settled_free_frames() -> u64 {
     let mut previous = u64::MAX;
     for _ in 0..200 {
         let idle = !scheduler::with_scheduler(|scheduler| scheduler.has_exited_tasks());

@@ -6,6 +6,7 @@
 //! Panics and faults end the run as failures (see the panic handler and the
 //! exception handlers).
 
+mod dma_msi;
 mod pci;
 mod user;
 
@@ -29,6 +30,7 @@ pub fn run() -> ! {
     let log_passed = crate::klog::contains("boot-test: starting.");
     let fs_passed = filesystem_test();
     let pci_passed = pci::pci_test();
+    let dma_msi_passed = dma_msi::dma_msi_test();
     let gdt_passed = user::gdt_test();
     let fpu_passed = user::fpu_test();
     let space_passed = user::process_space_test();
@@ -46,6 +48,7 @@ pub fn run() -> ! {
         && log_passed
         && fs_passed
         && pci_passed
+        && dma_msi_passed
         && gdt_passed
         && fpu_passed
         && space_passed
@@ -57,7 +60,7 @@ pub fn run() -> ! {
         && idle_passed
         && scheduler_passed;
     serial_println!(
-        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} fs={} pci={} gdt-tss={} fpu={} process-space={} uaccess={} syscalls={} exec-prepare={} user-memory={} wait-event={} idle={} scheduler={} -> {}",
+        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} fs={} pci={} dma-msi={} gdt-tss={} fpu={} process-space={} uaccess={} syscalls={} exec-prepare={} user-memory={} wait-event={} idle={} scheduler={} -> {}",
         verdict(mm_passed),
         verdict(irq_passed),
         verdict(breakpoint_passed),
@@ -65,6 +68,7 @@ pub fn run() -> ! {
         verdict(log_passed),
         verdict(fs_passed),
         verdict(pci_passed),
+        verdict(dma_msi_passed),
         verdict(gdt_passed),
         verdict(fpu_passed),
         verdict(space_passed),

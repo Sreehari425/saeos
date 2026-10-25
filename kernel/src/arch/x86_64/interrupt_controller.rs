@@ -197,3 +197,10 @@ pub fn init(topology: Option<&InterruptTopology>) -> ControllerKind {
 pub fn notify_end_of_interrupt(vector: u8) {
     CONTROLLER.lock().notify_end_of_interrupt(vector);
 }
+
+/// The Local APIC ID MSI messages should target, or `None` in legacy PIC
+/// mode, where nothing would deliver them (and nothing would take the EOI).
+pub fn msi_destination() -> Option<u8> {
+    let controller = CONTROLLER.lock();
+    (controller.mode == ControllerKind::Apic).then(|| controller.lapic.id() as u8)
+}

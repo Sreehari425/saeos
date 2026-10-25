@@ -11,6 +11,7 @@ pub mod pic;
 pub mod qemu;
 pub mod syscall;
 pub mod uefi;
+pub mod vectors;
 
 pub use interrupt_controller::ControllerKind;
 

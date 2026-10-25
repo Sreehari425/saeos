@@ -143,10 +143,13 @@ test: mm-test miri boot-test user-test mm-guard-test fault-test panic-lock-test
 # SMEP/SMAP exist and the user-memory test checks they are enforced.
 SMAP_EXPECT := QEMU_TEST_EXPECT="uaccess smap=true smep=true"
 # The boot test also checks PCI enumeration: an AC'97 sound card is added,
-# and the q35 runs put it behind a PCI-to-PCI bridge (bus 1).
-PCI_TEST_DEVICES := -device AC97
+# and the q35 runs put it behind a PCI-to-PCI bridge (bus 1). QEMU's edu
+# teaching device tests DMA buffers and MSI; its full DMA mask makes it use
+# the address it is given, untruncated.
+EDU := edu,dma_mask=0xffffffffffffffff
+PCI_TEST_DEVICES := -device AC97 -device $(EDU)
 Q35_TEST := INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE) saeos.test.pci=q35' ./scripts/run-qemu-test.sh
-Q35_DEVICES := -machine q35 -device pci-bridge,id=br1,chassis_nr=1,bus=pcie.0 -device AC97,bus=br1
+Q35_DEVICES := -machine q35 -device pci-bridge,id=br1,chassis_nr=1,bus=pcie.0 -device AC97,bus=br1 -device $(EDU),bus=pcie.0
 boot-test: initramfs-test
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test
 	$(QEMU_TEST) $(BIOS_TEST_IMAGE) -m $(TEST_MEM) $(PCI_TEST_DEVICES)
@@ -159,11 +162,11 @@ boot-test: initramfs-test
 
 mm-stress: initramfs-test
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test,mm-stress,mm-allocator-stats,paging-debug
-	INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE)' ./scripts/run-mm-stress.sh $(BIOS_TEST_IMAGE) -m 16G
+	INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE)' ./scripts/run-mm-stress.sh $(BIOS_TEST_IMAGE) -m 16G $(PCI_TEST_DEVICES)
 
 mm-stress-uefi: initramfs-test
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),boot-test,mm-stress,mm-allocator-stats,paging-debug
-	INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE)' ./scripts/run-mm-stress.sh $(UEFI_TEST_IMAGE) -m 16G
+	INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE)' ./scripts/run-mm-stress.sh $(UEFI_TEST_IMAGE) -m 16G $(PCI_TEST_DEVICES)
 
 # Userspace in ring 3: the test initramfs's usertest runs as init (PID 1)
 # and its exit status is the verdict (saeos.test.exit, default 0). Then a
@@ -179,7 +182,7 @@ user-test: initramfs-test
 	$(call user_tests,$(UEFI_TEST_IMAGE))
 
 define user_tests
-	CMDLINE='init=/test/bin/usertest' QEMU_TEST_EXPECT="$$(printf 'usertest: PASS\nuser-mode preemptions: [1-9]')" $(USER_TEST_RUN) $(1) -m 2G
+	CMDLINE='init=/test/bin/usertest' QEMU_TEST_EXPECT="$$(printf 'usertest: direction flag kept across interrupts\nusertest: PASS\nuser-mode preemptions: [1-9]')" $(USER_TEST_RUN) $(1) -m 2G
 	CMDLINE='init=/test/bin/usertest saeos.test.exit=sig11 -- crash' QEMU_TEST_EXPECT="killed by SIGSEGV: PAGE FAULT at 0x0" $(USER_TEST_RUN) $(1) -m 2G
 	CMDLINE='init=/test/bin/usertest saeos.test.exit=sig4 -- ud' QEMU_TEST_EXPECT="killed by SIGILL" $(USER_TEST_RUN) $(1) -m 2G
 	CMDLINE='init=/missing saeos.test=no-init' QEMU_TEST_EXPECT="Requested init /missing failed \(error -2\)" $(USER_TEST_RUN) $(1) -m 2G

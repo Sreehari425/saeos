@@ -5,24 +5,29 @@
 //!   -> DEVICES: every function, its class, BARs, interrupt, capabilities
 //!   -> DRIVERS: each driver's `matches` / `probe` (none yet)
 //!   -> boot log, /proc/pci, lspci
-//! drivers:     pci::find(...), pci::enable(...), pci::map_bar(...)
+//! drivers:     pci::find(...), pci::enable(...), pci::map_bar(...),
+//!              pci::enable_msi(...) for interrupts
 //! ```
 //!
-//! `config`, `device` and `scan` are pure and tested in the host model
-//! against a fake configuration space. Interrupt routing (MSI, or ACPI
-//! `_PRT` for legacy INTx) and PCIe extended configuration space (ECAM)
-//! come later; the first drivers poll.
+//! `config`, `device`, `scan` and `msi` are pure and tested in the host
+//! model against a fake configuration space. Interrupts are MSI only:
+//! legacy INTx would need ACPI `_PRT` routing. MSI-X and PCIe extended
+//! configuration space (ECAM) come later.
 
 pub mod config;
 pub mod device;
+pub mod msi;
 pub mod scan;
 
 #[cfg(not(host_model))]
 mod kernel {
     use super::config::{
-        COMMAND, COMMAND_BUS_MASTER, COMMAND_IO, COMMAND_MEMORY, ConfigSpace, PortConfig,
+        Address, CAPABILITY_MSI, COMMAND, COMMAND_BUS_MASTER, COMMAND_IO, COMMAND_MEMORY,
+        ConfigSpace, PortConfig,
     };
     use super::device::{Bar, PciDevice};
+    use super::msi::{self, MsiCapability};
+    use crate::arch::x86_64::{interrupt_controller, vectors};
     use crate::sync::SpinMutex;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -138,11 +143,80 @@ mod kernel {
         }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MsiError {
+        /// The device has no MSI capability.
+        NoCapability,
+        /// The legacy PIC is in use: nothing would deliver the message.
+        NotApicMode,
+        NoFreeVector,
+    }
+
+    /// A device's MSI, switched on. Dropping it switches MSI off on the
+    /// device, then frees the vector.
+    pub struct Msi {
+        address: Address,
+        capability: MsiCapability,
+        vector: u8,
+    }
+
+    impl Msi {
+        pub fn vector(&self) -> u8 {
+            self.vector
+        }
+    }
+
+    impl Drop for Msi {
+        fn drop(&mut self) {
+            // Off first: a vector freed while the device can still send it
+            // would land on its next owner.
+            msi::disable(&CONFIG, self.address, &self.capability);
+            vectors::free(self.vector);
+        }
+    }
+
+    /// Give `device` a vector of its own and have it interrupt with MSI;
+    /// `handler` runs in interrupt context (no allocation, no blocking:
+    /// acknowledge the device and wake a task).
+    pub fn enable_msi(
+        device: &PciDevice,
+        owner: &'static str,
+        handler: vectors::Handler,
+    ) -> Result<Msi, MsiError> {
+        let offset = device
+            .has_capability(CAPABILITY_MSI)
+            .ok_or(MsiError::NoCapability)?;
+        let destination = interrupt_controller::msi_destination().ok_or(MsiError::NotApicMode)?;
+        let capability = MsiCapability::read(&CONFIG, device.address, offset);
+        let vector = vectors::allocate(owner, handler).ok_or(MsiError::NoFreeVector)?;
+        msi::program(&CONFIG, device.address, &capability, destination, vector);
+        Ok(Msi {
+            address: device.address,
+            capability,
+            vector,
+        })
+    }
+
+    /// Whether MSI is on for `device` (read from the device itself).
+    pub fn msi_enabled(device: &PciDevice) -> bool {
+        device.has_capability(CAPABILITY_MSI).is_some_and(|offset| {
+            MsiCapability::read(&CONFIG, device.address, offset).is_enabled(&CONFIG, device.address)
+        })
+    }
+
     /// `/proc/pci`: one line per function, then its BARs indented.
     pub fn proc_text() -> Vec<u8> {
         let mut text = String::new();
         for device in DEVICES.lock().iter() {
-            let _ = writeln!(text, "{device}");
+            let _ = write!(text, "{device}");
+            if device.has_capability(CAPABILITY_MSI).is_some() {
+                text.push_str(if msi_enabled(device) {
+                    " msi on"
+                } else {
+                    " msi"
+                });
+            }
+            text.push('\n');
             for (index, bar) in device.bars.iter().enumerate() {
                 if let Some(bar) = bar {
                     let _ = writeln!(text, "    bar{index} {bar}");

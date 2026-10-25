@@ -412,6 +412,52 @@ fn processes() {
         fail(64, b"parent cannot write after the child exited");
     }
 
+    // DF (the direction flag) is user state: a backwards copy sets it, and
+    // interrupts and faults may arrive meanwhile. The kernel must clear it
+    // for itself (its memcpy would run backwards) and give it back. The
+    // child spins with DF set, so timer interrupts land, and writes a
+    // copy-on-write page, so a page fault does too.
+    let page = mmap_anonymous(0, PAGE, PROT_READ | PROT_WRITE, 0);
+    if page < 0 {
+        fail(121, b"mmap for the direction-flag test");
+    }
+    let page = page as *mut u8;
+    unsafe { page.write_volatile(1) };
+    let child = spawn(|| {
+        let flags: u64;
+        unsafe {
+            core::arch::asm!(
+                "std",
+                "mov byte ptr [{page}], 2",
+                "2:",
+                "dec {count}",
+                "jnz 2b",
+                // Step over the red zone before pushing.
+                "sub rsp, 128",
+                "pushfq",
+                "pop {flags}",
+                "add rsp, 128",
+                "cld",
+                page = in(reg) page,
+                count = inout(reg) 20_000_000u64 => _,
+                flags = out(reg) flags,
+            );
+        }
+        // DF still set after the interrupts and the fault, and the write
+        // went to this process's copy.
+        if flags & (1 << 10) == 0 || unsafe { page.read_volatile() } != 2 {
+            return 1;
+        }
+        0
+    });
+    if exited_with(wait_for(child, 122)) != Some(0) {
+        fail(123, b"direction flag across interrupts and faults");
+    }
+    if unsafe { page.read_volatile() } != 1 {
+        fail(124, b"the child's copy-on-write write reached the parent");
+    }
+    say(b"usertest: direction flag kept across interrupts\n");
+
     // fork + execve: the child becomes /bin/hello and exits 0.
     let child = spawn(|| {
         execve(b"/bin/hello\0", &[b"hello\0"], &[b"FROM=usertest\0"]);

@@ -31,6 +31,11 @@ saeos_timer_interrupt_entry:
     ; independently below the saved registers.
     mov rdi, rsp
     and rsp, -16
+    ; The CPU does not clear DF on an interrupt, and user code may be in the
+    ; middle of a backwards copy (std; rep movsb). Rust assumes DF=0 at
+    ; every call, so its memcpy would run backwards and corrupt memory.
+    ; iretq restores the interrupted RFLAGS, DF included.
+    cld
     call saeos_timer_interrupt_rust
     ; RAX is the selected context pointer. RDX distinguishes an interrupt
     ; frame from a saved voluntary context.
@@ -130,6 +135,9 @@ saeos_page_fault_entry:
     mov rbp, rsp
 %endif
     and rsp, -16
+    ; DF=0 for Rust, as in the timer stub: a backwards user copy that hits
+    ; a copy-on-write page faults with DF set.
+    cld
     call saeos_page_fault_rust
     mov rsp, rbx
     pop r15

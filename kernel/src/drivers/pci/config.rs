@@ -80,8 +80,13 @@ pub const INTERRUPT_PIN: u8 = 0x3d;
 pub const COMMAND_IO: u16 = 1 << 0;
 pub const COMMAND_MEMORY: u16 = 1 << 1;
 pub const COMMAND_BUS_MASTER: u16 = 1 << 2;
+/// Stop the device raising its legacy INTx# line (it uses MSI instead).
+pub const COMMAND_INTX_DISABLE: u16 = 1 << 10;
 /// Status register: the capabilities list at 0x34 is valid.
 pub const STATUS_CAPABILITIES: u16 = 1 << 4;
+
+/// Capability IDs.
+pub const CAPABILITY_MSI: u8 = 0x05;
 
 /// A vendor ID read from an empty slot.
 pub const NO_DEVICE: u16 = 0xffff;

@@ -22,6 +22,8 @@ pub fn user_preemptions() -> u64 {
 
 #[unsafe(no_mangle)]
 pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDispatch {
+    // The entry stub clears DF (user code may have set it).
+    debug_assert!(crate::arch::x86_64::cpu::direction_flag_clear());
     let _irq = crate::arch::x86_64::irq::enter();
     // The saved CS sits after the 15 registers and RIP.
     let code_segment = unsafe { *((stack_pointer + 16 * 8) as *const u64) };

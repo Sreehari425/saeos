@@ -30,6 +30,17 @@ pub fn interrupts_enabled() -> bool {
     flags & (1 << 9) != 0
 }
 
+/// Whether RFLAGS.DF is clear, as the ABI requires at every call: string
+/// instructions (`rep movsb` in memcpy) would otherwise run backwards.
+#[inline]
+pub fn direction_flag_clear() -> bool {
+    let flags: u64;
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", out(reg) flags, options(nomem, preserves_flags));
+    }
+    flags & (1 << 10) == 0
+}
+
 #[inline]
 pub fn stack_pointer() -> u64 {
     let value: u64;

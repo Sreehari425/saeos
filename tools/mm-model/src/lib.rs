@@ -21,6 +21,10 @@ mod buddy_tests;
 pub mod cmdline;
 #[cfg(test)]
 mod cmdline_tests;
+#[path = "../../../kernel/src/mm/dma.rs"]
+pub mod dma;
+#[cfg(test)]
+mod dma_tests;
 #[path = "../../../kernel/src/exec/elf.rs"]
 pub mod elf;
 #[path = "../../../kernel/src/exec/stack.rs"]
@@ -44,6 +48,8 @@ mod holds_tests;
 pub mod klog_ring;
 #[cfg(test)]
 mod libsaeos_tests;
+#[cfg(test)]
+mod msi_tests;
 #[path = "../../../kernel/src/drivers/pci/mod.rs"]
 pub mod pci;
 #[cfg(test)]
