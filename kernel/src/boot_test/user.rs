@@ -219,6 +219,7 @@ pub fn fpu_test() -> bool {
 
 use crate::mm::VirtAddr;
 use crate::mm::paging::{self, AddressSpace, PageFlags};
+use crate::mm::vma::MemoryMap;
 use crate::mm::{frame, uaccess};
 
 /// Where the tests map user pages.
@@ -251,10 +252,42 @@ fn space_child() -> ! {
     scheduler::exit(ExitStatus(if ok { 7 } else { 1 }))
 }
 
+/// Free frames once the system is quiet: the reaper frees exited tasks'
+/// kernel stacks asynchronously, so wait until nothing is left to reap and
+/// the count holds still, or frame comparisons race with it.
+fn settled_free_frames() -> u64 {
+    let mut previous = u64::MAX;
+    for _ in 0..200 {
+        let idle = !scheduler::with_scheduler(|scheduler| scheduler.has_exited_tasks());
+        let free = frame::stats().free_frames;
+        if idle && free == previous {
+            return free;
+        }
+        previous = free;
+        scheduler::sleep_ms(5);
+    }
+    previous
+}
+
 /// Spawn a task in its own address space, wait for it, return its status.
 fn run_in_space(entry: crate::task::TaskEntry, name: &'static str, space: AddressSpace) -> i64 {
+    run_in_space_with_map(entry, name, space, MemoryMap::default())
+}
+
+/// A map for a bare test space: a heap at 256 MiB and `mmap` below the
+/// usual stack guard.
+fn test_map() -> MemoryMap {
+    MemoryMap::new(&[], 0x1000_0000, crate::exec::USER_STACK_GUARD).expect("empty map")
+}
+
+fn run_in_space_with_map(
+    entry: crate::task::TaskEntry,
+    name: &'static str,
+    space: AddressSpace,
+    map: MemoryMap,
+) -> i64 {
     EXPECTED_ROOT.store(space.root_frame().0, Ordering::Release);
-    let (_, process) = scheduler::spawn_in_new_process(entry, name, space);
+    let (_, process) = scheduler::spawn_in_new_process(entry, name, space, map);
     match scheduler::wait_child(process) {
         Ok(status) => status.0 as i64,
         Err(error) => {
@@ -270,9 +303,9 @@ pub fn process_space_test() -> bool {
     let cycle = || run_in_space(space_child, "space-child", test_space(16, 0));
     // The first cycle may grow the heap; measure the second.
     let warm = cycle();
-    let before = frame::stats().free_frames;
+    let before = settled_free_frames();
     let status = cycle();
-    let after = frame::stats().free_frames;
+    let after = settled_free_frames();
     if warm != 7 || status != 7 || before != after {
         serial_println!(
             "boot-test: process space status={}/{} free frames {} -> {}",
@@ -430,7 +463,12 @@ fn syscall_child() -> ! {
     // wait4 on a grandchild, with the status written to user memory.
     let grandchild = test_space(1, 0);
     EXPECTED_ROOT.store(grandchild.root_frame().0, Ordering::Release);
-    let (_, pid) = scheduler::spawn_in_new_process(space_child, "grandchild", grandchild);
+    let (_, pid) = scheduler::spawn_in_new_process(
+        space_child,
+        "grandchild",
+        grandchild,
+        MemoryMap::default(),
+    );
     let status = USER_BASE + 2 * PAGE;
     check(
         15,
@@ -498,7 +536,7 @@ fn exec_child() -> ! {
     let memory = uaccess::KernelUserMemory;
     let sp = expected.stack_pointer;
     let argc = read_word(sp);
-    check(1, argc == Ok(2) && sp % 16 == 0);
+    check(1, argc == Ok(2) && sp.is_multiple_of(16));
     let argument = |index: u64| {
         read_word(sp + 8 + index * 8).and_then(|address| memory.read_cstr(address, 64))
     };
@@ -598,7 +636,7 @@ pub fn exec_test() -> bool {
         serial_println!("boot-test: exec: /bin/hello does not plan");
         return false;
     };
-    let before = frame::stats().free_frames;
+    let before = settled_free_frames();
     let image = match prepare() {
         Ok(image) => image,
         Err(error) => {
@@ -612,8 +650,8 @@ pub fn exec_test() -> bool {
         plan,
         stack_pointer: image.stack_pointer,
     });
-    let status = run_in_space(exec_child, "exec-child", image.space);
-    let after = frame::stats().free_frames;
+    let status = run_in_space_with_map(exec_child, "exec-child", image.space, image.map);
+    let after = settled_free_frames();
     if status != 0 || before != after {
         serial_println!(
             "boot-test: exec child failures {:#b}, free frames {} -> {}",
@@ -629,4 +667,76 @@ pub fn exec_test() -> bool {
         serial_println!("boot-test: exec error cases wrong");
     }
     mappings_ok && status == 0 && before == after && errors_ok
+}
+
+// ---------------------------------------------------------------------------
+// User memory: mmap and brk through the real syscalls, freed on exit.
+
+const BIG_MAP: u64 = 64 << 20;
+
+fn memory_child() -> ! {
+    use crate::fs::Errno;
+    UACCESS_FAILURES.store(0, Ordering::Release);
+    let prot = 3; // PROT_READ | PROT_WRITE
+    let flags = crate::syscall::memory::MAP_PRIVATE | crate::syscall::memory::MAP_ANONYMOUS;
+    let address = syscall(nr::MMAP, &[0, BIG_MAP, prot, flags, u64::MAX, 0]);
+    check(0, address > 0);
+    let address = address as u64;
+    // First and last page are zeroed and writable through user access.
+    let mut byte = [0xffu8];
+    check(
+        1,
+        uaccess::copy_from_user(&mut byte, address + BIG_MAP - 1).is_ok() && byte == [0],
+    );
+    check(2, uaccess::copy_to_user(address, b"first").is_ok());
+    check(
+        3,
+        uaccess::copy_to_user(address + BIG_MAP - 4, b"last").is_ok(),
+    );
+    // A read-only mapping refuses kernel writes on the process's behalf.
+    check(4, syscall(nr::MPROTECT, &[address, 4096, 1]) == 0);
+    check(
+        5,
+        uaccess::copy_to_user(address, b"x") == Err(Errno::EFAULT),
+    );
+    // Half of it goes now, the rest with the process.
+    check(6, syscall(nr::MUNMAP, &[address, BIG_MAP / 2]) == 0);
+    check(
+        7,
+        uaccess::copy_from_user(&mut byte, address) == Err(Errno::EFAULT),
+    );
+    // The heap.
+    let start = syscall(nr::BRK, &[0]) as u64;
+    check(
+        8,
+        syscall(nr::BRK, &[start + (1 << 20)]) as u64 == start + (1 << 20),
+    );
+    check(
+        9,
+        uaccess::copy_to_user(start + (1 << 20) - 1, b"h").is_ok(),
+    );
+    let failures = UACCESS_FAILURES.load(Ordering::Acquire);
+    syscall(nr::EXIT, &[failures as u64]);
+    unreachable!("exit returned");
+}
+
+/// A process maps 64 MiB and grows its heap by 1 MiB, uses both, exits;
+/// every frame comes back.
+pub fn user_memory_test() -> bool {
+    let cycle =
+        || run_in_space_with_map(memory_child, "memory-child", test_space(0, 0), test_map());
+    let warm = cycle();
+    let before = settled_free_frames();
+    let status = cycle();
+    let after = settled_free_frames();
+    if warm != 0 || status != 0 || before != after {
+        serial_println!(
+            "boot-test: user memory failures {:#b}/{:#b}, free frames {} -> {}",
+            warm,
+            status,
+            before,
+            after
+        );
+    }
+    warm == 0 && status == 0 && before == after
 }

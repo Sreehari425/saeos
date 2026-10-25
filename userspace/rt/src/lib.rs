@@ -19,7 +19,12 @@ pub mod nr {
     pub const WRITE: u64 = 1;
     pub const OPEN: u64 = 2;
     pub const CLOSE: u64 = 3;
+    pub const MMAP: u64 = 9;
+    pub const MPROTECT: u64 = 10;
+    pub const MUNMAP: u64 = 11;
+    pub const BRK: u64 = 12;
     pub const GETPID: u64 = 39;
+    pub const ARCH_PRCTL: u64 = 158;
     pub const EXIT: u64 = 60;
 }
 
@@ -90,6 +95,50 @@ pub fn close(fd: u32) -> i64 {
 
 pub fn getpid() -> i64 {
     unsafe { syscall3(nr::GETPID, 0, 0, 0) }
+}
+
+/// The program break after asking for `address` (0: just report it).
+pub fn brk(address: u64) -> u64 {
+    unsafe { syscall3(nr::BRK, address, 0, 0) as u64 }
+}
+
+pub const PROT_READ: u64 = 1;
+pub const PROT_WRITE: u64 = 2;
+pub const PROT_EXEC: u64 = 4;
+pub const MAP_PRIVATE: u64 = 0x02;
+pub const MAP_FIXED: u64 = 0x10;
+pub const MAP_ANONYMOUS: u64 = 0x20;
+
+/// Anonymous private memory: the address, or a negative errno.
+pub fn mmap_anonymous(hint: u64, length: u64, protection: u64, extra_flags: u64) -> i64 {
+    unsafe {
+        syscall6(
+            nr::MMAP,
+            [
+                hint,
+                length,
+                protection,
+                MAP_PRIVATE | MAP_ANONYMOUS | extra_flags,
+                u64::MAX,
+                0,
+            ],
+        )
+    }
+}
+
+pub fn munmap(address: u64, length: u64) -> i64 {
+    unsafe { syscall3(nr::MUNMAP, address, length, 0) }
+}
+
+pub fn mprotect(address: u64, length: u64, protection: u64) -> i64 {
+    unsafe { syscall3(nr::MPROTECT, address, length, protection) }
+}
+
+pub const ARCH_SET_FS: u64 = 0x1002;
+pub const ARCH_GET_FS: u64 = 0x1003;
+
+pub fn arch_prctl(code: u64, address: u64) -> i64 {
+    unsafe { syscall3(nr::ARCH_PRCTL, code, address, 0) }
 }
 
 pub fn exit(code: i32) -> ! {

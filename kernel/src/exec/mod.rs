@@ -39,8 +39,44 @@ const MAX_PROGRAM_SIZE: u64 = 64 * 1024 * 1024;
 
 pub struct PreparedImage {
     pub space: AddressSpace,
+    /// The image, heap start and stack, for `brk`/`mmap` later.
+    pub map: crate::mm::vma::MemoryMap,
     pub entry: u64,
     pub stack_pointer: u64,
+}
+
+/// The memory map of a freshly loaded image: its segments and the stack;
+/// the heap starts on the page after the highest segment, and `mmap` uses
+/// the space below the stack guard.
+fn memory_map(plan: &elf::LoadPlan) -> Result<crate::mm::vma::MemoryMap, Errno> {
+    use crate::mm::vma::{MemoryMap, Protection, Region, RegionKind};
+    let mut regions: Vec<Region> = plan
+        .segments
+        .iter()
+        .map(|segment| Region {
+            start: segment.start,
+            end: segment.end,
+            protection: Protection {
+                read: true,
+                write: segment.flags.write,
+                execute: segment.flags.execute,
+            },
+            kind: RegionKind::Image,
+        })
+        .collect();
+    regions.push(Region {
+        start: USER_STACK_TOP - USER_STACK_PAGES * PAGE,
+        end: USER_STACK_TOP,
+        protection: Protection::READ_WRITE,
+        kind: RegionKind::Stack,
+    });
+    let brk_start = plan
+        .segments
+        .iter()
+        .map(|segment| segment.end)
+        .max()
+        .unwrap_or(crate::mm::vma::MIN_ADDRESS);
+    MemoryMap::new(&regions, brk_start, USER_STACK_GUARD).map_err(|_| Errno::ENOEXEC)
 }
 
 fn read_program(path: &str) -> Result<Vec<u8>, Errno> {
@@ -82,7 +118,7 @@ fn new_page() -> Result<(PhysFrame, &'static mut [u8; 4096]), Errno> {
     Ok((frame, page))
 }
 
-fn map(
+fn map_page(
     space: &AddressSpace,
     address: u64,
     frame: PhysFrame,
@@ -114,13 +150,14 @@ fn random_bytes() -> [u8; 16] {
 pub fn prepare(path: &str, argv: &[&str], envp: &[&str]) -> Result<PreparedImage, Errno> {
     let file = read_program(path)?;
     let plan = elf::plan(&file, USER_STACK_GUARD)?;
+    let map = memory_map(&plan)?;
     let space = AddressSpace::new().map_err(|_| Errno::ENOMEM)?;
 
     for segment in &plan.segments {
         for page_address in (segment.start..segment.end).step_by(PAGE as usize) {
             let (frame, page) = new_page()?;
             elf::LoadPlan::page_contents(segment, &file, page_address, page);
-            map(&space, page_address, frame, page_flags(segment.flags))?;
+            map_page(&space, page_address, frame, page_flags(segment.flags))?;
         }
     }
 
@@ -151,25 +188,27 @@ pub fn prepare(path: &str, argv: &[&str], envp: &[&str]) -> Result<PreparedImage
             page[(from - page_address) as usize..(to - page_address) as usize]
                 .copy_from_slice(&stack.bytes[source..source + (to - from) as usize]);
         }
-        map(&space, page_address, frame, PageFlags::USER_READ_WRITE)?;
+        map_page(&space, page_address, frame, PageFlags::USER_READ_WRITE)?;
     }
 
     Ok(PreparedImage {
         space,
+        map,
         entry: plan.entry,
         stack_pointer: stack.stack_pointer,
     })
 }
 
 /// Make `image` the current process's program: its address space replaces
-/// the process's previous one (freed here), the FPU starts clean, and the
-/// caller enters user mode at the returned `(entry, stack_pointer)`.
+/// the process's previous one (freed here), the FPU and FS base start
+/// clean, and the caller enters user mode at the returned
+/// `(entry, stack_pointer)`.
 pub fn install_current(image: PreparedImage) -> (u64, u64) {
     let task = crate::scheduler::current().expect("exec without a current task");
     let previous = crate::scheduler::with_scheduler(|scheduler| {
         scheduler.task(task).and_then(|task| task.address_space)
     });
-    let space = crate::mm::address_space::register_owned(image.space);
+    let space = crate::mm::address_space::register_owned_with_map(image.space, image.map);
     crate::scheduler::set_address_space(task, Some(space))
         .expect("current task accepts an address space");
     crate::mm::address_space::activate_if_changed(Some(space))
@@ -181,5 +220,11 @@ pub fn install_current(image: PreparedImage) -> (u64, u64) {
         }
     }
     unsafe { crate::arch::x86_64::fpu::restore(&crate::task::FpuState::INITIAL) };
+    crate::scheduler::with_scheduler(|scheduler| {
+        if let Some(task) = scheduler.task_mut(task) {
+            task.fs_base = 0;
+        }
+    });
+    crate::arch::x86_64::cpu::set_fs_base(0);
     (image.entry, image.stack_pointer)
 }

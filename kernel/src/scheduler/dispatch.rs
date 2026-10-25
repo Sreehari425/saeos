@@ -111,7 +111,8 @@ pub extern "sysv64" fn saeos_timer_interrupt_rust(stack_pointer: u64) -> TimerDi
     dispatch
 }
 
-/// Load everything the incoming task needs besides its registers. Every
+/// Load everything the incoming task needs besides its registers (page
+/// tables, kernel stack for user-mode entries, FPU state, FS base). Every
 /// switch goes through here: the timer path, voluntary switches, exit, and
 /// the first task. `outgoing_fpu` is null when the outgoing task never runs
 /// again (exit, boot).
@@ -124,6 +125,7 @@ pub(super) unsafe fn prepare_switch(outgoing_fpu: *mut FpuState, target: &Switch
         .expect("selected address space is not registered");
     crate::arch::x86_64::gdt::set_kernel_stack(target.kernel_stack_top);
     unsafe { crate::arch::x86_64::fpu::switch(outgoing_fpu, target.fpu) };
+    crate::arch::x86_64::cpu::set_fs_base(target.fs_base);
 }
 
 pub(super) enum Dispatch {

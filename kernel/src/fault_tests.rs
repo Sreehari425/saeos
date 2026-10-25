@@ -54,18 +54,44 @@ fn panic_lock_test_task() -> ! {
 }
 
 /// Competition for the user-test init: without another runnable task, a
-/// timer interrupt just resumes the same task and FPU state is never
-/// switched. This task keeps loading its own register values and rounding
-/// mode (round down; usertest uses round toward zero) and alternates
-/// running with sleeping, so the user program is switched out and back in
-/// constantly. If the kernel failed to save or restore user FPU state, the
-/// program would see these values.
+/// timer interrupt just resumes the same task and per-task CPU state is
+/// never switched. This task keeps loading its own FPU registers and
+/// rounding mode (round down; usertest uses round toward zero) and has its
+/// own FS base, and alternates running with sleeping, so the user program
+/// is switched out and back in constantly. If the kernel failed to save or
+/// restore user FPU state the program would see these values; if it failed
+/// to switch the FS base, one of the two would read the other's thread
+/// block (this task checks its own and fails the run).
 #[cfg(feature = "user-test")]
 fn fpu_noise_task() -> ! {
     #[repr(C, align(16))]
     struct Noise([u8; 256], u32);
     let noise = Noise([0xa5; 256], 0x1f80 | (1 << 13));
+    // A thread block whose first word points at itself, like a user TLS
+    // block; this task's FS base points at it.
+    static mut NOISE_THREAD: [u64; 2] = [0; 2];
+    let block = &raw mut NOISE_THREAD as u64;
+    unsafe { (block as *mut u64).write(block) };
+    crate::scheduler::with_scheduler(|scheduler| {
+        if let Some(task) = scheduler
+            .current()
+            .and_then(|task| scheduler.task_mut(task))
+        {
+            task.fs_base = block;
+        }
+    });
+    crate::arch::x86_64::cpu::set_fs_base(block);
     loop {
+        let seen: u64;
+        unsafe {
+            core::arch::asm!("mov {}, fs:[0]", out(reg) seen, options(nostack, readonly, preserves_flags));
+        }
+        if seen != block {
+            crate::fatal::report(
+                format_args!("fpu-noise: FS base is not this task's ({seen:#x}): not switched"),
+                false,
+            );
+        }
         unsafe {
             core::arch::asm!(
                 "movdqu xmm0, [{p}]", "movdqu xmm1, [{p} + 16]",

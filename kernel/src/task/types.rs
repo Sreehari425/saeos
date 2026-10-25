@@ -182,6 +182,7 @@ pub struct SwitchTarget {
     pub address_space: Option<AddressSpaceId>,
     pub kernel_stack_top: u64,
     pub fpu: *const FpuState,
+    pub fs_base: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -203,6 +203,9 @@ fmt-check:
 clippy: olddefconfig
 	cargo clippy -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS) -- -D warnings
 	cargo clippy -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS) -- -D warnings
+	# The test builds compile code the configured build does not.
+	cargo clippy -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test -- -D warnings
+	cargo clippy -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test -- -D warnings
 	cargo clippy -p ratconf -- -D warnings
 	cargo clippy -p mkinitramfs --all-targets -- -D warnings
 	cargo clippy -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p saeos-rt $(addprefix -p ,$(USER_PROGRAMS)) -- -D warnings

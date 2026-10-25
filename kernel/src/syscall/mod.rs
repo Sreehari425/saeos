@@ -13,6 +13,7 @@
 //! directly.
 
 pub mod abi;
+pub mod memory;
 pub mod numbers;
 
 use crate::fs::vfs::Vfs;
@@ -20,8 +21,12 @@ use crate::fs::{Errno, FileTable};
 // The model includes `uaccess.rs` at the crate root rather than under `mm`.
 #[cfg(not(host_model))]
 use crate::mm::uaccess::{UserMemory, check_range};
+#[cfg(not(host_model))]
+use crate::mm::vma::Protection;
 #[cfg(host_model)]
 use crate::uaccess::{UserMemory, check_range};
+#[cfg(host_model)]
+use crate::vma::Protection;
 use alloc::vec::Vec;
 
 /// Longest path accepted, including the NUL (Linux's `PATH_MAX`).
@@ -37,6 +42,22 @@ pub trait ProcessOps {
     /// Wait for a child (`None`: any child) to exit; returns its pid and
     /// exit code.
     fn wait(&self, pid: Option<u64>) -> Result<(u64, i32), Errno>;
+    /// Move the program break; returns the new break, or the old one if it
+    /// could not move.
+    fn brk(&self, address: u64) -> u64;
+    /// Map anonymous private memory; returns its address.
+    fn mmap(
+        &self,
+        hint: u64,
+        length: u64,
+        protection: Protection,
+        fixed: bool,
+    ) -> Result<u64, Errno>;
+    fn munmap(&self, start: u64, length: u64) -> Result<(), Errno>;
+    fn mprotect(&self, start: u64, length: u64, protection: Protection) -> Result<(), Errno>;
+    /// The calling thread's FS base (already validated as a user address).
+    fn set_fs_base(&self, base: u64);
+    fn fs_base(&self) -> u64;
 }
 
 pub struct Context<'a, M: UserMemory> {
@@ -64,7 +85,7 @@ fn result(value: Result<u64, Errno>) -> Outcome {
 /// Run syscall `number` with `args`.
 pub fn dispatch<M: UserMemory>(context: &Context<M>, number: u64, args: [u64; 6]) -> Outcome {
     use numbers::*;
-    let [a0, a1, a2, a3, ..] = args;
+    let [a0, a1, a2, a3, a4, a5] = args;
     let value = match number {
         READ => read(context, a0, a1, a2),
         WRITE => write(context, a0, a1, a2),
@@ -77,6 +98,11 @@ pub fn dispatch<M: UserMemory>(context: &Context<M>, number: u64, args: [u64; 6]
             Ok(0)
         }),
         LSEEK => lseek(context, a0, a1, a2),
+        MMAP => memory::mmap(context.process, a0, a1, a2, a3, a4, a5),
+        MPROTECT => memory::mprotect(context.process, a0, a1, a2),
+        MUNMAP => memory::munmap(context.process, a0, a1),
+        BRK => Ok(memory::brk(context.process, a0)),
+        ARCH_PRCTL => memory::arch_prctl(context, a0, a1),
         GETPID => Ok(context.process.getpid()),
         EXIT | EXIT_GROUP => return Outcome::Exit((a0 & 0xff) as i32),
         WAIT4 => wait4(context, a0, a1, a2, a3),
@@ -238,9 +264,10 @@ fn getdents64<M: UserMemory>(
 
 #[cfg(not(host_model))]
 mod kernel {
-    use super::{Context, Outcome, ProcessOps, dispatch};
+    use super::{Context, Outcome, ProcessOps, Protection, dispatch};
     use crate::fs::Errno;
     use crate::mm::uaccess::KernelUserMemory;
+    use crate::mm::user_memory;
     use crate::task::ProcessId;
 
     struct CurrentProcess;
@@ -265,6 +292,70 @@ mod kernel {
                 .map(|status| (child.0, status.0))
                 .map_err(|_| Errno::ECHILD)
         }
+
+        fn brk(&self, address: u64) -> u64 {
+            current_space().map_or(0, |space| user_memory::brk(space, address))
+        }
+
+        fn mmap(
+            &self,
+            hint: u64,
+            length: u64,
+            protection: Protection,
+            fixed: bool,
+        ) -> Result<u64, Errno> {
+            user_memory::mmap(
+                current_space().ok_or(Errno::ENOMEM)?,
+                hint,
+                length,
+                protection,
+                fixed,
+            )
+        }
+
+        fn munmap(&self, start: u64, length: u64) -> Result<(), Errno> {
+            user_memory::munmap(current_space().ok_or(Errno::ENOMEM)?, start, length)
+        }
+
+        fn mprotect(&self, start: u64, length: u64, protection: Protection) -> Result<(), Errno> {
+            user_memory::mprotect(
+                current_space().ok_or(Errno::ENOMEM)?,
+                start,
+                length,
+                protection,
+            )
+        }
+
+        fn set_fs_base(&self, base: u64) {
+            crate::scheduler::with_scheduler(|scheduler| {
+                if let Some(task) = scheduler
+                    .current()
+                    .and_then(|task| scheduler.task_mut(task))
+                {
+                    task.fs_base = base;
+                }
+            });
+            crate::arch::x86_64::cpu::set_fs_base(base);
+        }
+
+        fn fs_base(&self) -> u64 {
+            crate::scheduler::with_scheduler(|scheduler| {
+                scheduler
+                    .current()
+                    .and_then(|task| scheduler.task(task))
+                    .map_or(0, |task| task.fs_base)
+            })
+        }
+    }
+
+    /// The current process's address space (its memory map lives with it).
+    fn current_space() -> Option<crate::task::AddressSpaceId> {
+        crate::scheduler::with_scheduler(|scheduler| {
+            scheduler
+                .current()
+                .and_then(|task| scheduler.task(task))
+                .and_then(|task| task.address_space)
+        })
     }
 
     fn current_process() -> Option<ProcessId> {

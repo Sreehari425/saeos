@@ -137,17 +137,18 @@ pub fn wait_child(child: ProcessId) -> Result<ExitStatus, crate::process::Proces
 }
 
 /// Spawn a kernel task in a new child process (of the current process, if
-/// any) that runs in `space`: its CR3 is `space`'s root from the first
+/// any) that runs in `space`, described by `map` (for `brk`/`mmap`): its CR3 is `space`'s root from the first
 /// instruction. The space is owned by the process and freed when the
 /// process is reaped. This is the shape a user process will have.
 pub fn spawn_in_new_process(
     entry: TaskEntry,
     name: &'static str,
     space: crate::mm::paging::AddressSpace,
+    map: crate::mm::vma::MemoryMap,
 ) -> (TaskId, ProcessId) {
     let stack = new_kernel_stack(name);
     let parent = current_process();
-    let space = crate::mm::address_space::register_owned(space);
+    let space = crate::mm::address_space::register_owned_with_map(space, map);
     with_scheduler(|scheduler| {
         let task = scheduler.spawn_kernel_task(entry, name, false, stack);
         let mut processes = PROCESSES.lock();

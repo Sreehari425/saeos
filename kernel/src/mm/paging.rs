@@ -431,8 +431,30 @@ impl AddressSpace {
         virtual_address: VirtAddr,
         flags: PageFlags,
     ) -> Result<(), AddressSpaceError> {
-        let _guard = self.state.lock();
         validate_user_mapping(virtual_address, PhysFrame(0), flags)?;
+        self.set_leaf_flags(virtual_address, flags.0)
+    }
+
+    /// `PROT_NONE`: keep the page (and its frame) but make it inaccessible
+    /// to user code. x86 has no "present but no access" for ring 3, so this
+    /// is a supervisor-only, read-only, non-executable page. The kernel can
+    /// still read it (a syscall given a pointer into it copies its bytes,
+    /// where Linux would return EFAULT); it is only the process's own
+    /// memory, so nothing leaks between processes.
+    pub fn protect_inaccessible(
+        &mut self,
+        virtual_address: VirtAddr,
+    ) -> Result<(), AddressSpaceError> {
+        validate_user_mapping(virtual_address, PhysFrame(0), PageFlags::USER_READ)?;
+        self.set_leaf_flags(virtual_address, PRESENT | NO_EXECUTE)
+    }
+
+    fn set_leaf_flags(
+        &mut self,
+        virtual_address: VirtAddr,
+        flags: u64,
+    ) -> Result<(), AddressSpaceError> {
+        let _guard = self.state.lock();
         unsafe {
             let pml4 = &mut *table_ptr(self.root);
             let pdpt_entry = pml4.0[((virtual_address.0 >> 39) & 0x1ff) as usize];
@@ -462,7 +484,7 @@ impl AddressSpace {
             if *slot & PRESENT == 0 {
                 return Err(AddressSpaceError::NotMapped);
             }
-            *slot = (*slot & ADDRESS_MASK) | flags.0;
+            *slot = (*slot & ADDRESS_MASK) | flags;
             self.flush_if_active(virtual_address);
             Ok(())
         }

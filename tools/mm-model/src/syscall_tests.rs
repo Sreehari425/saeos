@@ -6,15 +6,22 @@ use crate::fs::ramfs::RamFs;
 use crate::fs::vfs::Vfs;
 use crate::fs::{Errno, FileTable};
 use crate::syscall::abi::{self, STAT_SIZE};
+use crate::syscall::memory::{
+    ARCH_GET_FS, ARCH_SET_FS, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED,
+};
 use crate::syscall::numbers::*;
 use crate::syscall::{Context, Outcome, ProcessOps, dispatch};
-use std::cell::RefCell;
+use crate::vma::{MemoryMap, Protection};
+use std::cell::{Cell, RefCell};
 
 const BASE: u64 = 0x40_0000;
 
-/// A process with one child (pid 9, exit code 3).
+/// A process with one child (pid 9, exit code 3), and a memory map with
+/// no pages behind it: the bookkeeping the kernel applies.
 struct FakeProcess {
     waited: RefCell<Vec<Option<u64>>>,
+    map: RefCell<MemoryMap>,
+    fs_base: Cell<u64>,
 }
 
 impl ProcessOps for FakeProcess {
@@ -28,6 +35,46 @@ impl ProcessOps for FakeProcess {
             None | Some(9) => Ok((9, 3)),
             Some(_) => Err(Errno::ECHILD),
         }
+    }
+
+    fn brk(&self, address: u64) -> u64 {
+        let mut map = self.map.borrow_mut();
+        if address != 0 {
+            let _ = map.set_brk(address);
+        }
+        map.brk()
+    }
+
+    fn mmap(
+        &self,
+        hint: u64,
+        length: u64,
+        protection: Protection,
+        fixed: bool,
+    ) -> Result<u64, Errno> {
+        self.map
+            .borrow_mut()
+            .mmap(hint, length, protection, fixed)
+            .map(|change| change.address)
+    }
+
+    fn munmap(&self, start: u64, length: u64) -> Result<(), Errno> {
+        self.map.borrow_mut().munmap(start, length).map(|_| ())
+    }
+
+    fn mprotect(&self, start: u64, length: u64, protection: Protection) -> Result<(), Errno> {
+        self.map
+            .borrow_mut()
+            .mprotect(start, length, protection)
+            .map(|_| ())
+    }
+
+    fn set_fs_base(&self, base: u64) {
+        self.fs_base.set(base);
+    }
+
+    fn fs_base(&self) -> u64 {
+        self.fs_base.get()
     }
 }
 
@@ -50,6 +97,8 @@ impl World {
             memory: FakeUser::new(BASE, 64 * 1024),
             process: FakeProcess {
                 waited: RefCell::new(Vec::new()),
+                map: RefCell::new(MemoryMap::new(&[], 0x50_0000, 0x7000_0000).unwrap()),
+                fs_base: Cell::new(0),
             },
         }
     }
@@ -363,5 +412,98 @@ fn exit_and_wait4() {
     assert_eq!(
         *world.process.waited.borrow(),
         [Some(9), None, Some(4), Some(9)]
+    );
+}
+
+const ANON: u64 = MAP_PRIVATE | MAP_ANONYMOUS;
+const PROT_RW: u64 = 3;
+
+#[test]
+fn brk_and_mmap_decode_like_linux() {
+    let world = World::new();
+    // brk(0) reports the break; growing returns the new one; an impossible
+    // request returns the old one (not an error).
+    assert_eq!(world.call(BRK, &[0]), 0x50_0000);
+    assert_eq!(world.call(BRK, &[0x50_2345]), 0x50_2345);
+    assert_eq!(world.call(BRK, &[0x10]), 0x50_2345, "below the start");
+    assert_eq!(world.call(BRK, &[u64::MAX]), 0x50_2345);
+    // mmap(NULL, 8192, RW, PRIVATE|ANONYMOUS, -1, 0)
+    let address = world.call(MMAP, &[0, 8192, PROT_RW, ANON, u64::MAX, 0]);
+    assert!(address > 0 && address % 4096 == 0);
+    let fixed = world.call(MMAP, &[0x2000_0000, 4096, 1, ANON | MAP_FIXED, u64::MAX, 0]);
+    assert_eq!(fixed, 0x2000_0000);
+    assert_eq!(
+        world.call(MMAP, &[0, 4096, 7, ANON, u64::MAX, 0]),
+        errno(Errno::EACCES),
+        "W+X"
+    );
+    assert_eq!(
+        world.call(MMAP, &[0, 4096, 0x10, ANON, u64::MAX, 0]),
+        errno(Errno::EINVAL),
+        "bad prot"
+    );
+    assert_eq!(
+        world.call(MMAP, &[0, 4096, 1, MAP_PRIVATE, 3, 0]),
+        errno(Errno::ENODEV),
+        "file mapping"
+    );
+    assert_eq!(
+        world.call(MMAP, &[0, 4096, 1, MAP_SHARED | MAP_ANONYMOUS, u64::MAX, 0]),
+        errno(Errno::EINVAL)
+    );
+    assert_eq!(
+        world.call(MMAP, &[0, 4096, 1, ANON, u64::MAX, 100]),
+        errno(Errno::EINVAL),
+        "offset"
+    );
+    assert_eq!(
+        world.call(MMAP, &[0, 0, 1, ANON, u64::MAX, 0]),
+        errno(Errno::EINVAL),
+        "length 0"
+    );
+    assert_eq!(
+        world.call(MMAP, &[0x2000_0001, 4096, 1, ANON | MAP_FIXED, u64::MAX, 0]),
+        errno(Errno::EINVAL)
+    );
+    // MAP_NORESERVE | MAP_STACK are ignored.
+    assert!(world.call(MMAP, &[0, 4096, 3, ANON | 0x4000 | 0x2_0000, u64::MAX, 0]) > 0);
+    // mprotect and munmap.
+    assert_eq!(world.call(MPROTECT, &[address as u64, 8192, 1]), 0);
+    assert_eq!(
+        world.call(MPROTECT, &[address as u64, 8192, 7]),
+        errno(Errno::EACCES)
+    );
+    assert_eq!(world.call(MUNMAP, &[address as u64, 8192]), 0);
+    assert_eq!(
+        world.call(MPROTECT, &[address as u64, 8192, 1]),
+        errno(Errno::ENOMEM),
+        "gone"
+    );
+    assert_eq!(
+        world.call(MUNMAP, &[address as u64 + 1, 8192]),
+        errno(Errno::EINVAL)
+    );
+}
+
+#[test]
+fn arch_prctl_sets_and_reads_the_fs_base() {
+    let world = World::new();
+    assert_eq!(world.call(ARCH_PRCTL, &[ARCH_SET_FS, 0x7000_1000]), 0);
+    assert_eq!(world.process.fs_base.get(), 0x7000_1000);
+    assert_eq!(world.call(ARCH_PRCTL, &[ARCH_GET_FS, BASE + 64]), 0);
+    assert_eq!(world.user(64, 8), 0x7000_1000u64.to_le_bytes());
+    assert_eq!(
+        world.call(ARCH_PRCTL, &[ARCH_SET_FS, 0xffff_8000_0000_0000]),
+        errno(Errno::EPERM)
+    );
+    assert_eq!(world.process.fs_base.get(), 0x7000_1000, "unchanged");
+    assert_eq!(
+        world.call(ARCH_PRCTL, &[ARCH_GET_FS, 0]),
+        errno(Errno::EFAULT)
+    );
+    assert_eq!(
+        world.call(ARCH_PRCTL, &[0x1001, 0]),
+        errno(Errno::EINVAL),
+        "ARCH_SET_GS unsupported"
     );
 }

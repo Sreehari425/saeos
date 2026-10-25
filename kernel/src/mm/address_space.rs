@@ -88,15 +88,28 @@ pub fn register(root: PhysFrame) -> AddressSpaceId {
     ADDRESS_SPACES.lock().register(root)
 }
 
+/// A process's address space and the memory map that describes it.
+pub struct OwnedSpace {
+    pub space: crate::mm::paging::AddressSpace,
+    pub map: crate::mm::vma::MemoryMap,
+}
+
 /// Owned spaces, by id. Separate from the root table so dispatch (which only
 /// needs roots) never contends with teardown.
-static OWNED: IrqSpinMutex<Vec<(AddressSpaceId, crate::mm::paging::AddressSpace)>> =
-    IrqSpinMutex::new(Vec::new());
+static OWNED: IrqSpinMutex<Vec<(AddressSpaceId, OwnedSpace)>> = IrqSpinMutex::new(Vec::new());
 
-/// Register `space` and keep it until [`release`].
+/// Register `space` (with an empty memory map) and keep it until [`release`].
 pub fn register_owned(space: crate::mm::paging::AddressSpace) -> AddressSpaceId {
+    register_owned_with_map(space, crate::mm::vma::MemoryMap::default())
+}
+
+/// Register a process's space and memory map (from `exec`).
+pub fn register_owned_with_map(
+    space: crate::mm::paging::AddressSpace,
+    map: crate::mm::vma::MemoryMap,
+) -> AddressSpaceId {
     let id = register(space.root_frame());
-    OWNED.lock().push((id, space));
+    OWNED.lock().push((id, OwnedSpace { space, map }));
     id
 }
 
@@ -105,9 +118,18 @@ pub fn with_owned<R>(
     id: AddressSpaceId,
     operation: impl FnOnce(&crate::mm::paging::AddressSpace) -> R,
 ) -> Result<R, AddressSpaceError> {
-    let owned = OWNED.lock();
+    with_owned_mut(id, |owned| operation(&owned.space))
+}
+
+/// Run `operation` on an owned space and its memory map (`brk`, `mmap`,
+/// ...). Runs with the registry locked and interrupts off.
+pub fn with_owned_mut<R>(
+    id: AddressSpaceId,
+    operation: impl FnOnce(&mut OwnedSpace) -> R,
+) -> Result<R, AddressSpaceError> {
+    let mut owned = OWNED.lock();
     let (_, space) = owned
-        .iter()
+        .iter_mut()
         .find(|(owned_id, _)| *owned_id == id)
         .ok_or(AddressSpaceError::Unknown)?;
     Ok(operation(space))
@@ -124,7 +146,7 @@ pub fn release(id: AddressSpaceId) -> Result<(), AddressSpaceError> {
             .iter()
             .position(|(owned_id, _)| *owned_id == id)
             .ok_or(AddressSpaceError::Unknown)?;
-        owned.swap_remove(index).1
+        owned.swap_remove(index).1.space
     };
     unregister(id)?;
     // Teardown takes the frame lock; no registry lock is held here.

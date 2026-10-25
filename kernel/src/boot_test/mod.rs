@@ -33,6 +33,7 @@ pub fn run() -> ! {
     let uaccess_passed = user::uaccess_test();
     let syscall_passed = user::syscall_test();
     let exec_passed = user::exec_test();
+    let user_memory_passed = user::user_memory_test();
     let wait_passed = wait_event_test();
     let idle_passed = idle_test();
     let scheduler_passed = scheduler_test();
@@ -48,11 +49,12 @@ pub fn run() -> ! {
         && uaccess_passed
         && syscall_passed
         && exec_passed
+        && user_memory_passed
         && wait_passed
         && idle_passed
         && scheduler_passed;
     serial_println!(
-        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} fs={} gdt-tss={} fpu={} process-space={} uaccess={} syscalls={} exec-prepare={} wait-event={} idle={} scheduler={} -> {}",
+        "boot-test: memory={} irq-locks={} breakpoint={} cache={} klog={} fs={} gdt-tss={} fpu={} process-space={} uaccess={} syscalls={} exec-prepare={} user-memory={} wait-event={} idle={} scheduler={} -> {}",
         verdict(mm_passed),
         verdict(irq_passed),
         verdict(breakpoint_passed),
@@ -65,6 +67,7 @@ pub fn run() -> ! {
         verdict(uaccess_passed),
         verdict(syscall_passed),
         verdict(exec_passed),
+        verdict(user_memory_passed),
         verdict(wait_passed),
         verdict(idle_passed),
         verdict(scheduler_passed),

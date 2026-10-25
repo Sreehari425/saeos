@@ -50,6 +50,10 @@ mod syscall_tests;
 pub mod uaccess;
 #[cfg(test)]
 mod uaccess_tests;
+#[path = "../../../kernel/src/mm/vma.rs"]
+pub mod vma;
+#[cfg(test)]
+mod vma_tests;
 pub use heap_model::*;
 mod lock_model;
 #[path = "../../../kernel/src/task/mod.rs"]

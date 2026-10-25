@@ -4,6 +4,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Errno {
+    EPERM = 1,
     ENOENT = 2,
     EIO = 5,
     E2BIG = 7,
@@ -16,6 +17,7 @@ pub enum Errno {
     EBUSY = 16,
     EEXIST = 17,
     EXDEV = 18,
+    ENODEV = 19,
     ENOTDIR = 20,
     EISDIR = 21,
     EINVAL = 22,
@@ -35,6 +37,7 @@ impl Errno {
 
     pub const fn name(self) -> &'static str {
         match self {
+            Errno::EPERM => "EPERM",
             Errno::ENOENT => "ENOENT",
             Errno::EIO => "EIO",
             Errno::E2BIG => "E2BIG",
@@ -47,6 +50,7 @@ impl Errno {
             Errno::EBUSY => "EBUSY",
             Errno::EEXIST => "EEXIST",
             Errno::EXDEV => "EXDEV",
+            Errno::ENODEV => "ENODEV",
             Errno::ENOTDIR => "ENOTDIR",
             Errno::EISDIR => "EISDIR",
             Errno::EINVAL => "EINVAL",

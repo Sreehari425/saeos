@@ -69,6 +69,8 @@ pub struct TaskControlBlock {
     pub name: &'static str,
     /// x87/SSE registers while the task is not running.
     pub fpu: FpuState,
+    /// User thread-pointer register (FS base, set with `arch_prctl`).
+    pub fs_base: u64,
 }
 
 impl TaskControlBlock {
@@ -93,6 +95,7 @@ impl TaskControlBlock {
             is_idle: false,
             name,
             fpu: FpuState::INITIAL,
+            fs_base: 0,
         }
     }
 
@@ -102,6 +105,7 @@ impl TaskControlBlock {
             address_space: self.address_space,
             kernel_stack_top: self.kernel_stack.top,
             fpu: &self.fpu,
+            fs_base: self.fs_base,
         }
     }
 

@@ -250,3 +250,15 @@ pub fn has_invariant_tsc() -> bool {
         false
     }
 }
+
+const IA32_FS_BASE: u32 = 0xc000_0100;
+
+/// The FS segment base (the user thread pointer). The kernel itself never
+/// uses FS, so this is only ever a user value.
+pub fn set_fs_base(base: u64) {
+    unsafe { wrmsr(IA32_FS_BASE, base) };
+}
+
+pub fn fs_base() -> u64 {
+    unsafe { rdmsr(IA32_FS_BASE) }
+}
