@@ -17,6 +17,11 @@
 //! them eagerly, PROT_NONE included), so each operation returns the exact
 //! page ranges the kernel must map, unmap, or re-protect. Regions never
 //! overlap and are kept sorted.
+//!
+//! A device region (`mmap` of `/dev/fb0`) maps device memory instead of
+//! fresh frames: page `start + n` is physical `physical + n`. Splitting one
+//! (`munmap` or `mprotect` in the middle) shifts each piece's `physical`
+//! by how far its start moved ([`Region::piece`]).
 
 use crate::fs::Errno;
 use alloc::vec::Vec;
@@ -83,6 +88,11 @@ pub enum RegionKind {
     Heap,
     Stack,
     Anonymous,
+    /// Device memory, shared (never copied): `physical` is the address
+    /// behind the region's first page.
+    Device {
+        physical: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +101,34 @@ pub struct Region {
     pub end: u64,
     pub protection: Protection,
     pub kind: RegionKind,
+}
+
+impl Region {
+    /// The part of this region from `start` to `end` (inside it), with a
+    /// device region's physical address moved along.
+    pub fn piece(&self, start: u64, end: u64) -> Self {
+        debug_assert!(self.start <= start && start <= end && end <= self.end);
+        let kind = match self.kind {
+            RegionKind::Device { physical } => RegionKind::Device {
+                physical: physical + (start - self.start),
+            },
+            kind => kind,
+        };
+        Self {
+            start,
+            end,
+            protection: self.protection,
+            kind,
+        }
+    }
+
+    /// The physical address behind `address` in a device region.
+    pub fn device_address(&self, address: u64) -> Option<u64> {
+        match self.kind {
+            RegionKind::Device { physical } => Some(physical + (address - self.start)),
+            _ => None,
+        }
+    }
 }
 
 /// A page range `start..end` and the protection it gets.
@@ -201,10 +239,7 @@ impl MemoryMap {
                 continue;
             }
             if region.start < start {
-                kept.push(Region {
-                    end: start,
-                    ..region
-                });
+                kept.push(region.piece(region.start, start));
             }
             removed.push(Span {
                 start: region.start.max(start),
@@ -212,10 +247,7 @@ impl MemoryMap {
                 protection: region.protection,
             });
             if end < region.end {
-                kept.push(Region {
-                    start: end,
-                    ..region
-                });
+                kept.push(region.piece(end, region.end));
             }
         }
         self.regions = kept;
@@ -252,6 +284,39 @@ impl MemoryMap {
         protection: Protection,
         fixed: bool,
     ) -> Result<MmapChange, Errno> {
+        self.place(hint, length, protection, fixed, RegionKind::Anonymous)
+    }
+
+    /// `mmap` of device memory at `physical` (page-aligned): placed as
+    /// [`MemoryMap::mmap`] places anonymous memory. Never executable.
+    pub fn mmap_device(
+        &mut self,
+        hint: u64,
+        length: u64,
+        protection: Protection,
+        physical: u64,
+        fixed: bool,
+    ) -> Result<MmapChange, Errno> {
+        if !aligned(physical) || protection.execute {
+            return Err(Errno::EINVAL);
+        }
+        self.place(
+            hint,
+            length,
+            protection,
+            fixed,
+            RegionKind::Device { physical },
+        )
+    }
+
+    fn place(
+        &mut self,
+        hint: u64,
+        length: u64,
+        protection: Protection,
+        fixed: bool,
+        kind: RegionKind,
+    ) -> Result<MmapChange, Errno> {
         if length == 0 {
             return Err(Errno::EINVAL);
         }
@@ -285,7 +350,7 @@ impl MemoryMap {
             start: new.start,
             end: new.end,
             protection,
-            kind: RegionKind::Anonymous,
+            kind,
         })?;
         Ok(MmapChange {
             address,
@@ -340,21 +405,25 @@ impl MemoryMap {
         if cursor < end {
             return Err(Errno::ENOMEM);
         }
+        // Device memory is never executable.
+        let inside = |region: &&Region| region.start < end && start < region.end;
+        if protection.execute
+            && self
+                .regions
+                .iter()
+                .filter(inside)
+                .any(|region| matches!(region.kind, RegionKind::Device { .. }))
+        {
+            return Err(Errno::EACCES);
+        }
         // Split at the boundaries, then change the pieces inside.
-        let kinds: Vec<Region> = self
-            .regions
-            .iter()
-            .filter(|region| region.start < end && start < region.end)
-            .copied()
-            .collect();
+        let kinds: Vec<Region> = self.regions.iter().filter(inside).copied().collect();
         self.remove(start, end);
         let mut changed = Vec::new();
         for region in kinds {
             let piece = Region {
-                start: region.start.max(start),
-                end: region.end.min(end),
                 protection,
-                kind: region.kind,
+                ..region.piece(region.start.max(start), region.end.min(end))
             };
             self.insert(piece)?;
             changed.push(Span {

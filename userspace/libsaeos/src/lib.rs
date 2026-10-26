@@ -5,7 +5,7 @@
 //!              c: the C interface (malloc, open, strlen, errno, ...)
 //!              heap + alloc: the allocator (brk heap, mmap for large)
 //!              start + tls: _start, argv/envp, thread-local storage
-//!              time: clocks and sleeping; sound: /dev/dsp
+//!              time: clocks and sleeping; sound: /dev/dsp; fb: /dev/fb0
 //!              raw: the syscalls themselves (Linux x86_64 numbers)
 //! ```
 //!
@@ -23,6 +23,7 @@ mod allocator;
 pub mod c;
 pub mod env;
 pub mod errno;
+pub mod fb;
 pub mod fs;
 pub mod heap;
 pub mod io;

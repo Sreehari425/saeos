@@ -53,6 +53,7 @@ fn main(args: Args) -> i32 {
         Some(b"tty") => tty(),
         Some(b"shell") => shell(),
         Some(b"sound") => sound(),
+        Some(b"fb") => fb(args.get(2)),
         Some(b"ud") => {
             say(b"usertest: executing ud2\n");
             unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
@@ -961,5 +962,97 @@ fn sound() -> ! {
         slept / time::NANOS_PER_MILLISECOND,
         field("underruns: ")
     );
+    exit(0)
+}
+
+/// `usertest fb [WIDTHxHEIGHT]`: draws on /dev/fb0 for the host to check
+/// in QEMU screendumps (`scripts/check-screen.py`): red, green, blue and
+/// white quadrants; a yellow square drawn by a forked child through the
+/// mapping it inherited (and read back by the parent: the mapping is
+/// shared, not copied); a magenta row written with write(). Then it lets
+/// go of the screen, and the console must come back. With WIDTHxHEIGHT,
+/// the mode must be exactly that.
+fn fb(expected: Option<&[u8]>) -> ! {
+    use libsaeos::fb::Framebuffer;
+    use libsaeos::raw::lseek;
+    use libsaeos::time;
+
+    let mut screen = match Framebuffer::open() {
+        Ok(screen) => screen,
+        Err(_) => fail(150, b"open and map /dev/fb0"),
+    };
+    let (width, height, stride) = (screen.width, screen.height, screen.stride);
+    let mode = format!("{width}x{height}");
+    if stride < width * 4
+        || width < 640
+        || height < 480
+        || expected.is_some_and(|expected| expected != mode.as_bytes())
+    {
+        println!("usertest: fb mode {mode}, stride {stride}");
+        fail(151, b"framebuffer mode");
+    }
+    let (half_width, half_height) = (width / 2, height / 2);
+    screen.fill_rect(0, 0, half_width, half_height, 0xff0000);
+    screen.fill_rect(half_width, 0, width - half_width, half_height, 0x00ff00);
+    screen.fill_rect(0, half_height, half_width, height - half_height, 0x0000ff);
+    screen.fill_rect(
+        half_width,
+        half_height,
+        width - half_width,
+        height - half_height,
+        0xffffff,
+    );
+
+    // The child draws through the mapping it inherited.
+    let (square_x, square_y) = (width / 4 - 20, height / 4 - 20);
+    match process::fork() {
+        Ok(process::Fork::Child) => {
+            screen.fill_rect(square_x, square_y, 40, 40, 0xffff00);
+            process::exit(0);
+        }
+        Ok(process::Fork::Parent(pid)) => {
+            if process::wait(Some(pid)).map(|(_, status)| status.success()) != Ok(true) {
+                fail(152, b"the child drawing through its mapping");
+            }
+        }
+        Err(_) => fail(153, b"fork"),
+    }
+    if screen.get(width / 4, height / 4) != 0xffff00 {
+        fail(
+            154,
+            b"the child's drawing is not in the parent's mapping (not shared)",
+        );
+    }
+
+    // A row through write(), read back through the mapping.
+    let row_y = height - 20;
+    let magenta = screen.pixel(0xff00ff);
+    let row: Vec<u8> = (0..width).flat_map(|_| magenta.to_le_bytes()).collect();
+    lseek(screen.fd(), (row_y * stride) as i64, 0);
+    if write(screen.fd(), &row) != row.len() as i64 {
+        fail(155, b"write to /dev/fb0");
+    }
+    if screen.row(row_y).iter().any(|&pixel| pixel != magenta) {
+        fail(156, b"write() did not reach the mapping");
+    }
+    // And read() sees what the mapping drew.
+    let mut first = [0u8; 4];
+    lseek(screen.fd(), 0, 0);
+    if read(screen.fd(), &mut first) != 4 || u32::from_le_bytes(first) != screen.pixel(0xff0000) {
+        fail(157, b"read from /dev/fb0");
+    }
+    println!("usertest: fb ready ({mode})");
+    time::sleep(1500 * time::NANOS_PER_MILLISECOND);
+    drop(screen);
+    // The last descriptor is gone (the child's copy too): the screen is
+    // the console's again.
+    let report = fs::read_to_string("/proc/fb").unwrap_or_default();
+    if !report.contains("open: 0\n") {
+        println!("{report}");
+        fail(158, b"/dev/fb0 still open after the last close");
+    }
+    println!("usertest: fb released");
+    time::sleep(1500 * time::NANOS_PER_MILLISECOND);
+    println!("usertest: fb PASS");
     exit(0)
 }

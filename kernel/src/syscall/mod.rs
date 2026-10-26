@@ -64,6 +64,16 @@ pub trait ProcessOps {
         protection: Protection,
         fixed: bool,
     ) -> Result<u64, Errno>;
+    /// Map device memory at `physical` (page-aligned), shared; returns its
+    /// address.
+    fn mmap_device(
+        &self,
+        hint: u64,
+        length: u64,
+        protection: Protection,
+        physical: u64,
+        fixed: bool,
+    ) -> Result<u64, Errno>;
     fn munmap(&self, start: u64, length: u64) -> Result<(), Errno>;
     fn mprotect(&self, start: u64, length: u64, protection: Protection) -> Result<(), Errno>;
     /// The calling thread's FS base (already validated as a user address).
@@ -115,7 +125,7 @@ pub fn dispatch<M: UserMemory>(context: &Context<M>, number: u64, args: [u64; 6]
             Ok(0)
         }),
         LSEEK => lseek(context, a0, a1, a2),
-        MMAP => memory::mmap(context.process, a0, a1, a2, a3, a4, a5),
+        MMAP => memory::mmap(context, a0, a1, a2, a3, a4, a5),
         MPROTECT => memory::mprotect(context.process, a0, a1, a2),
         MUNMAP => memory::munmap(context.process, a0, a1),
         BRK => Ok(memory::brk(context.process, a0)),
@@ -217,9 +227,10 @@ fn execve<M: UserMemory>(
 }
 
 /// `ioctl(fd, request, arg)`. On the console: the terminal queries a libc
-/// needs (`isatty` uses TIOCGWINSZ). On other files: requests whose
-/// argument is one `int` (`/dev/dsp`'s), copied in and out as the request
-/// encodes; the inode decides, `ENOTTY` if it has none.
+/// needs (`isatty` uses TIOCGWINSZ). On other files: requests that fill in
+/// a struct (`/dev/fb0`'s), then requests whose argument is one `int`
+/// (`/dev/dsp`'s), copied in and out as the request encodes; the inode
+/// decides, `ENOTTY` if it has none.
 fn ioctl<M: UserMemory>(
     context: &Context<M>,
     fd_value: u64,
@@ -228,6 +239,11 @@ fn ioctl<M: UserMemory>(
 ) -> Result<u64, Errno> {
     let file = context.files.get(fd(fd_value)?)?;
     if !file.inode.is_terminal() {
+        // Requests that fill in a struct (the fbdev queries).
+        if let Some(bytes) = file.inode.ioctl_out(request)? {
+            context.memory.write(argument, &bytes)?;
+            return Ok(0);
+        }
         let copies = abi::ioctl_int(request)?;
         let mut value = [0u8; 4];
         if copies.is_some_and(|copies| copies.copy_in) {
@@ -530,6 +546,24 @@ mod kernel {
                 hint,
                 length,
                 protection,
+                fixed,
+            )
+        }
+
+        fn mmap_device(
+            &self,
+            hint: u64,
+            length: u64,
+            protection: Protection,
+            physical: u64,
+            fixed: bool,
+        ) -> Result<u64, Errno> {
+            user_memory::mmap_device(
+                current_space().ok_or(Errno::ENOMEM)?,
+                hint,
+                length,
+                protection,
+                physical,
                 fixed,
             )
         }

@@ -200,3 +200,64 @@ pub fn console_window_size() -> [u8; 8] {
     size[2..4].copy_from_slice(&80u16.to_le_bytes());
     size
 }
+
+pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
+pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
+pub const FB_VAR_SCREENINFO_SIZE: usize = 160;
+pub const FB_FIX_SCREENINFO_SIZE: usize = 80;
+const FB_TYPE_PACKED_PIXELS: u32 = 0;
+const FB_VISUAL_TRUECOLOR: u32 = 2;
+
+/// A framebuffer mode as the fbdev ioctls describe it: 32-bit pixels with
+/// 8-bit colour fields at these bit offsets in the little-endian `u32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenInfo {
+    pub width: u32,
+    pub height: u32,
+    /// Bytes per row.
+    pub stride: u32,
+    /// Bytes of framebuffer (`stride * height`).
+    pub size: u32,
+    /// Physical address of the first pixel.
+    pub physical: u64,
+    pub red_offset: u32,
+    pub green_offset: u32,
+    pub blue_offset: u32,
+}
+
+/// `struct fb_var_screeninfo` (`linux/fb.h`): the visible mode, virtual
+/// size = visible, 32 bits per pixel; the rest (timings, margins) 0.
+pub fn encode_var_screeninfo(info: &ScreenInfo) -> [u8; FB_VAR_SCREENINFO_SIZE] {
+    let mut bytes = [0u8; FB_VAR_SCREENINFO_SIZE];
+    let mut put = |offset: usize, value: u32| {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    };
+    put(0, info.width); // xres
+    put(4, info.height); // yres
+    put(8, info.width); // xres_virtual
+    put(12, info.height); // yres_virtual
+    put(24, 32); // bits_per_pixel
+    // red, green, blue: { offset, length, msb_right }; transp stays 0.
+    for (field, offset) in [
+        (32, info.red_offset),
+        (44, info.green_offset),
+        (56, info.blue_offset),
+    ] {
+        put(field, offset);
+        put(field + 4, 8);
+    }
+    bytes
+}
+
+/// `struct fb_fix_screeninfo` (x86_64 layout): name, physical memory,
+/// packed true-colour pixels, bytes per line.
+pub fn encode_fix_screeninfo(info: &ScreenInfo) -> [u8; FB_FIX_SCREENINFO_SIZE] {
+    let mut bytes = [0u8; FB_FIX_SCREENINFO_SIZE];
+    bytes[..8].copy_from_slice(b"saeos-fb"); // id[16]
+    bytes[16..24].copy_from_slice(&info.physical.to_le_bytes()); // smem_start
+    bytes[24..28].copy_from_slice(&info.size.to_le_bytes()); // smem_len
+    bytes[28..32].copy_from_slice(&FB_TYPE_PACKED_PIXELS.to_le_bytes()); // type
+    bytes[36..40].copy_from_slice(&FB_VISUAL_TRUECOLOR.to_le_bytes()); // visual
+    bytes[48..52].copy_from_slice(&info.stride.to_le_bytes()); // line_length
+    bytes
+}

@@ -37,7 +37,7 @@ BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
 
 .PHONY: check-std-lock userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test test help
 
 all: bios
 
@@ -47,7 +47,7 @@ all: bios
 # whose entry point is in its executable segment.
 USER_PROGRAMS := hello usertest init sh coreutils
 # The executables they produce (checked, and installed by initramfs.toml).
-USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false lspci sleep play
+USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false lspci sleep play fbinfo fbtest
 USER_TARGET := userspace/x86_64-saeos.json
 USER_BUILD = cargo build --release -Zjson-target-spec \
 	-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
@@ -152,7 +152,7 @@ miri:
 
 # Host tests plus every QEMU test on both boot paths; each run ends with the
 # kernel's own verdict through isa-debug-exit.
-test: host-test miri boot-test user-test sound-test mm-guard-test fault-test panic-lock-test
+test: host-test miri boot-test user-test sound-test fb-test mm-guard-test fault-test panic-lock-test
 
 # Each target boots twice: on QEMU's default CPU, and with -cpu max, where
 # SMEP/SMAP exist and the user-memory test checks they are enforced.
@@ -226,6 +226,23 @@ sound-test: initramfs-test
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test
 	$(call SOUND_RUN,$(UEFI_TEST_IMAGE),target/sound-uefi-ac97.wav,$(AC97_DEVICES))
 	$(call SOUND_RUN,$(UEFI_TEST_IMAGE),target/sound-uefi-hda.wav,$(HDA_DEVICES))
+
+# Framebuffer: usertest draws on /dev/fb0 (and a forked child through the
+# inherited mapping, and a row with write()); QEMU screendumps taken at
+# its markers must show that picture pixel for pixel, then the console
+# back once it lets go (on BIOS: VGA text mode again, 720x400, with its
+# font). BIOS gets Bochs VBE at exactly 960x720, UEFI the firmware's GOP
+# mode.
+FB_RUN = CMDLINE='init=/test/bin/usertest -- fb $(3)' QEMU_TEST_EXPECT="usertest: fb PASS" \
+	QEMU_TEST_SCREENDUMPS="$$(printf 'usertest: fb ready|%s\nusertest: fb released|%s' $(abspath $(2))-drawn.ppm $(abspath $(2))-console.ppm)" \
+	QEMU_TEST_POSTCHECK="./scripts/check-screen.py drawn $(2)-drawn.ppm $(3) && ./scripts/check-screen.py console $(2)-console.ppm $(4)" \
+	$(USER_TEST_RUN) $(1) -m 2G
+fb-test: initramfs-test
+	./scripts/check-screen.py --self-test
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),user-test
+	$(call FB_RUN,$(BIOS_TEST_IMAGE),target/fb-bios,960x720,720x400)
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test
+	$(call FB_RUN,$(UEFI_TEST_IMAGE),target/fb-uefi,)
 
 # The interactive shell as init, typed at: "echo typed-ok", "cd /etc",
 # "pwd", "exit 5" (the exit status is the verdict).
@@ -311,7 +328,7 @@ help:
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\" SOUND=pipewire SOUND_CARD=hda"
 	@echo "  userspace initramfs initramfs-test (from initramfs.toml)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
-	@echo "  test boot-test user-test sound-test host-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
+	@echo "  test boot-test user-test sound-test fb-test host-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"
 	@echo "  debug debug-uefi gdb gdb-uefi symbolize LOG=<file>"
 	@echo "  clean distclean mrproper nix-gc"

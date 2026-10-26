@@ -1,6 +1,8 @@
-//! Device files: `/dev/null`, `/dev/zero`, `/dev/console`, `/dev/dsp`.
+//! Device files: `/dev/null`, `/dev/zero`, `/dev/console`, `/dev/dsp`,
+//! `/dev/fb0`.
 //! Devices are ordinary inodes, so they use the same `open` / `write` path
-//! as files; `/dev/dsp` hands each open its own inode (`sound/mod.rs`).
+//! as files; `/dev/dsp` and `/dev/fb0` hand each open its own inode
+//! (`sound/mod.rs`, `drivers/fb.rs`).
 
 use super::errno::{Errno, FsResult};
 use super::file::OpenFlags;
@@ -23,11 +25,14 @@ enum Device {
     /// Sound output (OSS): each open gets the card through
     /// `sound::open`; `ENODEV` without a card.
     Dsp,
+    /// The framebuffer (`drivers/fb.rs`): `ENODEV` without one.
+    Fb,
 }
 
-const DEVICES: [(&str, Device); 4] = [
+const DEVICES: [(&str, Device); 5] = [
     ("console", Device::Console),
     ("dsp", Device::Dsp),
+    ("fb0", Device::Fb),
     ("null", Device::Null),
     ("zero", Device::Zero),
 ];
@@ -61,7 +66,7 @@ impl Inode for DeviceNode {
                 Ok(buf.len())
             }
             Device::Console => Ok(console_read(buf)),
-            Device::Dsp => Err(Errno::EINVAL),
+            Device::Dsp | Device::Fb => Err(Errno::EINVAL),
         }
     }
 
@@ -81,13 +86,15 @@ impl Inode for DeviceNode {
     }
 
     fn open(&self, _flags: OpenFlags) -> FsResult<Option<Arc<dyn Inode>>> {
-        if self.device != Device::Dsp {
-            return Ok(None);
+        match self.device {
+            #[cfg(not(host_model))]
+            Device::Dsp => crate::sound::open(self.ino, self.fs_id).map(Some),
+            #[cfg(not(host_model))]
+            Device::Fb => crate::drivers::fb::open(self.ino, self.fs_id).map(Some),
+            #[cfg(host_model)]
+            Device::Dsp | Device::Fb => Err(Errno::ENODEV),
+            _ => Ok(None),
         }
-        #[cfg(not(host_model))]
-        return crate::sound::open(self.ino, self.fs_id).map(Some);
-        #[cfg(host_model)]
-        Err(Errno::ENODEV)
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -6,6 +6,10 @@
 //! Every operation takes a copy of the memory map first, so a failure part
 //! way through (out of frames) puts the map and the pages back to a
 //! consistent state instead of leaving half a mapping behind.
+//!
+//! Device memory (`mmap` of `/dev/fb0`) is mapped, not allocated: its
+//! pages are borrowed (unmapping never frees them), write-combining like
+//! the kernel's own framebuffer mapping, and shared with forked children.
 
 use crate::fs::Errno;
 use crate::mm::address_space::{self, OwnedSpace};
@@ -138,6 +142,67 @@ pub fn mmap(
         if let Err(error) = map_span(&mut owned.space, &change.new) {
             // The replaced pages are gone either way (as on Linux, a failed
             // MAP_FIXED leaves a hole); the map must say so.
+            owned.map = saved;
+            owned.map.remove(change.new.start, change.new.end);
+            return Err(error);
+        }
+        Ok(change.address)
+    })
+}
+
+/// Device memory at `physical` (page-aligned) into the process.
+pub fn mmap_device(
+    id: AddressSpaceId,
+    hint: u64,
+    length: u64,
+    protection: Protection,
+    physical: u64,
+    fixed: bool,
+) -> Result<u64, Errno> {
+    with_space(id, |owned| {
+        let saved = owned.map.clone();
+        let change = owned
+            .map
+            .mmap_device(hint, length, protection, physical, fixed)?;
+        for span in &change.replaced {
+            unmap_span(&owned.space, span);
+        }
+        // PWT selects write-combining through PAT_LAYOUT (as
+        // PageFlags::FRAMEBUFFER does for the kernel).
+        let flags = page_flags(protection).with_cache(true, false);
+        let mut mapped = change.new.start;
+        let mut result = Ok(());
+        for page in pages(&change.new) {
+            let frame = crate::mm::PhysFrame(physical + (page - change.new.start));
+            let step = owned
+                .space
+                .map_device(VirtAddr(page), frame, flags)
+                .map_err(|_| Errno::ENOMEM)
+                .and_then(|()| {
+                    if protection == Protection::NONE {
+                        owned
+                            .space
+                            .protect_inaccessible(VirtAddr(page))
+                            .map_err(|_| Errno::ENOMEM)
+                    } else {
+                        Ok(())
+                    }
+                });
+            if let Err(error) = step {
+                result = Err(error);
+                break;
+            }
+            mapped = page + PAGE_SIZE;
+        }
+        if let Err(error) = result {
+            unmap_span(
+                &owned.space,
+                &Span {
+                    start: change.new.start,
+                    end: mapped,
+                    protection,
+                },
+            );
             owned.map = saved;
             owned.map.remove(change.new.start, change.new.end);
             return Err(error);

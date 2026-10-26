@@ -89,6 +89,12 @@ pub trait Inode: Send + Sync + Any {
         Err(Errno::ENOTDIR)
     }
 
+    /// Whether `lseek` works: files and directories, not streams. A device
+    /// that is memory (`/dev/fb0`) says yes.
+    fn seekable(&self) -> bool {
+        self.kind() != InodeKind::CharDevice
+    }
+
     /// Whether this is a terminal (`isatty`, terminal `ioctl`s).
     fn is_terminal(&self) -> bool {
         false
@@ -105,6 +111,20 @@ pub trait Inode: Send + Sync + Any {
     /// syscall copies it). Terminal ioctls are handled separately.
     fn ioctl(&self, _request: u64, _value: &mut i32) -> FsResult<()> {
         Err(Errno::ENOTTY)
+    }
+
+    /// An `ioctl` that fills in a struct (`FBIOGET_VSCREENINFO`, ...):
+    /// its bytes, which the syscall copies to the argument. `None`: not a
+    /// request this inode answers this way.
+    fn ioctl_out(&self, _request: u64) -> FsResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// `mmap(MAP_SHARED)` of `length` bytes at `offset`: the physical
+    /// address of device memory to map (page-aligned). Only devices that
+    /// are memory (`/dev/fb0`) can.
+    fn mmap(&self, _offset: u64, _length: u64) -> FsResult<u64> {
+        Err(Errno::ENODEV)
     }
 
     /// For filesystems that downcast directories (`rename`).

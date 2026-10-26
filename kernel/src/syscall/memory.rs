@@ -27,22 +27,43 @@ pub fn brk(process: &dyn ProcessOps, address: u64) -> u64 {
     process.brk(address)
 }
 
-/// `mmap(addr, length, prot, flags, fd, offset)`. Only private anonymous
-/// memory for now: file mappings are `ENODEV`, shared ones `EINVAL`.
-/// Flags SaeOS has no use for (`MAP_NORESERVE`, `MAP_STACK`,
-/// `MAP_POPULATE`, ...) are accepted, as Linux ignores what does not apply.
-pub fn mmap(
-    process: &dyn ProcessOps,
+/// `mmap(addr, length, prot, flags, fd, offset)`: private anonymous
+/// memory, or a device's memory shared (`MAP_SHARED` of `/dev/fb0`; the
+/// file says where, [`crate::fs::Inode::mmap`]). Other file mappings are
+/// `ENODEV`; a private device mapping is `EINVAL` (a private copy of video
+/// memory makes no sense). Flags SaeOS has no use for (`MAP_NORESERVE`,
+/// `MAP_STACK`, `MAP_POPULATE`, ...) are accepted, as Linux ignores what
+/// does not apply.
+pub fn mmap<M: UserMemory>(
+    context: &Context<M>,
     hint: u64,
     length: u64,
     protection: u64,
     flags: u64,
-    _fd: u64,
+    fd: u64,
     offset: u64,
 ) -> Result<u64, Errno> {
+    let process = context.process;
     let protection = Protection::from_linux(protection)?;
     if flags & MAP_ANONYMOUS == 0 {
-        return Err(Errno::ENODEV);
+        if !offset.is_multiple_of(4096) || length == 0 {
+            return Err(Errno::EINVAL);
+        }
+        let file = context
+            .files
+            .get(u32::try_from(fd).map_err(|_| Errno::EBADF)?)?;
+        let physical = file.inode.mmap(offset, length)?;
+        if flags & (MAP_SHARED | MAP_PRIVATE) != MAP_SHARED || flags & MAP_FIXED_NOREPLACE != 0 {
+            return Err(Errno::EINVAL);
+        }
+        // As on Linux: the file must be readable, and open for writing to
+        // be mapped writable.
+        if !file.flags.contains(crate::fs::OpenFlags::READ)
+            || (protection.write && !file.flags.contains(crate::fs::OpenFlags::WRITE))
+        {
+            return Err(Errno::EACCES);
+        }
+        return process.mmap_device(hint, length, protection, physical, flags & MAP_FIXED != 0);
     }
     if flags & (MAP_SHARED | MAP_PRIVATE) != MAP_PRIVATE || flags & MAP_FIXED_NOREPLACE != 0 {
         return Err(Errno::EINVAL);

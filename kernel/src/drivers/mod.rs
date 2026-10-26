@@ -1,5 +1,7 @@
 pub mod ac97;
+pub mod bochs_vbe;
 pub mod console;
+pub mod fb;
 pub mod font;
 #[cfg(feature = "framebuffer")]
 pub mod framebuffer;

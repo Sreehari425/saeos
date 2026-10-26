@@ -95,6 +95,20 @@ impl ProcessOps for FakeProcess {
             .map(|change| change.address)
     }
 
+    fn mmap_device(
+        &self,
+        hint: u64,
+        length: u64,
+        protection: Protection,
+        physical: u64,
+        fixed: bool,
+    ) -> Result<u64, Errno> {
+        self.map
+            .borrow_mut()
+            .mmap_device(hint, length, protection, physical, fixed)
+            .map(|change| change.address)
+    }
+
     fn munmap(&self, start: u64, length: u64) -> Result<(), Errno> {
         self.map.borrow_mut().munmap(start, length).map(|_| ())
     }
@@ -474,6 +488,90 @@ fn exit_and_wait4() {
 const ANON: u64 = MAP_PRIVATE | MAP_ANONYMOUS;
 const PROT_RW: u64 = 3;
 
+/// Device memory, as `/dev/fb0` offers it: 16 pages at 0xfd00_0000.
+struct FakeDevice;
+
+const DEVICE_MEMORY: u64 = 0xfd00_0000;
+const DEVICE_BYTES: u64 = 16 * 4096;
+
+impl crate::fs::Inode for FakeDevice {
+    fn stat(&self) -> crate::fs::Stat {
+        crate::fs::Stat {
+            ino: 1,
+            fs_id: 99,
+            kind: crate::fs::InodeKind::CharDevice,
+            size: DEVICE_BYTES,
+            nlink: 1,
+        }
+    }
+
+    fn kind(&self) -> crate::fs::InodeKind {
+        crate::fs::InodeKind::CharDevice
+    }
+
+    fn mmap(&self, offset: u64, length: u64) -> crate::fs::FsResult<u64> {
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > DEVICE_BYTES)
+        {
+            return Err(Errno::EINVAL);
+        }
+        Ok(DEVICE_MEMORY + offset)
+    }
+
+    fn ioctl_out(&self, request: u64) -> crate::fs::FsResult<Option<Vec<u8>>> {
+        Ok((request == 0x4600).then(|| vec![7; 160]))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
+fn device_memory_maps_shared() {
+    use crate::fs::file::{OpenFile, OpenFlags};
+    let world = World::new();
+    let inode: std::sync::Arc<dyn crate::fs::Inode> = std::sync::Arc::new(FakeDevice);
+    let rw = world
+        .files
+        .insert(OpenFile::new(inode.clone(), OpenFlags::READ_WRITE))
+        .unwrap() as u64;
+    let read_only = world
+        .files
+        .insert(OpenFile::new(inode, OpenFlags::READ))
+        .unwrap() as u64;
+    let address = world.call(MMAP, &[0, 3 * 4096, 3, MAP_SHARED, rw, 4096]);
+    assert!(address > 0, "{address}");
+    let region = world
+        .process
+        .map
+        .borrow()
+        .region_at(address as u64)
+        .copied()
+        .unwrap();
+    assert_eq!(
+        region.device_address(address as u64 + 4096),
+        Some(DEVICE_MEMORY + 2 * 4096),
+        "page n of the mapping is device page offset + n"
+    );
+    // Private, unaligned, past the end, executable, writable through a
+    // read-only descriptor.
+    for (args, error) in [
+        ([0, 4096, 1, MAP_PRIVATE, rw, 0], Errno::EINVAL),
+        ([0, 4096, 1, MAP_SHARED, rw, 100], Errno::EINVAL),
+        ([0, 4096, 1, MAP_SHARED, rw, DEVICE_BYTES], Errno::EINVAL),
+        ([0, 4096, 5, MAP_SHARED, rw, 0], Errno::EINVAL),
+        ([0, 4096, 3, MAP_SHARED, read_only, 0], Errno::EACCES),
+    ] {
+        assert_eq!(world.call(MMAP, &args), errno(error), "{args:?}");
+    }
+    assert!(world.call(MMAP, &[0, 4096, 1, MAP_SHARED, read_only, 0]) > 0);
+    // A struct ioctl fills the argument.
+    assert_eq!(world.call(IOCTL, &[rw, 0x4600, BASE + 3000]), 0);
+    assert_eq!(world.user(3000, 160), vec![7; 160]);
+}
+
 #[test]
 fn brk_and_mmap_decode_like_linux() {
     let world = World::new();
@@ -500,8 +598,15 @@ fn brk_and_mmap_decode_like_linux() {
     );
     assert_eq!(
         world.call(MMAP, &[0, 4096, 1, MAP_PRIVATE, 3, 0]),
+        errno(Errno::EBADF),
+        "a closed descriptor"
+    );
+    let path = world.string(0, "/plain.txt");
+    let file = world.call(OPEN, &[path, O_RDWR_CREAT, 0o644]) as u64;
+    assert_eq!(
+        world.call(MMAP, &[0, 4096, 1, MAP_SHARED, file, 0]),
         errno(Errno::ENODEV),
-        "file mapping"
+        "a regular file cannot be mapped"
     );
     assert_eq!(
         world.call(MMAP, &[0, 4096, 1, MAP_SHARED | MAP_ANONYMOUS, u64::MAX, 0]),

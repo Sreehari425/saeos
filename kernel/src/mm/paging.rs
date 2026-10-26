@@ -269,6 +269,9 @@ struct OwnedMapping {
 
 struct AddressSpaceState {
     owned: Vec<OwnedMapping>,
+    /// Device memory mapped into the process (a framebuffer): borrowed,
+    /// never freed here, and shared as-is with a forked child.
+    devices: Vec<OwnedMapping>,
 }
 
 /// A page-table root for a future process. Kernel higher-half entries are
@@ -319,7 +322,10 @@ impl AddressSpace {
         }
         Ok(Self {
             root,
-            state: IrqSpinMutex::new(AddressSpaceState { owned: Vec::new() }),
+            state: IrqSpinMutex::new(AddressSpaceState {
+                owned: Vec::new(),
+                devices: Vec::new(),
+            }),
         })
     }
 
@@ -381,6 +387,27 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Map a page of device memory (borrowed: unmapping never frees it),
+    /// and remember it so `fork_cow` shares it with the child.
+    pub fn map_device(
+        &self,
+        virtual_address: VirtAddr,
+        physical_frame: PhysFrame,
+        flags: PageFlags,
+    ) -> Result<(), AddressSpaceError> {
+        self.state
+            .lock()
+            .devices
+            .try_reserve(1)
+            .map_err(|_| AddressSpaceError::OutOfFrames)?;
+        self.map(virtual_address, physical_frame, flags)?;
+        self.state.lock().devices.push(OwnedMapping {
+            virtual_address,
+            frame: physical_frame,
+        });
+        Ok(())
+    }
+
     pub fn unmap_mapping(
         &self,
         virtual_address: VirtAddr,
@@ -403,6 +430,14 @@ impl AddressSpace {
 
     fn remove_owned(&self, virtual_address: VirtAddr, frame: PhysFrame) -> MappingOwnership {
         let mut state = self.state.lock();
+        if let Some(index) = state
+            .devices
+            .iter()
+            .position(|mapping| mapping.virtual_address == virtual_address)
+        {
+            state.devices.swap_remove(index);
+            return MappingOwnership::Borrowed;
+        }
         if let Some(index) = state
             .owned
             .iter()
@@ -518,7 +553,10 @@ impl AddressSpace {
             } else {
                 flags & !COPY_ON_WRITE
             };
-            *slot = frame.0 | flags;
+            // The page keeps its memory type (a framebuffer stays
+            // write-combining through an mprotect).
+            let cache = *slot & (PWT | PCD | PAT_4K);
+            *slot = frame.0 | flags | cache;
         }
         self.flush_if_active(virtual_address);
         Ok(())
@@ -528,6 +566,8 @@ impl AddressSpace {
     /// same frame as here (one more reference each). Writable pages become
     /// read-only + COW in both spaces, so whichever side writes first gets
     /// its own copy (`resolve_cow`); read-only pages are simply shared.
+    /// Device pages are mapped into the child exactly as they are here:
+    /// shared memory, never copied.
     pub fn fork_cow(&self) -> Result<AddressSpace, AddressSpaceError> {
         let child = AddressSpace::new()?;
         let state = self.state.lock();
@@ -556,8 +596,36 @@ impl AddressSpace {
             }
             child_owned.push(*mapping);
         }
+        let mut child_devices = Vec::new();
+        child_devices
+            .try_reserve(state.devices.len())
+            .map_err(|_| AddressSpaceError::OutOfFrames)?;
+        for mapping in &state.devices {
+            let entry = unsafe { *self.leaf_slot(mapping.virtual_address)? };
+            let mapped = unsafe {
+                map_page_in_root(
+                    child.root,
+                    mapping.virtual_address,
+                    mapping.frame,
+                    entry & !ADDRESS_MASK,
+                )
+            };
+            if let Err(error) = mapped {
+                drop(state);
+                let mut child_state = child.state.lock();
+                child_state.owned = child_owned;
+                child_state.devices = child_devices;
+                drop(child_state);
+                return Err(error);
+            }
+            child_devices.push(*mapping);
+        }
         drop(state);
-        child.state.lock().owned = child_owned;
+        {
+            let mut child_state = child.state.lock();
+            child_state.owned = child_owned;
+            child_state.devices = child_devices;
+        }
         // Writable entries changed under live translations.
         if current_root() == self.root {
             flush_current();

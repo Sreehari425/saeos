@@ -221,6 +221,11 @@ pub fn kernel_main_high(handoff: Handoff) -> ! {
 
     // 1. Initialize Adaptive Console (VGA Text Buffer or GOP Truecolor Framebuffer)
     drivers::console::init(boot_info.display);
+    // UEFI: the firmware's framebuffer is /dev/fb0 (BIOS boots get theirs
+    // from a PCI driver, later).
+    if let boot::boot_info::DisplayMode::GopFramebuffer(info) = boot_info.display {
+        drivers::fb::register_gop(info);
+    }
     drivers::console::clear_screen();
 
     drivers::console::set_color(Color::LightCyan, Color::Black);

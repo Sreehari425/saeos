@@ -286,14 +286,15 @@ fn brk_grows_shrinks_and_refuses_collisions() {
     assert_sorted_and_disjoint(&map);
 }
 
-/// Reference model: one entry per mapped page.
-type Pages = BTreeMap<u64, Protection>;
+/// Reference model: one entry per mapped page, with the device memory
+/// behind it if any.
+type Pages = BTreeMap<u64, (Protection, Option<u64>)>;
 
 fn model_pages(map: &MemoryMap) -> Pages {
     let mut pages = Pages::new();
     for region in map.regions() {
         for page in (region.start..region.end).step_by(PAGE as usize) {
-            pages.insert(page, region.protection);
+            pages.insert(page, (region.protection, region.device_address(page)));
         }
     }
     pages
@@ -320,6 +321,69 @@ impl Rng {
 }
 
 #[test]
+fn device_regions_keep_their_physical_offsets_when_split() {
+    let mut map = program();
+    let base = 0x3000_0000;
+    let physical = 0xfd00_0000;
+    let change = map
+        .mmap_device(base, 8 * PAGE, Protection::READ_WRITE, physical, true)
+        .unwrap();
+    assert_eq!((change.new.start, change.new.end), (base, base + 8 * PAGE));
+    // A hole in the middle, then read-only on part of the right piece.
+    map.munmap(base + 2 * PAGE, 2 * PAGE).unwrap();
+    map.mprotect(base + 5 * PAGE, PAGE, Protection::READ)
+        .unwrap();
+    let pieces: Vec<_> = map
+        .regions()
+        .iter()
+        .filter(|region| region.start >= base && region.end <= base + 8 * PAGE)
+        .map(|region| {
+            (
+                region.start - base,
+                region.end - base,
+                region.kind,
+                region.protection,
+            )
+        })
+        .collect();
+    let device = |page: u64| RegionKind::Device {
+        physical: physical + page * PAGE,
+    };
+    assert_eq!(
+        pieces,
+        [
+            (0, 2 * PAGE, device(0), Protection::READ_WRITE),
+            (4 * PAGE, 5 * PAGE, device(4), Protection::READ_WRITE),
+            (5 * PAGE, 6 * PAGE, device(5), Protection::READ),
+            (6 * PAGE, 8 * PAGE, device(6), Protection::READ_WRITE),
+        ]
+    );
+    let region = map.region_at(base + 7 * PAGE).unwrap();
+    assert_eq!(
+        region.device_address(base + 7 * PAGE),
+        Some(physical + 7 * PAGE)
+    );
+    // Never executable, and only page-aligned device memory.
+    assert_eq!(
+        map.mprotect(base, PAGE, Protection::READ_EXECUTE),
+        Err(Errno::EACCES)
+    );
+    assert_eq!(
+        map.mmap_device(0, PAGE, Protection::READ_EXECUTE, physical, false),
+        Err(Errno::EINVAL)
+    );
+    assert_eq!(
+        map.mmap_device(0, PAGE, Protection::READ, physical + 1, false),
+        Err(Errno::EINVAL)
+    );
+    // MAP_FIXED anonymous memory over device memory replaces it.
+    let change = map.mmap(base, PAGE, Protection::READ_WRITE, true).unwrap();
+    assert_eq!(span_pages(&change.replaced), [base]);
+    assert_eq!(map.region_at(base).unwrap().kind, RegionKind::Anonymous);
+    assert_sorted_and_disjoint(&map);
+}
+
+#[test]
 fn random_operations_match_a_page_model() {
     let steps = if cfg!(miri) { 60 } else { 20_000 };
     // A small window so operations collide often.
@@ -339,7 +403,24 @@ fn random_operations_match_a_page_model() {
             let start = window + rng.below(pages_in_window) * PAGE;
             let length = (1 + rng.below(8)) * PAGE;
             let protection = protections[rng.below(4) as usize];
-            match rng.below(4) {
+            match rng.below(5) {
+                4 => {
+                    // Device memory at a random physical base, never
+                    // executable: each page must keep its own address.
+                    let protection = Protection {
+                        execute: false,
+                        ..protection
+                    };
+                    let physical = 0xfd00_0000 + rng.below(256) * PAGE;
+                    let change = map
+                        .mmap_device(start, length, protection, physical, true)
+                        .unwrap();
+                    assert_eq!(change.new.start, start);
+                    for (index, page) in (start..start + length).step_by(PAGE as usize).enumerate()
+                    {
+                        model.insert(page, (protection, Some(physical + index as u64 * PAGE)));
+                    }
+                }
                 0 => {
                     let change = map.mmap(start, length, protection, true).unwrap();
                     // Replaced pages were exactly the mapped ones in range.
@@ -353,7 +434,7 @@ fn random_operations_match_a_page_model() {
                         "seed {seed} step {step}"
                     );
                     for page in (start..start + length).step_by(PAGE as usize) {
-                        model.insert(page, protection);
+                        model.insert(page, (protection, None));
                     }
                 }
                 1 => {
@@ -371,16 +452,26 @@ fn random_operations_match_a_page_model() {
                     let covered = (start..start + length)
                         .step_by(PAGE as usize)
                         .all(|page| model.contains_key(&page));
+                    let device = (start..start + length)
+                        .step_by(PAGE as usize)
+                        .any(|page| model.get(&page).is_some_and(|(_, device)| device.is_some()));
                     match map.mprotect(start, length, protection) {
                         Ok(changed) => {
                             assert!(
                                 covered,
                                 "seed {seed} step {step}: mprotect over a hole succeeded"
                             );
+                            assert!(!(device && protection.execute), "executable device memory");
                             assert_eq!(span_pages(&changed).len() as u64, length / PAGE);
                             for page in (start..start + length).step_by(PAGE as usize) {
-                                model.insert(page, protection);
+                                model.get_mut(&page).unwrap().0 = protection;
                             }
+                        }
+                        Err(Errno::EACCES) => {
+                            assert!(
+                                covered && device && protection.execute,
+                                "seed {seed} step {step}"
+                            );
                         }
                         Err(error) => {
                             assert!(!covered, "seed {seed} step {step}: {error:?}");

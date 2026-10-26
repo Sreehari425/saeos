@@ -153,6 +153,7 @@ make clippy        # Run Clippy with warnings denied
 make test          # All tests below plus the fault tests, on BIOS and UEFI
 make user-test     # Ring-3 tests: a test program runs as init (PID 1)
 make sound-test    # Play tones on AC'97 and HD Audio cards and check QEMU's recording
+make fb-test       # Draw on /dev/fb0 and check QEMU screendumps, pixel for pixel
 make host-test     # Host tests (tools/host-tests): kernel and userspace code built for the host
 make miri          # The same host tests under Miri (undefined-behaviour checks)
 make mm-stress     # Boot with MM self-tests and stress runs (also mm-stress-uefi)

@@ -101,6 +101,16 @@ source = "target/x86_64-saeos/release/play"
 target = "/bin/play"
 mode = 0o755
 
+[[file]]
+source = "target/x86_64-saeos/release/fbinfo"
+target = "/bin/fbinfo"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/fbtest"
+target = "/bin/fbtest"
+mode = 0o755
+
 # The sound test's WAV (made by scripts/make-test-tone.py).
 [[file]]
 source = "target/test-tone.wav"

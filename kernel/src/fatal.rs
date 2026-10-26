@@ -34,6 +34,9 @@ pub fn report(message: fmt::Arguments, passed: bool) -> ! {
         raw_serial("\n[FATAL: fault while reporting a fault]\n");
         halt(false);
     }
+    // A program may own the screen (/dev/fb0): take it back first.
+    crate::drivers::fb::reclaim_for_panic();
+    crate::drivers::console::reclaim_screen_for_panic();
     crate::drivers::console::set_color(
         crate::drivers::vga::Color::LightRed,
         crate::drivers::vga::Color::Black,

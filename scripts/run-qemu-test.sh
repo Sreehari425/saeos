@@ -11,6 +11,9 @@
 # ("h i ret ctrl-d"); QEMU_TEST_SERIAL is text (with \r, \x7f escapes)
 # sent to the serial port. See scripts/qemu-input.py.
 #
+# QEMU_TEST_SCREENDUMPS takes screenshots: lines of `marker|/path.ppm`,
+# each saved once its marker appears in the log.
+#
 # QEMU_TEST_POSTCHECK is a command run after a PASS (e.g. checking a file
 # QEMU wrote); the test fails if it does.
 #
@@ -32,10 +35,19 @@ trap 'rm -rf "$LOG_FILE" "$WORK_DIR"' EXIT
 
 EXTRA=()
 INPUT_MARKER="${QEMU_TEST_INPUT_AFTER:-}"
-if [ -n "${QEMU_TEST_KEYS:-}" ]; then
-    MONITOR="$WORK_DIR/monitor.sock"
+MONITOR="$WORK_DIR/monitor.sock"
+if [ -n "${QEMU_TEST_KEYS:-}${QEMU_TEST_SCREENDUMPS:-}" ]; then
     EXTRA+=(-monitor "unix:$MONITOR,server,nowait")
+fi
+if [ -n "${QEMU_TEST_KEYS:-}" ]; then
     "$(dirname "$0")/qemu-input.py" "$LOG_FILE" "$INPUT_MARKER" keys "$MONITOR" "$QEMU_TEST_KEYS" &
+fi
+if [ -n "${QEMU_TEST_SCREENDUMPS:-}" ]; then
+    while IFS='|' read -r marker path; do
+        [ -z "$marker" ] && continue
+        rm -f "$path"
+        "$(dirname "$0")/qemu-input.py" "$LOG_FILE" "$marker" screendump "$MONITOR" "$path" &
+    done <<< "$QEMU_TEST_SCREENDUMPS"
 fi
 # The guest's serial input is QEMU's stdin: a FIFO when there is text to
 # send (held open here so QEMU never sees end of file), else nothing.

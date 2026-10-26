@@ -3,7 +3,7 @@
 //! ```text
 //! pci::init()  scan (config.rs over port I/O, scan.rs, device.rs)
 //!   -> DEVICES: every function, its class, BARs, interrupt, capabilities
-//!   -> DRIVERS: each driver's `matches` / `probe` (AC'97, HD Audio)
+//!   -> DRIVERS: each driver's `matches` / `probe` (AC'97, HD Audio, Bochs VBE)
 //!   -> boot log, /proc/pci, lspci
 //! drivers:     pci::find(...), pci::enable(...), pci::map_bar(...),
 //!              pci::enable_msi(...) for interrupts
@@ -54,6 +54,11 @@ mod kernel {
             name: "hda",
             matches: crate::drivers::hda::matches,
             probe: crate::drivers::hda::probe,
+        },
+        PciDriver {
+            name: "bochs-vbe",
+            matches: crate::drivers::bochs_vbe::matches,
+            probe: crate::drivers::bochs_vbe::probe,
         },
     ];
 

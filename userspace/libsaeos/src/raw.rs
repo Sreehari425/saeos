@@ -116,6 +116,7 @@ pub fn brk(address: u64) -> u64 {
 pub const PROT_READ: u64 = 1;
 pub const PROT_WRITE: u64 = 2;
 pub const PROT_EXEC: u64 = 4;
+pub const MAP_SHARED: u64 = 0x01;
 pub const MAP_PRIVATE: u64 = 0x02;
 pub const MAP_FIXED: u64 = 0x10;
 pub const MAP_ANONYMOUS: u64 = 0x20;
@@ -133,6 +134,17 @@ pub fn mmap_anonymous(hint: u64, length: u64, protection: u64, extra_flags: u64)
                 u64::MAX,
                 0,
             ],
+        )
+    }
+}
+
+/// `mmap` of a file (`MAP_SHARED` of a device such as `/dev/fb0`): the
+/// address, or a negative errno.
+pub fn mmap_file(length: u64, protection: u64, flags: u64, fd: u32, offset: u64) -> i64 {
+    unsafe {
+        syscall6(
+            nr::MMAP,
+            [0, length, protection, flags, u64::from(fd), offset],
         )
     }
 }

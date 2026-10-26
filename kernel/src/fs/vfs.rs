@@ -290,7 +290,7 @@ impl Vfs {
 
     pub fn lseek(&self, files: &FileTable, fd: Fd, offset: i64, whence: Whence) -> FsResult<u64> {
         let file = files.get(fd)?;
-        if file.inode.kind() == InodeKind::CharDevice {
+        if !file.inode.seekable() {
             return Err(Errno::ESPIPE);
         }
         let mut position = file.offset.lock();
