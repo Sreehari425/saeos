@@ -13,8 +13,8 @@ KERNEL_OFFSET equ 0xffffffff80000000
 section .multiboot
 align 4
     dd 0x1BADB002                 ; Multiboot 1 magic
-    dd 0x00000043                 ; Flags: ALIGN | MEMINFO | MEMORY MAP
-    dd -(0x1BADB002 + 0x00000043) ; Checksum
+    dd 0x00000003                 ; Flags: ALIGN | MEMINFO (memory map included)
+    dd -(0x1BADB002 + 0x00000003) ; Checksum
 
 section .boot.bss nobits alloc write align=4096
 align 4096

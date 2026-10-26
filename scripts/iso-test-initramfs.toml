@@ -1,0 +1,8 @@
+# The ISO test's initramfs (`make iso-test`): one program, so the image
+# stays small whatever is under initramfs/, and fits in the 32 MiB a CD's
+# UEFI boot image can hold. The test boots `init=/bin/hello`: it passes only
+# if the kernel got both the initramfs and the command line.
+[[file]]
+source = "../target/x86_64-saeos/release/hello"
+target = "/bin/hello"
+mode = 0o755

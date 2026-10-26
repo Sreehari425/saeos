@@ -58,7 +58,7 @@ BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(ACCEL_ARGS)
 
 .PHONY: check-std-lock userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test badapple-test badapple-data test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test badapple-test badapple-data iso iso-test test help
 
 all: bios
 
@@ -175,7 +175,7 @@ miri:
 
 # Host tests plus every QEMU test on both boot paths; each run ends with the
 # kernel's own verdict through isa-debug-exit.
-test: host-test miri boot-test user-test sound-test fb-test badapple-test mm-guard-test fault-test panic-lock-test
+test: host-test miri boot-test user-test sound-test fb-test badapple-test iso-test mm-guard-test fault-test panic-lock-test
 
 # Each target boots twice: on QEMU's default CPU, and with -cpu max, where
 # SMEP/SMAP exist and the user-memory test checks they are enforced.
@@ -289,6 +289,31 @@ BAD_APPLE_SRC ?= ../bad-apple-terminal/data
 badapple-data:
 	./scripts/make-badapple.py $(BAD_APPLE_SRC) initramfs/badapple
 
+# A hybrid ISO (scripts/make-iso.sh) that boots under BIOS and UEFI, as a
+# CD or written to a USB stick, with CMDLINE built in. Its tools (GRUB,
+# xorriso, mtools, dosfstools) come with `nix develop`.
+ISO_IMAGE := target/saeos.iso
+iso: olddefconfig initramfs
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
+	CMDLINE='$(CMDLINE)' ./scripts/make-iso.sh target/$(BIOS_TARGET)/debug/$(KERNEL) target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(INITRAMFS_IMAGE) $(ISO_IMAGE)
+
+# The ISO booted four ways: BIOS and UEFI, each from a CD and a USB stick.
+# Its initramfs holds only hello (scripts/iso-test-initramfs.toml), which
+# runs as init only if the kernel got both the initramfs and the command
+# line.
+ISO_TEST_IMAGE := target/saeos-test.iso
+ISO_TEST_RUN = QEMU_TEST_EXPECT='hello from userspace \(/bin/hello, pid 1\)' ./scripts/run-qemu-test.sh ./scripts/runner-iso.sh $(ISO_TEST_IMAGE) $(ACCEL_ARGS) -m 2G
+iso-test: userspace
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),user-test
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test
+	$(MKINITRAMFS) build scripts/iso-test-initramfs.toml -o target/initramfs-iso-test.cpio
+	CMDLINE='init=/bin/hello' ./scripts/make-iso.sh target/$(BIOS_TARGET)/debug/$(KERNEL) target/$(UEFI_TARGET)/debug/$(KERNEL).efi target/initramfs-iso-test.cpio $(ISO_TEST_IMAGE)
+	ISO_FIRMWARE=bios ISO_MEDIUM=cdrom $(ISO_TEST_RUN)
+	ISO_FIRMWARE=bios ISO_MEDIUM=usb $(ISO_TEST_RUN)
+	ISO_FIRMWARE=uefi ISO_MEDIUM=cdrom $(ISO_TEST_RUN)
+	ISO_FIRMWARE=uefi ISO_MEDIUM=usb $(ISO_TEST_RUN)
+
 # The interactive shell as init, typed at: "echo typed-ok", "cd /etc",
 # "pwd", "exit 5" (the exit status is the verdict).
 SHELL_KEYS := e c h o spc t y p e d minus o k ret c d spc slash e t c ret p w d ret e x i t spc 5 ret
@@ -375,8 +400,9 @@ help:
 	@echo "  all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check"
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\" SOUND=pipewire SOUND_CARD=hda"
 	@echo "  userspace initramfs initramfs-test (from initramfs.toml)"
+	@echo "  iso: target/saeos.iso for BIOS and UEFI, CD or USB stick (CMDLINE built in)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
-	@echo "  test boot-test user-test sound-test fb-test badapple-test host-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
+	@echo "  test boot-test user-test sound-test fb-test badapple-test iso-test host-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"
 	@echo "  debug debug-uefi gdb gdb-uefi symbolize LOG=<file>"
 	@echo "  clean distclean mrproper nix-gc"

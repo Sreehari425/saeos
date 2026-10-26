@@ -143,6 +143,22 @@ make badapple-data BAD_APPLE_SRC=path/to/data
 make run-debug SOUND=pipewire
 ```
 
+### A bootable ISO
+
+`make iso` writes `target/saeos.iso`, which boots under BIOS (through
+GRUB) and UEFI, as a CD or written to a USB stick; `nix build .#iso` builds
+the same from the flake. The command line is built in
+(`make iso CMDLINE="loglevel=debug"`). 
+```sh
+make iso
+sudo dd if=target/saeos.iso of=/dev/sdX bs=4M conv=fsync   # check sdX first: it is overwritten
+```
+
+On real hardware, turn Secure Boot off (the kernel is not signed). Under
+UEFI from a CD, the initramfs must stay under about 30 MiB (El Torito's
+limit); from a USB stick any size boots. `make iso-test` boots an ISO in
+QEMU all four ways.
+
 ## Configuration
 
 SaeOS uses a small, declarative kernel configuration system.

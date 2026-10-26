@@ -28,9 +28,12 @@ fi
 
 # 3. Launch QEMU with kernel and pass through any additional flags.
 # High-frame testing requires explicit QEMU memory, for example: cargo run -- -m 16G
-exec qemu-system-x86_64 \
+. "$(dirname "$0")/qemu-child.sh"
+status=0
+run_qemu \
     -kernel "$KERNEL_BIN" \
     "${BOOT_ARGS[@]}" \
     -serial stdio \
     -no-reboot \
-    "$@"
+    "$@" || status=$?
+exit "$status"

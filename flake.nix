@@ -112,6 +112,27 @@
         bios = cargoBuild "x86_64-unknown-none";
         uefi = cargoBuild "x86_64-unknown-uefi";
 
+        # What scripts/make-iso.sh needs (GRUB for the BIOS half; the UEFI
+        # half is the kernel itself).
+        isoTools = with pkgs; [
+          binutils
+          grub2
+          xorriso
+          mtools
+          dosfstools
+        ];
+
+        # The hybrid ISO, from the two kernels above; boots under BIOS and
+        # UEFI, as a CD or written to a USB stick.
+        iso = pkgs.runCommand "${packageMetadata.name}-iso" { nativeBuildInputs = isoTools; } ''
+          mkdir -p "$out"
+          bash ${./scripts/make-iso.sh} \
+            ${bios}/saeos.elf \
+            ${uefi}/EFI/BOOT/BOOTX64.EFI \
+            ${bios}/initramfs.cpio \
+            "$out/saeos.iso"
+        '';
+
         biosApp = pkgs.writeShellApplication {
           name = "saeos-bios";
           runtimeInputs = [ pkgs.qemu ];
@@ -139,7 +160,8 @@
               printf '%s\n' "$CMDLINE" > "$esp_dir/saeos/cmdline.txt"
             fi
 
-            exec qemu-system-x86_64 \
+            # Not exec: the trap must outlive QEMU to delete the ESP copy.
+            qemu-system-x86_64 \
               -bios ${pkgs.OVMF.fd}/FV/OVMF.fd \
               -drive format=raw,file=fat:rw:"$esp_dir" \
               -serial stdio \
@@ -150,7 +172,7 @@
       in
       {
         packages = {
-          inherit bios uefi;
+          inherit bios uefi iso;
           default = bios;
         };
 
@@ -170,15 +192,22 @@
         };
 
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [
-            rustToolchain
-            qemu
-            nasm
-            binutils
-            llvm
-            gnumake
-            gdb
-          ];
+          nativeBuildInputs =
+            with pkgs;
+            [
+              rustToolchain
+              qemu
+              nasm
+              binutils
+              llvm
+              gnumake
+              gdb
+              # The test and media scripts (check-wav.py, bav.py, ...) and
+              # make badapple-data.
+              python3
+              ffmpeg
+            ]
+            ++ isoTools;
 
             shellHook = ''
             # The UEFI runner needs firmware; keep a user-provided path.

@@ -31,25 +31,17 @@ if [ -n "${CMDLINE:-}" ]; then
     printf '%s\n' "$CMDLINE" > "$ESP_DIR/saeos/cmdline.txt"
 fi
 
-# 4. Locate OVMF firmware. Nix users can provide the store path explicitly.
-OVMF_PATH="${OVMF_PATH:-}"
-if [ -z "$OVMF_PATH" ]; then
-    OVMF_PATH="/usr/share/edk2/x64/OVMF.4m.fd"
-fi
-if [ ! -f "$OVMF_PATH" ]; then
-    OVMF_PATH="/usr/share/OVMF/OVMF.fd"
-fi
-
-if [ ! -f "$OVMF_PATH" ]; then
-    echo "ERROR: OVMF UEFI firmware not found!"
-    exit 1
-fi
+# 4. Locate OVMF firmware.
+. "$(dirname "$0")/find-ovmf.sh"
 
 # 5. Launch QEMU
 echo "==> Booting SaeOS in UEFI Mode with OVMF ($OVMF_PATH)..."
-exec qemu-system-x86_64 \
+. "$(dirname "$0")/qemu-child.sh"
+status=0
+run_qemu \
     -bios "$OVMF_PATH" \
     -drive format=raw,file=fat:rw:"$ESP_DIR" \
     -serial stdio \
     -no-reboot \
-    "$@"
+    "$@" || status=$?
+exit "$status"
