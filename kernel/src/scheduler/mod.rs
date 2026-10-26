@@ -45,6 +45,7 @@ pub const REAPER_WAIT_ID: u64 = 1;
 pub const KEYBOARD_WAIT_ID: u64 = 2;
 pub const BOOT_TEST_WAIT_ID: u64 = 3;
 pub const CHILD_WAIT_ID: u64 = 4;
+pub const SOUND_WAIT_ID: u64 = 5;
 
 /// The reaper sleeps here; `exit_current` wakes it.
 pub static REAPER_WAIT: IrqSpinMutex<WaitQueue> = IrqSpinMutex::new(WaitQueue::new(REAPER_WAIT_ID));

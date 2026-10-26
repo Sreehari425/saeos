@@ -8,11 +8,18 @@ Each channel of the capture (QEMU's `-audiodev wav`) is checked on its own,
 so a tone missing from one side fails. It is cut into 20 ms windows: quiet ones
 are silence, the rest get a frequency from their zero crossings. Runs of
 windows at one frequency are tones. The tones must match the arguments in
-order: frequency within 3%, at least 80% of the length. Nothing else may
-sound. Inside a tone the zero crossings must be evenly spaced: a lost,
-repeated or overwritten period jumps the phase and shows up as one
-irregular gap. Two runs of the same tone need silence between them, or one
-tone was cut in two by a glitch.
+order: frequency within 3%, the length within 20% (or three windows, for
+short tones). Nothing else may sound. Inside a tone the zero crossings
+must be evenly spaced: a lost, repeated or overwritten period jumps the
+phase and shows up as one irregular gap. Two runs of the same tone need
+real silence between them (at least a millisecond of flat signal: zeros,
+or a card holding its last sample), or one tone was cut in two by a
+glitch.
+
+Captures can hold less silence than was heard (QEMU records nothing while
+a stream is stopped), so tones can butt against each other: where they
+do, the window at the junction is left out of the phase check, and a
+short silence is enough to mark a gap.
 
 Standard library only. The WAV header's sizes may be 0 if QEMU did not
 finish the file; the data then runs to the end of the file.
@@ -26,11 +33,14 @@ WINDOW = 0.020
 SILENCE_RMS = 400
 FREQUENCY_TOLERANCE = 0.03
 MIN_LENGTH = 0.8
+# Samples changing this little, for this long, are a gap (not a glitch):
+# a tone never stays this flat for a millisecond.
+GAP_STEP = 64
+MIN_GAP_SECONDS = 0.001
 # Windows of a different frequency allowed between two tones (a window
 # that holds the end of one and the start of the next).
 MAX_TRANSITION = 2
 CROSSING_TOLERANCE = 0.05
-MIN_GAP = 0.1
 
 
 def read_wav(path):
@@ -60,11 +70,13 @@ def read_wav(path):
 
 
 def crossings(samples, start, end):
-    """Upward zero crossings in samples[start:end], interpolated."""
+    """Upward zero crossings in samples[start:end], interpolated. A step
+    from below zero into silence (a tone cut off mid-cycle, then zeros) is
+    not one."""
     points = []
-    for index in range(max(start, 1), end):
+    for index in range(max(start, 1), min(end, len(samples) - 1)):
         before, after = samples[index - 1], samples[index]
-        if before < 0 <= after:
+        if before < 0 <= after and not (after == 0 and samples[index + 1] == 0):
             points.append(index - 1 + (-before) / (after - before))
     return points
 
@@ -105,12 +117,14 @@ def runs(classified):
     return found
 
 
-def regular(rate, samples, first, count):
-    """Whether a tone's zero crossings are evenly spaced (no phase jump)."""
+def regular(rate, samples, first, count, trim_start, trim_end):
+    """Whether a tone's zero crossings are evenly spaced (no phase jump).
+    Edges next to silence are checked too (a jump just after a restart is a
+    failure); an edge butting against another sound is left out."""
     size = int(rate * WINDOW)
-    # The whole run, edges included: a phase jump just after a restart
-    # (stale data played before the real stream) is a failure too.
-    points = crossings(samples, first * size, (first + count) * size)
+    start = (first + int(trim_start)) * size
+    end = (first + count - int(trim_end)) * size
+    points = crossings(samples, start, end)
     gaps = [b - a for a, b in zip(points, points[1:])]
     if len(gaps) < 4:
         return True
@@ -118,27 +132,41 @@ def regular(rate, samples, first, count):
     return all(abs(gap - typical) <= CROSSING_TOLERANCE * typical for gap in gaps)
 
 
+def silent_stretch(samples, start, end):
+    """The longest flat run (silence, or a held sample) in samples[start:end]."""
+    longest = current = 0
+    for before, value in zip(samples[start:end], samples[start + 1 : end]):
+        current = current + 1 if abs(value - before) < GAP_STEP else 0
+        longest = max(longest, current)
+    return longest
+
+
 def check(rate, samples, expected):
     """Problems found, as messages (empty: the capture is right)."""
     found = runs(windows(rate, samples))
-    tones, problems, silence = [], [], 0.0
-    for frequency, first, count in found:
+    size = int(rate * WINDOW)
+    tones, problems = [], []
+    previous_end = None
+    for index, (frequency, first, count) in enumerate(found):
+        if frequency is None or count <= MAX_TRANSITION:
+            continue
         length = count * WINDOW
-        if frequency is None:
-            silence += length
-            continue
-        if count <= MAX_TRANSITION:
-            continue
-        if tones and close(frequency, tones[-1][0]) and silence < MIN_GAP:
+        if (
+            tones
+            and close(frequency, tones[-1][0])
+            and silent_stretch(samples, previous_end, first * size) < MIN_GAP_SECONDS * rate
+        ):
             problems.append(
                 f"{frequency:.0f} Hz tone broken at {first * WINDOW:.2f} s (a glitch)"
             )
-        if not regular(rate, samples, first, count):
+        before = found[index - 1][0] if index > 0 else None
+        after = found[index + 1][0] if index + 1 < len(found) else None
+        if not regular(rate, samples, first, count, before is not None, after is not None):
             problems.append(
                 f"{frequency:.0f} Hz tone at {first * WINDOW:.2f} s has a phase jump"
             )
         tones.append((frequency, length, first * WINDOW))
-        silence = 0.0
+        previous_end = (first + count) * size
     summary = ", ".join(f"{f:.0f} Hz {l:.2f} s @ {t:.2f}" for f, l, t in tones)
     if len(tones) != len(expected):
         problems.append(f"expected {len(expected)} tones, found {len(tones)}: {summary}")
@@ -146,7 +174,7 @@ def check(rate, samples, expected):
         for (frequency, length, start), (want, seconds) in zip(tones, expected):
             if not close(frequency, want):
                 problems.append(f"tone at {start:.2f} s is {frequency:.1f} Hz, expected {want} Hz")
-            if length < MIN_LENGTH * seconds:
+            if length < seconds - max((1 - MIN_LENGTH) * seconds, 3 * WINDOW):
                 problems.append(f"{want} Hz tone lasts {length:.2f} s, expected {seconds} s")
     return problems, summary
 
@@ -177,6 +205,12 @@ def self_test():
         ("wrong pitch", [(440, 1.0), (None, 0.3), (440, 0.5), (2177, 0.5), (None, 0.1), (660, 0.5)], None, False),
         ("too short", [(440, 0.5), (None, 0.3), (440, 0.5), (1000, 0.5), (None, 0.1), (660, 0.5)], None, False),
         ("a silent channel", [(None, 3.0)], None, False),
+        # A capture with little silence between sounds: tones butt
+        # together, a short silence marks the gap.
+        ("butted tones", [(440, 1.0), (None, 0.03), (440, 0.5), (1000, 0.5), (660, 0.5)], None, True),
+        ("a split without silence", [(440, 1.0), (523, 0.02), (440, 0.5), (1000, 0.5), (660, 0.5)], None, False),
+        # Tones cut off mid-cycle (here in a negative half) into silence.
+        ("cut-off tones", [(440, 0.9993), (None, 0.3), (440, 0.5007), (1000, 0.5013), (None, 0.1), (660, 0.4987), (None, 0.1)], None, True),
     ]
     failures = 0
     for name, parts, jump, should_pass in cases:

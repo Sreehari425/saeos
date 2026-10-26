@@ -7,7 +7,10 @@
 //! | `AFMT_S16_LE`| 2 bytes, signed           | as is                 |
 //!
 //! Mono is played on both channels. A frame split across two `write`s is
-//! kept until the rest arrives. Pure, tested in the host model.
+//! kept until the rest arrives. A rate the card cannot play is converted
+//! ([`super::resample`]). Pure, tested in the host model.
+
+use super::resample::{Frame, Resampler};
 
 /// OSS format codes (`soundcard.h`).
 pub const AFMT_U8: i32 = 0x08;
@@ -71,19 +74,25 @@ impl Format {
     }
 }
 
-/// Converts a stream of input frames, carrying a partial frame between
-/// calls.
+/// Converts a stream of input frames to the card's format and rate,
+/// carrying a partial frame (and the resampler's state) between calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Converter {
     format: Format,
+    card_rate: u32,
+    /// `None` when the card plays `format.rate` itself.
+    resampler: Option<Resampler>,
     carry: [u8; 4],
     carried: usize,
 }
 
 impl Converter {
-    pub fn new(format: Format) -> Self {
+    /// `format` as written; `card_rate` what the card plays.
+    pub fn new(format: Format, card_rate: u32) -> Self {
         Self {
             format,
+            card_rate,
+            resampler: (format.rate != card_rate).then(|| Resampler::new(format.rate, card_rate)),
             carry: [0; 4],
             carried: 0,
         }
@@ -91,6 +100,10 @@ impl Converter {
 
     pub fn format(&self) -> Format {
         self.format
+    }
+
+    pub fn card_rate(&self) -> u32 {
+        self.card_rate
     }
 
     /// Bytes of a partial frame waiting for the rest.
@@ -105,7 +118,7 @@ impl Converter {
         }
     }
 
-    fn output_frame(&self, frame: &[u8], output: &mut [u8]) {
+    fn decode_frame(&self, frame: &[u8]) -> Frame {
         let size = self.format.sample.bytes();
         let left = self.decode(&frame[..size]);
         let right = if self.format.channels == 2 {
@@ -113,49 +126,68 @@ impl Converter {
         } else {
             left
         };
-        output[..2].copy_from_slice(&left.to_le_bytes());
-        output[2..4].copy_from_slice(&right.to_le_bytes());
+        [left, right]
+    }
+
+    /// The next whole input frame (completing a carried one first), or
+    /// `None` if the input does not hold one.
+    fn next_frame(&mut self, input: &[u8], consumed: &mut usize) -> Option<Frame> {
+        let size = self.format.frame_bytes();
+        let rest = &input[*consumed..];
+        if self.carried > 0 {
+            let needed = size - self.carried;
+            if rest.len() < needed {
+                return None;
+            }
+            self.carry[self.carried..size].copy_from_slice(&rest[..needed]);
+            self.carried = 0;
+            *consumed += needed;
+            let carry = self.carry;
+            return Some(self.decode_frame(&carry[..size]));
+        }
+        if rest.len() < size {
+            return None;
+        }
+        *consumed += size;
+        Some(self.decode_frame(&rest[..size]))
     }
 
     /// Convert as much of `input` as fits in `output` as whole output
-    /// frames. Returns (input bytes consumed, output bytes produced);
-    /// trailing bytes of a partial input frame are consumed into the carry.
+    /// frames. Returns (input bytes consumed, output bytes produced). Bytes
+    /// that cannot make a whole frame yet are consumed into the carry.
     pub fn convert(&mut self, input: &[u8], output: &mut [u8]) -> (usize, usize) {
-        let frame = self.format.frame_bytes();
         let mut consumed = 0;
         let mut produced = 0;
-        // Finish a carried frame first.
-        if self.carried > 0 {
-            let needed = frame - self.carried;
-            if input.len() < needed {
-                self.carry[self.carried..self.carried + input.len()].copy_from_slice(input);
-                self.carried += input.len();
-                return (input.len(), 0);
-            }
-            if output.len() < OUTPUT_FRAME {
-                return (0, 0);
-            }
-            self.carry[self.carried..frame].copy_from_slice(&input[..needed]);
-            let carry = self.carry;
-            self.output_frame(&carry[..frame], &mut output[..OUTPUT_FRAME]);
-            self.carried = 0;
-            consumed = needed;
-            produced = OUTPUT_FRAME;
-        }
-        while input.len() - consumed >= frame && output.len() - produced >= OUTPUT_FRAME {
-            self.output_frame(
-                &input[consumed..consumed + frame],
-                &mut output[produced..produced + OUTPUT_FRAME],
-            );
-            consumed += frame;
+        while output.len() - produced >= OUTPUT_FRAME {
+            let frame = match &mut self.resampler {
+                Some(resampler) => match resampler.produce() {
+                    Some(frame) => frame,
+                    None if !resampler.wants_input() => continue,
+                    None => match self.next_frame(input, &mut consumed) {
+                        Some(frame) => {
+                            if let Some(resampler) = &mut self.resampler {
+                                resampler.feed(frame);
+                            }
+                            continue;
+                        }
+                        None => break,
+                    },
+                },
+                None => match self.next_frame(input, &mut consumed) {
+                    Some(frame) => frame,
+                    None => break,
+                },
+            };
+            output[produced..produced + 2].copy_from_slice(&frame[0].to_le_bytes());
+            output[produced + 2..produced + 4].copy_from_slice(&frame[1].to_le_bytes());
             produced += OUTPUT_FRAME;
         }
-        // A partial frame at the end of the input waits in the carry
-        // (only once the whole frames before it are out).
+        // What cannot make a whole frame waits in the carry, whatever the
+        // room (whole frames left over wait in `input` for the caller).
         let rest = input.len() - consumed;
-        if rest > 0 && rest < frame {
-            self.carry[..rest].copy_from_slice(&input[consumed..]);
-            self.carried = rest;
+        if self.carried + rest < self.format.frame_bytes() {
+            self.carry[self.carried..self.carried + rest].copy_from_slice(&input[consumed..]);
+            self.carried += rest;
             consumed = input.len();
         }
         (consumed, produced)

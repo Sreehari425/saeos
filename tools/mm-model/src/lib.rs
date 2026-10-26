@@ -39,6 +39,10 @@ pub mod fs;
 mod fs_model;
 #[cfg(test)]
 mod fs_tests;
+#[path = "../../../kernel/src/drivers/hda/codec.rs"]
+pub mod hda_codec;
+#[cfg(test)]
+mod hda_tests;
 mod heap_model;
 #[path = "../../../kernel/src/mm/holds.rs"]
 pub mod holds;
@@ -54,6 +58,8 @@ mod msi_tests;
 pub mod pci;
 #[cfg(test)]
 mod pci_tests;
+#[cfg(test)]
+mod resample_tests;
 #[path = "../../../userspace/sh/src/parse.rs"]
 pub mod sh_parse;
 #[cfg(test)]

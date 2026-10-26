@@ -12,8 +12,14 @@
 //! playing or has been handed. A period is submitted (the card's "last
 //! valid" index moves to it) as soon as it is full, and at most
 //! `PERIODS - 1` are queued at once, so the fill period always exists.
-//! The card stops by itself after the last submitted period; the ring then
-//! goes idle and moves any partial period to period 0.
+//! The card stops after the last submitted period (AC'97 by itself, HD
+//! Audio by its driver); the ring then goes idle and fills period 0 next.
+//!
+//! **Only silence past the last submitted period.** A card that loops (HD
+//! Audio) plays whatever the ring memory holds until it is stopped, so the
+//! caller keeps everything unsubmitted silent: the period being filled is
+//! staged elsewhere and copied in when complete, and periods the card has
+//! finished ([`Update::finished`]) are zeroed.
 //!
 //! An idle card starts again from period 0 once [`START_PERIODS`] are
 //! queued (ALSA's start threshold): starting on the first period would
@@ -59,9 +65,9 @@ pub enum Action {
 pub struct Update {
     /// The card stopped: everything queued has been played.
     pub halted: bool,
-    /// Copy `length` bytes at ring offset `from` to offset 0 (a partial
-    /// period moving to period 0 for the restart).
-    pub relocate: Option<(usize, usize)>,
+    /// Periods the card finished: `(first, count)`, wrapping round the
+    /// ring. The caller silences them.
+    pub finished: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,17 +124,17 @@ impl Ring {
             return Update::default();
         }
         if status.halted {
-            // Everything queued has been played; restart from period 0.
+            // Everything queued has been played; restart from period 0 (a
+            // partial period is staged, so nothing moves).
+            let finished = (self.queued > 0).then_some((self.first_queued, self.queued));
             self.played += self.queued as u64;
             self.queued = 0;
             self.running = false;
             self.first_queued = 0;
-            let relocate = (self.fill_bytes > 0 && self.fill_period != 0)
-                .then_some((self.fill_period * PERIOD_BYTES, self.fill_bytes));
             self.fill_period = 0;
             return Update {
                 halted: true,
-                relocate,
+                finished,
             };
         }
         // The card never passes the last submitted period, so `current`
@@ -136,10 +142,14 @@ impl Ring {
         let done = (status.current + PERIODS - self.first_queued) % PERIODS;
         debug_assert!(done < self.queued, "card outside the queued periods");
         let done = done.min(self.queued.saturating_sub(1));
+        let finished = (done > 0).then_some((self.first_queued, done));
         self.played += done as u64;
         self.queued -= done;
         self.first_queued = (self.first_queued + done) % PERIODS;
-        Update::default()
+        Update {
+            halted: false,
+            finished,
+        }
     }
 
     /// Where the next bytes go (ring offset, room), or `None` while the

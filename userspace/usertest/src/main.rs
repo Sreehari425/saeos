@@ -895,9 +895,15 @@ fn sound() -> ! {
         fail(139, b"write 8-bit mono");
     }
     let report = fs::read_to_string("/proc/sound").unwrap_or_default();
-    if !report.contains("card: Intel AC'97") || report.contains("underruns: 0\n") {
+    // Any card (AC'97 or HD Audio); the rate is the one asked for, however
+    // the card plays it.
+    if !report.starts_with("card: ")
+        || !report.contains("rate: 22050 Hz")
+        || report.contains("underruns: 0\n")
+        || !report.contains("stalls: 0\n")
+    {
         println!("{report}");
-        fail(140, b"/proc/sound (expected an underrun)");
+        fail(140, b"/proc/sound (expected an underrun, no stalls)");
     }
 
     // Sounds shorter than the card's start threshold (4 periods: 256 ms at
@@ -942,13 +948,18 @@ fn sound() -> ! {
     if status != Ok(Some(0)) {
         fail(141, b"play /test/tone.wav");
     }
-    let underruns = report
-        .lines()
-        .find_map(|line| line.strip_prefix("underruns: "))
-        .unwrap_or("?");
+    let field = |name: &str| {
+        report
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .unwrap_or("?")
+            .to_string()
+    };
     println!(
-        "usertest: sound PASS (slept {} ms, {underruns} underruns)",
-        slept / time::NANOS_PER_MILLISECOND
+        "usertest: sound PASS ({}, slept {} ms, {} underruns)",
+        field("card: "),
+        slept / time::NANOS_PER_MILLISECOND,
+        field("underruns: ")
     );
     exit(0)
 }

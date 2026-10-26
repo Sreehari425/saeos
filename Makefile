@@ -4,10 +4,15 @@ BIOS_TARGET := x86_64-unknown-none
 UEFI_TARGET := x86_64-unknown-uefi
 QEMU_ARGS ?=
 # A sound card to hear: `make run SOUND=pipewire` (or pa, alsa, sdl, ...)
-# adds an AC'97 card played through that QEMU audio backend.
+# adds a card played through that QEMU audio backend: AC'97, or HD Audio
+# with SOUND_CARD=hda.
 SOUND ?=
-SOUND_ARGS = $(if $(SOUND),-audiodev $(SOUND)$(COMMA)id=snd -device AC97$(COMMA)audiodev=snd)
+SOUND_CARD ?= ac97
 COMMA := ,
+AC97_DEVICES = -device AC97$(COMMA)audiodev=snd
+HDA_DEVICES = -device intel-hda -device hda-output$(COMMA)audiodev=snd
+SOUND_DEVICES = $(if $(filter hda,$(SOUND_CARD)),$(HDA_DEVICES),$(AC97_DEVICES))
+SOUND_ARGS = $(if $(SOUND),-audiodev $(SOUND)$(COMMA)id=snd $(SOUND_DEVICES))
 FEATURES = $(shell if [ -f .config ]; then cargo run --quiet -p ratconf -- features 2>/dev/null; fi)
 FEATURE_ARGS = $(if $(FEATURES),--features $(FEATURES),)
 
@@ -198,20 +203,25 @@ define user_tests
 	CMDLINE='init=/bin/sh saeos.test.exit=5' QEMU_TEST_INPUT_AFTER='saeos:/$$ ' QEMU_TEST_KEYS='$(SHELL_KEYS)' QEMU_TEST_EXPECT="$$(printf '^typed-ok$$\n^/etc$$')" $(USER_TEST_RUN) $(1) -m 2G
 endef
 
-# Sound: usertest plays tones on an AC'97 card while QEMU records what
+# Sound: usertest plays tones on each sound card while QEMU records what
 # the card outputs; check-wav.py then requires each tone, in order, at its
 # pitch, unbroken (see the script). A wrong sample rate shows as a wrong
 # pitch, a lost period as a phase jump.
 SOUND_TONES := 440:1 440:0.5 1000:0.5 880:0.15 550:0.15 660:0.5
 SOUND_RUN = CMDLINE='init=/test/bin/usertest -- sound' QEMU_TEST_EXPECT="usertest: sound PASS" \
 	QEMU_TEST_POSTCHECK="./scripts/check-wav.py $(2) $(SOUND_TONES)" $(USER_TEST_RUN) $(1) -m 2G \
-	-audiodev wav,id=snd,path=$(2) -device AC97,audiodev=snd
+	-audiodev wav,id=snd,path=$(2) $(3)
+# Each card on both boot paths; HD Audio on q35 too (the ICH9 controller).
+Q35_HDA_DEVICES = -machine q35 -device ich9-intel-hda -device hda-output$(COMMA)audiodev=snd
 sound-test: initramfs-test
 	./scripts/check-wav.py --self-test
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),user-test
-	$(call SOUND_RUN,$(BIOS_TEST_IMAGE),target/sound-bios.wav)
+	$(call SOUND_RUN,$(BIOS_TEST_IMAGE),target/sound-bios-ac97.wav,$(AC97_DEVICES))
+	$(call SOUND_RUN,$(BIOS_TEST_IMAGE),target/sound-bios-hda.wav,$(HDA_DEVICES))
+	$(call SOUND_RUN,$(BIOS_TEST_IMAGE),target/sound-bios-q35-hda.wav,$(Q35_HDA_DEVICES))
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test
-	$(call SOUND_RUN,$(UEFI_TEST_IMAGE),target/sound-uefi.wav)
+	$(call SOUND_RUN,$(UEFI_TEST_IMAGE),target/sound-uefi-ac97.wav,$(AC97_DEVICES))
+	$(call SOUND_RUN,$(UEFI_TEST_IMAGE),target/sound-uefi-hda.wav,$(HDA_DEVICES))
 
 # The interactive shell as init, typed at: "echo typed-ok", "cd /etc",
 # "pwd", "exit 5" (the exit status is the verdict).
@@ -294,7 +304,7 @@ nix-gc:
 help:
 	@echo "SaeOS build targets:"
 	@echo "  all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check"
-	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\" SOUND=pipewire"
+	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\" SOUND=pipewire SOUND_CARD=hda"
 	@echo "  userspace initramfs initramfs-test (from initramfs.toml)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
 	@echo "  test boot-test user-test sound-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"

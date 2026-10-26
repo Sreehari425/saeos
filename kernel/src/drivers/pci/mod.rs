@@ -3,7 +3,7 @@
 //! ```text
 //! pci::init()  scan (config.rs over port I/O, scan.rs, device.rs)
 //!   -> DEVICES: every function, its class, BARs, interrupt, capabilities
-//!   -> DRIVERS: each driver's `matches` / `probe` (AC'97 so far)
+//!   -> DRIVERS: each driver's `matches` / `probe` (AC'97, HD Audio)
 //!   -> boot log, /proc/pci, lspci
 //! drivers:     pci::find(...), pci::enable(...), pci::map_bar(...),
 //!              pci::enable_msi(...) for interrupts
@@ -44,11 +44,18 @@ mod kernel {
     }
 
     /// Drivers, tried in order; the first that matches claims a device.
-    static DRIVERS: &[PciDriver] = &[PciDriver {
-        name: "ac97",
-        matches: crate::drivers::ac97::matches,
-        probe: crate::drivers::ac97::probe,
-    }];
+    static DRIVERS: &[PciDriver] = &[
+        PciDriver {
+            name: "ac97",
+            matches: crate::drivers::ac97::matches,
+            probe: crate::drivers::ac97::probe,
+        },
+        PciDriver {
+            name: "hda",
+            matches: crate::drivers::hda::matches,
+            probe: crate::drivers::hda::probe,
+        },
+    ];
 
     /// Scan the buses, log what is there, and hand devices to drivers.
     pub fn init() {

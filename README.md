@@ -35,8 +35,8 @@ run inside QEMU. The current codebase includes:
 - PCI enumeration (buses behind bridges, BARs, capabilities) with a
   driver-matching layer; `lspci` and `/proc/pci`
 - DMA buffers and MSI interrupts for drivers
-- Sound: an Intel AC'97 driver behind `/dev/dsp` (the OSS interface), and
-  `play` for WAV files
+- Sound: Intel HD Audio and AC'97 drivers behind `/dev/dsp` (the OSS
+  interface), with sample-rate conversion, and `play` for WAV files
 - Clocks and sleeping for programs (`clock_gettime`, `nanosleep`, `sleep`)
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
@@ -124,7 +124,8 @@ Add a sound card you can hear with `SOUND`, naming a QEMU audio backend
 (`pipewire`, `pa`, `alsa`, `sdl`, ...):
 
 ```sh
-make run-debug SOUND=pipewire
+make run-debug SOUND=pipewire                 # AC'97
+make run-debug SOUND=pipewire SOUND_CARD=hda  # Intel HD Audio
 ```
 
 ## Configuration
@@ -151,7 +152,7 @@ make fmt-check     # Check formatting
 make clippy        # Run Clippy with warnings denied
 make test          # All tests below plus the fault tests, on BIOS and UEFI
 make user-test     # Ring-3 tests: a test program runs as init (PID 1)
-make sound-test    # Play tones on an AC'97 card and check QEMU's recording
+make sound-test    # Play tones on AC'97 and HD Audio cards and check QEMU's recording
 make mm-test       # Host tests for the buddy allocator, scheduler model, and lock order
 make miri          # The same host tests under Miri (undefined-behaviour checks)
 make mm-stress     # Boot with MM self-tests and stress runs (also mm-stress-uefi)

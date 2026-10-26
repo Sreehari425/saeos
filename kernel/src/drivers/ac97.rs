@@ -16,9 +16,12 @@
 //! The card plays a list of 32 buffer descriptors, `{address: u32,
 //! samples: u16, flags: u16}`, from entry `CIV` up to `LVI`, then halts (DCH).
 //! Each descriptor here is one period of the core's ring. `samples` counts
-//! 16-bit samples (two per stereo frame), not bytes or frames. BUP makes
-//! the card send silence, not the last sample, once it runs out. Without
-//! variable rate audio (VRA) the codec plays 48 kHz only.
+//! 16-bit samples (two per stereo frame), not bytes or frames. The
+//! buffer-underrun-policy flag (BUP, bit 30) is left clear, as Linux's
+//! `intel8x0` leaves it: with it set, QEMU's card holds the last sample
+//! once it runs out (a DC offset, and a click at each end of a gap)
+//! instead of sending zeros. Without variable rate audio (VRA) the codec
+//! plays 48 kHz only.
 //!
 //! No interrupts: AC'97 has no MSI, and its INTx line would need ACPI
 //! `_PRT` routing in APIC mode. The core polls [`AudioDevice::status`].
@@ -57,8 +60,6 @@ const CR_RUN: u8 = 1 << 0;
 const CR_RESET: u8 = 1 << 1;
 const GLOBAL_COLD_RESET_OFF: u32 = 1 << 1;
 const GLOBAL_CODEC_READY: u32 = 1 << 8;
-/// Descriptor flag: play silence once past the last valid entry.
-const BUFFER_UNDERRUN_POLICY: u32 = 1 << 30;
 
 const MIN_RATE: u32 = 8_000;
 const NATIVE_RATE: u32 = 48_000;
@@ -108,9 +109,17 @@ impl AudioDevice for Ac97 {
             let samples = (PERIOD_BYTES / 2) as u32;
             let entry = &mut entries[period * 8..period * 8 + 8];
             entry[..4].copy_from_slice(&address.to_le_bytes());
-            entry[4..].copy_from_slice(&(samples | BUFFER_UNDERRUN_POLICY).to_le_bytes());
+            entry[4..].copy_from_slice(&samples.to_le_bytes());
         }
         self.descriptors.sync_for_device();
+    }
+
+    fn rate_for(&self, hz: u32) -> u32 {
+        if self.variable_rate {
+            hz.clamp(MIN_RATE, NATIVE_RATE)
+        } else {
+            NATIVE_RATE
+        }
     }
 
     fn set_rate(&mut self, hz: u32) -> u32 {
@@ -135,7 +144,7 @@ impl AudioDevice for Ac97 {
         unsafe { cpu::outb(self.bus_master + PO_LVI, last as u8) };
     }
 
-    fn status(&self) -> Status {
+    fn status(&mut self) -> Status {
         unsafe {
             Status {
                 current: usize::from(cpu::inb(self.bus_master + PO_CIV)) % PERIODS,
