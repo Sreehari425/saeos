@@ -21,18 +21,6 @@ entry!(main);
 const HEADER_MAX: usize = 64 * 1024;
 const CHUNK: usize = 8 * 1024;
 
-/// Read until `buffer` is full or the file ends.
-fn read_full(file: &mut File, buffer: &mut [u8]) -> Result<usize> {
-    let mut filled = 0;
-    while filled < buffer.len() {
-        match file.read(&mut buffer[filled..])? {
-            0 => break,
-            count => filled += count,
-        }
-    }
-    Ok(filled)
-}
-
 fn main(_args: Args) -> i32 {
     let arguments = coreutils::arguments();
     let [path] = arguments.as_slice() else {
@@ -49,7 +37,7 @@ fn main(_args: Args) -> i32 {
         Err(error) => return coreutils::report("play", path, error),
     };
     let mut prefix = vec![0u8; HEADER_MAX.min(size)];
-    if let Err(error) = read_full(&mut file, &mut prefix) {
+    if let Err(error) = coreutils::read_full(&mut file, &mut prefix) {
         return coreutils::report("play", path, error);
     }
     let header = match wav::parse_header(&prefix) {
@@ -88,7 +76,7 @@ fn main(_args: Args) -> i32 {
         let mut left = header.playable(size);
         let mut chunk = vec![0u8; CHUNK];
         while left > 0 {
-            let count = read_full(&mut file, &mut chunk[..CHUNK.min(left)])?;
+            let count = coreutils::read_full(&mut file, &mut chunk[..CHUNK.min(left)])?;
             if count == 0 {
                 break;
             }

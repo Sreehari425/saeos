@@ -8,6 +8,20 @@ QEMU_ARGS ?=
 # with SOUND_CARD=hda.
 SOUND ?=
 SOUND_CARD ?= ac97
+# KVM: guests run on the host CPU instead of being emulated (TCG), many
+# times faster. On wherever the host has /dev/kvm; `KVM=false` emulates.
+KVM_AVAILABLE := $(if $(wildcard /dev/kvm),true,false)
+KVM ?= $(KVM_AVAILABLE)
+ifeq ($(KVM),true)
+ifneq ($(KVM_AVAILABLE),true)
+$(error KVM=true, but this host has no /dev/kvm (use KVM=false))
+endif
+ACCEL_ARGS := -accel kvm
+else ifeq ($(KVM),false)
+ACCEL_ARGS :=
+else
+$(error KVM must be true or false, not '$(KVM)')
+endif
 # Memory for `make run*`: QEMU's default 128 MiB is too little for a big
 # initramfs (UEFI needs it in one piece, and the kernel unpacks a copy).
 # QEMU_ARGS come after it, so `QEMU_ARGS="-m 4G"` still wins.
@@ -37,11 +51,12 @@ TEST_MEM ?= 6G
 # The tests boot the image with /test fixtures and check this marker.
 TEST_CMDLINE := loglevel=info saeos.test=boot
 QEMU_TEST := INITRAMFS=$(INITRAMFS_TEST_IMAGE) CMDLINE='$(TEST_CMDLINE)' ./scripts/run-qemu-test.sh
-BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL)
-UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
+# Every QEMU test runs one of these (options after the kernel go to QEMU).
+BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) $(ACCEL_ARGS)
+UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(ACCEL_ARGS)
 
 .PHONY: check-std-lock userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test badapple-test badapple-data test help
 
 all: bios
 
@@ -51,7 +66,7 @@ all: bios
 # whose entry point is in its executable segment.
 USER_PROGRAMS := hello usertest init sh coreutils
 # The executables they produce (checked, and installed by initramfs.toml).
-USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false lspci sleep play fbinfo fbtest
+USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false lspci sleep play fbinfo fbtest badapple
 USER_TARGET := userspace/x86_64-saeos.json
 USER_BUILD = cargo build --release -Zjson-target-spec \
 	-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
@@ -70,6 +85,7 @@ initramfs: userspace
 
 initramfs-test: userspace
 	./scripts/make-test-tone.py target/test-tone.wav
+	./scripts/make-test-clip.py target
 	$(MKINITRAMFS) build initramfs.toml -o $(INITRAMFS_TEST_IMAGE) --test-fixtures
 
 bios: olddefconfig
@@ -95,28 +111,28 @@ asm-uefi: olddefconfig
 		--emit=asm
 
 run: olddefconfig
-	CMDLINE='$(CMDLINE)' nix run path:.#bios -- -m $(RUN_MEM) $(QEMU_ARGS) $(SOUND_ARGS)
+	CMDLINE='$(CMDLINE)' nix run path:.#bios -- -m $(RUN_MEM) $(ACCEL_ARGS) $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-uefi: olddefconfig
-	CMDLINE='$(CMDLINE)' nix run path:.#uefi -- -m $(RUN_MEM) $(QEMU_ARGS) $(SOUND_ARGS)
+	CMDLINE='$(CMDLINE)' nix run path:.#uefi -- -m $(RUN_MEM) $(ACCEL_ARGS) $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-debug: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -m $(RUN_MEM) $(QEMU_ARGS) $(SOUND_ARGS)
+	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -m $(RUN_MEM) $(ACCEL_ARGS) $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-uefi-debug: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -m $(RUN_MEM) $(QEMU_ARGS) $(SOUND_ARGS)
+	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -m $(RUN_MEM) $(ACCEL_ARGS) $(QEMU_ARGS) $(SOUND_ARGS)
 
 # Start QEMU halted with a GDB stub on :1234, then attach with `make gdb`
 # (or `make gdb-uefi`) from a second terminal.
 debug: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -s -S -no-shutdown -m $(RUN_MEM) $(QEMU_ARGS)
+	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -s -S -no-shutdown -m $(RUN_MEM) $(ACCEL_ARGS) $(QEMU_ARGS)
 
 debug-uefi: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -s -S -no-shutdown -m $(RUN_MEM) $(QEMU_ARGS)
+	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -s -S -no-shutdown -m $(RUN_MEM) $(ACCEL_ARGS) $(QEMU_ARGS)
 
 gdb:
 	gdb -x scripts/gdbinit target/$(BIOS_TARGET)/debug/$(KERNEL)
@@ -156,7 +172,7 @@ miri:
 
 # Host tests plus every QEMU test on both boot paths; each run ends with the
 # kernel's own verdict through isa-debug-exit.
-test: host-test miri boot-test user-test sound-test fb-test mm-guard-test fault-test panic-lock-test
+test: host-test miri boot-test user-test sound-test fb-test badapple-test mm-guard-test fault-test panic-lock-test
 
 # Each target boots twice: on QEMU's default CPU, and with -cpu max, where
 # SMEP/SMAP exist and the user-memory test checks they are enforced.
@@ -248,6 +264,28 @@ fb-test: initramfs-test
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test
 	$(call FB_RUN,$(UEFI_TEST_IMAGE),target/fb-uefi,)
 
+# Bad Apple's player on a generated clip (a square moving for 2 s, then a
+# known last frame, over a 440 Hz tone): every frame drawn, under 100 ms
+# behind the sound (`--check`), the last frame on screen pixel for pixel,
+# and the tone recorded whole.
+BADAPPLE_RUN = CMDLINE='init=/bin/badapple -- /test/clip.bav /test/clip.wav --check' \
+	QEMU_TEST_EXPECT="$$(printf 'badapple: 61 frames\nbadapple: done')" \
+	QEMU_TEST_SCREENDUMPS="badapple: done|$(abspath $(2))-final.ppm" \
+	QEMU_TEST_POSTCHECK="./scripts/check-screen.py bav-final $(2)-final.ppm && ./scripts/check-wav.py $(2).wav 440:2" \
+	$(USER_TEST_RUN) $(1) -m 2G -audiodev wav,id=snd,path=$(2).wav $(AC97_DEVICES)
+badapple-test: initramfs-test
+	./scripts/bav.py --self-test
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),user-test
+	$(call BADAPPLE_RUN,$(BIOS_TEST_IMAGE),target/badapple-bios)
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test
+	$(call BADAPPLE_RUN,$(UEFI_TEST_IMAGE),target/badapple-uefi)
+
+# Bad Apple itself, from the original video (ffmpeg; not part of the
+# tests): initramfs/badapple/ (git-ignored), played by `badapple`.
+BAD_APPLE_SRC ?= ../bad-apple-terminal/data
+badapple-data:
+	./scripts/make-badapple.py $(BAD_APPLE_SRC) initramfs/badapple
+
 # The interactive shell as init, typed at: "echo typed-ok", "cd /etc",
 # "pwd", "exit 5" (the exit status is the verdict).
 SHELL_KEYS := e c h o spc t y p e d minus o k ret c d spc slash e t c ret p w d ret e x i t spc 5 ret
@@ -332,7 +370,7 @@ help:
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\" SOUND=pipewire SOUND_CARD=hda"
 	@echo "  userspace initramfs initramfs-test (from initramfs.toml)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
-	@echo "  test boot-test user-test sound-test fb-test host-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
+	@echo "  test boot-test user-test sound-test fb-test badapple-test host-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"
 	@echo "  debug debug-uefi gdb gdb-uefi symbolize LOG=<file>"
 	@echo "  clean distclean mrproper nix-gc"

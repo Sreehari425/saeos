@@ -778,3 +778,12 @@ fn console_reads_lines_through_the_discipline() {
         "echoed"
     );
 }
+
+#[test]
+fn the_root_filesystem_gets_half_the_ram() {
+    use crate::fs::ramfs::{DEFAULT_LIMIT, root_limit};
+    assert_eq!(root_limit(1 << 30), 512 << 20);
+    assert_eq!(root_limit(16 << 30), 8 << 30);
+    // Never below the old fixed limit, even on a tiny machine.
+    assert_eq!(root_limit(64 << 20), DEFAULT_LIMIT);
+}

@@ -111,8 +111,24 @@ source = "target/x86_64-saeos/release/fbtest"
 target = "/bin/fbtest"
 mode = 0o755
 
+[[file]]
+source = "target/x86_64-saeos/release/badapple"
+target = "/bin/badapple"
+mode = 0o755
+
 # The sound test's WAV (made by scripts/make-test-tone.py).
 [[file]]
 source = "target/test-tone.wav"
 target = "/test/tone.wav"
+test = true
+
+# The Bad Apple player's test clip (made by scripts/make-test-clip.py).
+[[file]]
+source = "target/clip.bav"
+target = "/test/clip.bav"
+test = true
+
+[[file]]
+source = "target/clip.wav"
+target = "/test/clip.wav"
 test = true

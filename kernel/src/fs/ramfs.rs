@@ -25,6 +25,13 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// Default byte limit for a ramfs mount.
 pub const DEFAULT_LIMIT: u64 = 64 << 20;
 
+/// The root filesystem's limit on a machine with `usable` bytes of RAM:
+/// half of it, as Linux's tmpfs (a video and its sound can be ~55 MB),
+/// and never less than [`DEFAULT_LIMIT`].
+pub fn root_limit(usable: u64) -> u64 {
+    (usable / 2).max(DEFAULT_LIMIT)
+}
+
 struct Shared {
     fs_id: u64,
     next_ino: AtomicU64,

@@ -11,6 +11,10 @@ mod alloc_counter;
 #[path = "../../../kernel/src/mm/allocator_model.rs"]
 mod model;
 pub use model::*;
+#[path = "../../../userspace/coreutils/src/bav.rs"]
+pub mod bav;
+#[cfg(test)]
+mod bav_tests;
 #[path = "../../../kernel/src/boot/boot_info.rs"]
 pub mod boot_info;
 #[path = "../../../kernel/src/mm/buddy.rs"]

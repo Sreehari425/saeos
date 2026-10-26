@@ -36,7 +36,8 @@ pub fn init(boot_info: &BootInfo) {
         crate::mm::heap::page_heap_enabled(),
         "fs::init before the page heap (mm::finish_boot)"
     );
-    let root = RamFs::new();
+    let usable = crate::mm::frame::stats().usable_frames * 4096;
+    let root = RamFs::with_limit(super::ramfs::root_limit(usable));
     VFS.mount("/", root.clone()).expect("mount ramfs at /");
     let archives: Vec<PhysicalRange> = boot_info.initramfs.iter().flatten().copied().collect();
     if archives.is_empty() {

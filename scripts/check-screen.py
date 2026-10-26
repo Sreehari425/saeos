@@ -3,6 +3,7 @@
 
 usage: check-screen.py drawn SCREEN.ppm [WIDTHxHEIGHT]
        check-screen.py console SCREEN.ppm [WIDTHxHEIGHT]
+       check-screen.py bav-final SCREEN.ppm
        check-screen.py --self-test
 
 `drawn`: the screen shows usertest's picture, pixel for pixel (so nothing
@@ -18,6 +19,10 @@ image, 720x400 for VGA text) and the console shows just its first line
 (usertest's "fb released"): text in the top row, nothing below the third.
 A wiped font, or a VGA left in graphics mode, would show nothing or
 garbage everywhere, blank cells included.
+
+`bav-final`: the Bad Apple player's last frame of the test clip
+(make-test-clip.py's `final_frame`), at the largest whole scale that fits,
+centred, black around it, pixel for pixel.
 
 Screendumps are binary PPM (P6), as QEMU's monitor writes them. Standard
 library only.
@@ -89,6 +94,34 @@ def drawn_problems(image, expected_size=None):
 
 def is_drawn(image):
     return not drawn_problems(image)
+
+
+def bav_final_problems(image):
+    import importlib
+    import os
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    clip = importlib.import_module("make-test-clip")
+    frame, video_width, video_height = clip.final_frame(), clip.WIDTH, clip.HEIGHT
+    width, height, data = image
+    scale = max(1, min(width // video_width, height // video_height))
+    left = (width - video_width * scale) // 2
+    top = (height - video_height * scale) // 2
+    wrong = []
+    for y in range(height):
+        for x in range(width):
+            vx, vy = (x - left) // scale, (y - top) // scale
+            inside = x >= left and y >= top and vx < video_width and vy < video_height
+            white = inside and frame[vy * video_width + vx]
+            want = WHITE if white else (0, 0, 0)
+            found = pixel(image, x, y)
+            if found != want:
+                wrong.append((x, y, found, want))
+    if wrong:
+        x, y, found, want = wrong[0]
+        return [f"{len(wrong)} pixels differ from the clip's last frame ({scale}x at {left},{top}); "
+                f"the first at ({x}, {y}) is {found}, expected {want}"]
+    return []
 
 
 def lit(image, rows):
@@ -166,9 +199,17 @@ def main():
     if sys.argv[1:] == ["--self-test"]:
         self_test()
         return
-    if len(sys.argv) < 3 or sys.argv[1] not in ("drawn", "console"):
+    if len(sys.argv) < 3 or sys.argv[1] not in ("drawn", "console", "bav-final"):
         raise SystemExit(__doc__)
     image = read_ppm(sys.argv[2])
+    if sys.argv[1] == "bav-final":
+        problems = bav_final_problems(image)
+        for problem in problems:
+            print(f"check-screen: {problem}")
+        if problems:
+            raise SystemExit(f"check-screen: {sys.argv[2]} FAILED")
+        print(f"check-screen: {sys.argv[2]}: {image[0]}x{image[1]} last frame: PASS")
+        return
     if sys.argv[1] == "drawn":
         size = None
         if len(sys.argv) > 3:

@@ -29,7 +29,9 @@
 //! `ioctl`s (OSS numbers, `soundcard.h`): `SNDCTL_DSP_SPEED` (returns the
 //! rate asked for, 1 to 192 kHz), `SNDCTL_DSP_CHANNELS`, `SNDCTL_DSP_SETFMT`
 //! (`AFMT_U8`, `AFMT_S16_LE`; others get S16 back), `SNDCTL_DSP_SYNC` (wait
-//! until everything written has played), `SNDCTL_DSP_RESET` (stop now).
+//! until everything written has played), `SNDCTL_DSP_RESET` (stop now),
+//! `SNDCTL_DSP_GETODELAY` (bytes written but not yet heard, to within a
+//! period: a player's audio clock).
 //! Each open starts at 48 kHz, S16, stereo. One opener at a time
 //! (`EBUSY`). Unlike OSS, `close` does not wait: queued audio plays out on
 //! its own, so call `SNDCTL_DSP_SYNC` to know it has.
@@ -45,13 +47,16 @@ pub const SNDCTL_DSP_SYNC: u64 = 0x5001;
 pub const SNDCTL_DSP_SPEED: u64 = 0xc004_5002;
 pub const SNDCTL_DSP_SETFMT: u64 = 0xc004_5005;
 pub const SNDCTL_DSP_CHANNELS: u64 = 0xc004_5006;
+/// `_IOR('P', 23, int)`: bytes written but not yet heard.
+pub const SNDCTL_DSP_GETODELAY: u64 = 0x8004_5017;
 
 #[cfg(not(host_model))]
 mod kernel {
     use super::format::{AFMT_QUERY, Converter, Format, OUTPUT_FRAME, Sample};
     use super::ring::{Action, PERIOD_BYTES, PERIODS, RING_BYTES, Ring, Status};
     use super::{
-        SNDCTL_DSP_CHANNELS, SNDCTL_DSP_RESET, SNDCTL_DSP_SETFMT, SNDCTL_DSP_SPEED, SNDCTL_DSP_SYNC,
+        SNDCTL_DSP_CHANNELS, SNDCTL_DSP_GETODELAY, SNDCTL_DSP_RESET, SNDCTL_DSP_SETFMT,
+        SNDCTL_DSP_SPEED, SNDCTL_DSP_SYNC,
     };
     use crate::fs::{Errno, FsResult, Inode, InodeKind, Stat};
     use crate::mm::dma::{DmaAddress, DmaBuffer, DmaConstraints};
@@ -185,6 +190,16 @@ mod kernel {
             }
             let action = self.ring.commit(produced);
             self.apply(action);
+        }
+
+        /// Bytes in `format` (the program's) written but not yet heard:
+        /// what the card still has queued, its partial period included,
+        /// from the card's 16-bit stereo at its rate. Within a period.
+        fn delay(&self, format: Format) -> usize {
+            let card_bytes = self.ring.queued() * PERIOD_BYTES + self.ring.pending();
+            let card_frames = (card_bytes / OUTPUT_FRAME) as u64;
+            let frames = card_frames * u64::from(format.rate) / u64::from(self.rate.max(1));
+            frames as usize * format.frame_bytes()
         }
 
         /// How long to wait for the card to finish some of the queue.
@@ -434,6 +449,13 @@ mod kernel {
                     *value = format.sample.oss();
                 }
                 SNDCTL_DSP_SYNC => drain(),
+                SNDCTL_DSP_GETODELAY => {
+                    let format = self.converter.lock().format();
+                    *value = with_card(|card| {
+                        card.poll();
+                        card.delay(format)
+                    }) as i32;
+                }
                 SNDCTL_DSP_RESET => {
                     with_card(Card::reset);
                     self.set_format(|_| {});

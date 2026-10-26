@@ -37,6 +37,8 @@ run inside QEMU. The current codebase includes:
 - DMA buffers and MSI interrupts for drivers
 - Sound: Intel HD Audio and AC'97 drivers behind `/dev/dsp` (the OSS
   interface), with sample-rate conversion, and `play` for WAV files
+- `/dev/fb0` for programs, and `badapple`, which plays Bad Apple!! in
+  black and white, in step with its sound
 - Clocks and sleeping for programs (`clock_gettime`, `nanosleep`, `sleep`)
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
@@ -128,6 +130,19 @@ make run-debug SOUND=pipewire                 # AC'97
 make run-debug SOUND=pipewire SOUND_CARD=hda  # Intel HD Audio
 ```
 
+QEMU uses KVM when the host has `/dev/kvm`; `KVM=false` turns it off
+(every run and test target takes it), and `KVM=true` insists on it.
+
+To play Bad Apple!!, convert the video once (needs `ffmpeg`;
+`BAD_APPLE_SRC` is a directory holding `video.mp4`, by default
+`../bad-apple-terminal/data`). The result goes into the git-ignored
+`initramfs/badapple/`; then run `badapple` in the shell:
+
+```sh
+make badapple-data BAD_APPLE_SRC=path/to/data
+make run-debug SOUND=pipewire
+```
+
 ## Configuration
 
 SaeOS uses a small, declarative kernel configuration system.
@@ -154,6 +169,7 @@ make test          # All tests below plus the fault tests, on BIOS and UEFI
 make user-test     # Ring-3 tests: a test program runs as init (PID 1)
 make sound-test    # Play tones on AC'97 and HD Audio cards and check QEMU's recording
 make fb-test       # Draw on /dev/fb0 and check QEMU screendumps, pixel for pixel
+make badapple-test # Play a short test clip and check its last frame and its sound
 make host-test     # Host tests (tools/host-tests): kernel and userspace code built for the host
 make miri          # The same host tests under Miri (undefined-behaviour checks)
 make mm-stress     # Boot with MM self-tests and stress runs (also mm-stress-uefi)

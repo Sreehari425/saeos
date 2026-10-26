@@ -22,6 +22,7 @@ const SNDCTL_DSP_SYNC: u64 = 0x5001;
 const SNDCTL_DSP_SPEED: u64 = 0xc004_5002;
 const SNDCTL_DSP_SETFMT: u64 = 0xc004_5005;
 const SNDCTL_DSP_CHANNELS: u64 = 0xc004_5006;
+const SNDCTL_DSP_GETODELAY: u64 = 0x8004_5017;
 
 pub struct Dsp {
     fd: u32,
@@ -62,6 +63,14 @@ impl Dsp {
 
     pub fn write_all(&mut self, samples: &[u8]) -> Result<()> {
         crate::io::write_all(self.fd, samples)
+    }
+
+    /// Bytes written but not yet heard (to within a period, about 10 ms):
+    /// what has been heard is what was written minus this, the clock to
+    /// pace video by.
+    pub fn delay(&mut self) -> Result<usize> {
+        self.control(SNDCTL_DSP_GETODELAY, 0)
+            .map(|bytes| bytes as usize)
     }
 
     /// Wait until everything written has been played.

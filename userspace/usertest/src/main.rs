@@ -874,6 +874,13 @@ fn sound() -> ! {
             fail(135, b"write /dev/dsp");
         }
     }
+    // What is queued but not heard: some, and no more than the ring holds
+    // (32 periods of 2 KiB, here in the same 16-bit stereo format).
+    let delay = dsp.delay().unwrap_or(0);
+    if delay == 0 || delay > 32 * 2048 {
+        println!("usertest: GETODELAY {delay}");
+        fail(145, b"SNDCTL_DSP_GETODELAY while playing");
+    }
     // No sync: the card plays the queue dry and stops (an underrun).
     let before = time::now();
     time::sleep(600 * time::NANOS_PER_MILLISECOND);
@@ -883,6 +890,9 @@ fn sound() -> ! {
     }
     if dsp.write_all(second).is_err() || dsp.sync().is_err() {
         fail(137, b"restart after an underrun");
+    }
+    if dsp.delay() != Ok(0) {
+        fail(146, b"SNDCTL_DSP_GETODELAY is not 0 after a sync");
     }
 
     // 1000 Hz, 22050 Hz mono 8-bit: a wrong rate shows as a wrong pitch.

@@ -7,3 +7,5 @@ result
 /.config.cargo.toml
 /defconfig.toml
 /initramfs/output.wav
+# make badapple-data: generated from the original video, never committed.
+/initramfs/badapple/
