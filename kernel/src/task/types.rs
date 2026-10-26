@@ -192,7 +192,7 @@ pub struct KernelStack {
 }
 
 /// Owner of a task's kernel stack memory. In the kernel this is a guarded
-/// stack-arena slot; the host model (`tools/mm-model`) uses a heap buffer.
+/// stack-arena slot; the host model (`tools/host-tests`) uses a heap buffer.
 #[cfg(not(host_model))]
 pub type StackStorage = crate::mm::kvm::KernelStackAllocation;
 #[cfg(host_model)]

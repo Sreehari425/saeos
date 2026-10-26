@@ -2,7 +2,7 @@
 //!
 //! Pure bookkeeping: callers pass the current monotonic time (`now`, in ns)
 //! and the architecture layer performs the actual switches, so the whole
-//! policy runs unchanged in the host tests (`tools/mm-model`).
+//! policy runs unchanged in the host tests (`tools/host-tests`).
 //!
 //! EEVDF in brief: every runnable task (queued or running) contributes to a
 //! weighted average virtual time `V`. A task is *eligible* when it has not

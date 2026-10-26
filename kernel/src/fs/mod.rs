@@ -28,7 +28,7 @@
 //! exist in the test image.
 //!
 //! Everything except `kernel` (the global instance and boot-time setup) is
-//! also compiled into the host model (`tools/mm-model`) and tested there.
+//! also compiled into the host model (`tools/host-tests`) and tested there.
 
 pub mod block;
 pub mod devfs;

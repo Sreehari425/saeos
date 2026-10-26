@@ -9,7 +9,7 @@ edition.workspace = true
 default-target = "x86_64-unknown-none"
 
 [lints.rust]
-# Set by tools/mm-model/build.rs when the task code is built into the model.
+# Set by tools/host-tests/build.rs when the task code is built into the model.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(host_model)"] }
 
 [dependencies]

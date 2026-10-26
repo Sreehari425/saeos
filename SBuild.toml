@@ -6,7 +6,7 @@ version = "0.1.0"
 [workspace]
 members = [
     "kernel",
-    "tools/mm-model",
+    "tools/host-tests",
     "tools/ratconf",
 ]
 

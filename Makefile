@@ -37,7 +37,7 @@ BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
 
 .PHONY: check-std-lock userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test test help
 
 all: bios
 
@@ -137,18 +137,22 @@ check-std-lock:
 	@cmp -s userspace/std-library.Cargo.lock "$$(rustc --print sysroot)/lib/rustlib/src/rust/library/Cargo.lock" \
 		|| { echo "userspace/std-library.Cargo.lock is stale for this toolchain" >&2; exit 1; }
 
-mm-test:
-	cargo test -p mm-model
+# Kernel and userspace code built for the host and tested there
+# (tools/host-tests), plus mkinitramfs. `mm-test` is the old name.
+host-test:
+	cargo test -p host-tests
 	cargo test -p mkinitramfs
 
-# The host model (buddy core, scheduler, task code, log ring) under Miri,
-# which checks for undefined behaviour the normal tests cannot see.
+mm-test: host-test
+
+# The host tests under Miri, which checks for undefined behaviour the
+# normal tests cannot see.
 miri:
-	cargo miri test -p mm-model
+	cargo miri test -p host-tests
 
 # Host tests plus every QEMU test on both boot paths; each run ends with the
 # kernel's own verdict through isa-debug-exit.
-test: mm-test miri boot-test user-test sound-test mm-guard-test fault-test panic-lock-test
+test: host-test miri boot-test user-test sound-test mm-guard-test fault-test panic-lock-test
 
 # Each target boots twice: on QEMU's default CPU, and with -cpu max, where
 # SMEP/SMAP exist and the user-memory test checks they are enforced.
@@ -307,7 +311,7 @@ help:
 	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\" SOUND=pipewire SOUND_CARD=hda"
 	@echo "  userspace initramfs initramfs-test (from initramfs.toml)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
-	@echo "  test boot-test user-test sound-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
+	@echo "  test boot-test user-test sound-test host-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"
 	@echo "  debug debug-uefi gdb gdb-uefi symbolize LOG=<file>"
 	@echo "  clean distclean mrproper nix-gc"

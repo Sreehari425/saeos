@@ -9,7 +9,7 @@
 //! # Lock order
 //!
 //! Locks are taken in this order and never the reverse (modelled and tested
-//! in `tools/mm-model/src/lock_model.rs`):
+//! in `tools/host-tests/src/lock_model.rs`):
 //!
 //! `SCHEDULER`/`PROCESSES` -> `AddressSpace.state` -> small-object heap ->
 //! `KERNEL_MAP_LOCK` -> frame allocator

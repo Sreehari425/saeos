@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "kernel",
     "tools/mkinitramfs",
-    "tools/mm-model",
+    "tools/host-tests",
     "tools/ratconf",
     "userspace/coreutils",
     "userspace/hello",
@@ -19,7 +19,7 @@ members = [
 default-members = [
     "kernel",
     "tools/mkinitramfs",
-    "tools/mm-model",
+    "tools/host-tests",
     "tools/ratconf",
 ]
 

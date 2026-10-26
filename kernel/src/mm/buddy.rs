@@ -9,7 +9,7 @@
 //! so a frame inside a larger free block can never be mistaken for a head.
 //!
 //! The same code backs the kernel allocator (bitmap in the boot arena, nodes
-//! through the direct map) and the host tests in `tools/mm-model`.
+//! through the direct map) and the host tests in `tools/host-tests`.
 
 pub const MAX_ORDER: usize = 18;
 /// Frames below 4 GiB form the `Dma32` zone. The boundary is aligned to every

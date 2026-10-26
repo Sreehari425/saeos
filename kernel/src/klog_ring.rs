@@ -1,5 +1,5 @@
 //! Fixed-capacity byte ring for the kernel log. Dependency free, so the host
-//! model (`tools/mm-model`) can test it directly.
+//! model (`tools/host-tests`) can test it directly.
 
 pub struct Ring<const CAPACITY: usize> {
     bytes: [u8; CAPACITY],
