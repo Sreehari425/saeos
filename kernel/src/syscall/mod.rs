@@ -15,6 +15,7 @@
 pub mod abi;
 pub mod memory;
 pub mod numbers;
+pub mod time;
 
 use crate::fs::vfs::Vfs;
 use crate::fs::{Errno, FileTable, InodeKind};
@@ -68,6 +69,12 @@ pub trait ProcessOps {
     /// The calling thread's FS base (already validated as a user address).
     fn set_fs_base(&self, base: u64);
     fn fs_base(&self) -> u64;
+    /// Nanoseconds since boot.
+    fn monotonic_ns(&self) -> u64;
+    /// Nanoseconds since the Unix epoch, if the wall-clock time is known.
+    fn realtime_ns(&self) -> Option<u64>;
+    /// Sleep until `monotonic_ns()` reaches `deadline` (at least that long).
+    fn sleep_until_ns(&self, deadline: u64);
 }
 
 pub struct Context<'a, M: UserMemory> {
@@ -133,6 +140,9 @@ pub fn dispatch<M: UserMemory>(context: &Context<M>, number: u64, args: [u64; 6]
         RMDIR => path(context, a0).and_then(|path| context.vfs.rmdir(&path).map(|()| 0)),
         UNLINK => path(context, a0).and_then(|path| context.vfs.unlink(&path).map(|()| 0)),
         GETDENTS64 => getdents64(context, a0, a1, a2),
+        NANOSLEEP => time::nanosleep(context, a0),
+        CLOCK_GETTIME => time::clock_gettime(context, a0, a1),
+        CLOCK_NANOSLEEP => time::clock_nanosleep(context, a0, a1, a2),
         _ => Err(Errno::ENOSYS),
     };
     result(value)
@@ -206,9 +216,10 @@ fn execve<M: UserMemory>(
     Ok(0)
 }
 
-/// `ioctl(fd, request, arg)`: the terminal queries a libc needs (`isatty`
-/// uses TIOCGWINSZ). `ENOTTY` for anything that is not the console, and
-/// for requests a terminal does not support yet.
+/// `ioctl(fd, request, arg)`. On the console: the terminal queries a libc
+/// needs (`isatty` uses TIOCGWINSZ). On other files: requests whose
+/// argument is one `int` (`/dev/dsp`'s), copied in and out as the request
+/// encodes; the inode decides, `ENOTTY` if it has none.
 fn ioctl<M: UserMemory>(
     context: &Context<M>,
     fd_value: u64,
@@ -217,7 +228,17 @@ fn ioctl<M: UserMemory>(
 ) -> Result<u64, Errno> {
     let file = context.files.get(fd(fd_value)?)?;
     if !file.inode.is_terminal() {
-        return Err(Errno::ENOTTY);
+        let copies = abi::ioctl_int(request)?;
+        let mut value = [0u8; 4];
+        if copies.is_some_and(|copies| copies.copy_in) {
+            context.memory.read(argument, &mut value)?;
+        }
+        let mut value = i32::from_le_bytes(value);
+        file.inode.ioctl(request, &mut value)?;
+        if copies.is_some_and(|copies| copies.copy_out) {
+            context.memory.write(argument, &value.to_le_bytes())?;
+        }
+        return Ok(0);
     }
     match request {
         abi::TCGETS => context.memory.write(argument, &abi::console_termios())?,
@@ -546,6 +567,56 @@ mod kernel {
                     .map_or(0, |task| task.fs_base)
             })
         }
+
+        fn monotonic_ns(&self) -> u64 {
+            crate::time::now_ns()
+        }
+
+        fn realtime_ns(&self) -> Option<u64> {
+            realtime_ns()
+        }
+
+        fn sleep_until_ns(&self, deadline: u64) {
+            // Whole ticks, rounded up: a sleep never ends early, whichever
+            // clock now_ns reads.
+            const NANOS_PER_TICK: u64 = 1_000_000_000 / crate::time::TICK_HZ as u64;
+            loop {
+                let now = crate::time::now_ns();
+                if now >= deadline {
+                    return;
+                }
+                let ticks = (deadline - now).div_ceil(NANOS_PER_TICK);
+                crate::scheduler::sleep_until(crate::time::ticks().saturating_add(ticks));
+            }
+        }
+    }
+
+    /// The Unix time at boot in nanoseconds (0: not read yet), from the RTC
+    /// the first time someone asks.
+    static BOOT_EPOCH_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    fn realtime_ns() -> Option<u64> {
+        use core::sync::atomic::Ordering;
+        let monotonic = crate::time::now_ns();
+        let mut epoch = BOOT_EPOCH_NS.load(Ordering::Relaxed);
+        if epoch == 0 {
+            let rtc = crate::time::read_rtc()?;
+            let seconds = super::time::unix_seconds(
+                i64::from(rtc.year),
+                u32::from(rtc.month),
+                u32::from(rtc.day),
+                u32::from(rtc.hour),
+                u32::from(rtc.minute),
+                u32::from(rtc.second),
+            );
+            epoch = u64::try_from(seconds)
+                .ok()?
+                .saturating_mul(1_000_000_000)
+                .saturating_sub(monotonic)
+                .max(1);
+            BOOT_EPOCH_NS.store(epoch, Ordering::Relaxed);
+        }
+        Some(epoch.saturating_add(monotonic))
     }
 
     /// The current task's saved user registers: a syscall from user mode

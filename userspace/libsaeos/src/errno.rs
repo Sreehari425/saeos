@@ -16,7 +16,9 @@ impl Errno {
     pub const ENOMEM: Self = Self(12);
     pub const EACCES: Self = Self(13);
     pub const EFAULT: Self = Self(14);
+    pub const EBUSY: Self = Self(16);
     pub const EEXIST: Self = Self(17);
+    pub const ENODEV: Self = Self(19);
     pub const ENOTDIR: Self = Self(20);
     pub const EISDIR: Self = Self(21);
     pub const EINVAL: Self = Self(22);
@@ -39,7 +41,9 @@ impl Errno {
             12 => "ENOMEM",
             13 => "EACCES",
             14 => "EFAULT",
+            16 => "EBUSY",
             17 => "EEXIST",
+            19 => "ENODEV",
             20 => "ENOTDIR",
             21 => "EISDIR",
             22 => "EINVAL",
@@ -66,7 +70,9 @@ impl Errno {
             12 => "Cannot allocate memory",
             13 => "Permission denied",
             14 => "Bad address",
+            16 => "Device or resource busy",
             17 => "File exists",
+            19 => "No such device",
             20 => "Not a directory",
             21 => "Is a directory",
             22 => "Invalid argument",

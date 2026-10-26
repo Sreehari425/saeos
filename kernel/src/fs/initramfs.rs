@@ -13,7 +13,9 @@
 //! The parser trusts nothing: every field, size and path is checked and a
 //! bad archive is an error, never a panic or an out-of-bounds read. Only
 //! regular files and directories are supported; hard links are unpacked as
-//! independent files.
+//! independent files. A file the filesystem cannot take (out of space) is
+//! left out and reported, rather than left behind empty; the rest of the
+//! archive still unpacks.
 
 use super::errno::Errno;
 use super::inode::{Inode, InodeKind};
@@ -146,12 +148,23 @@ pub fn parse(archive: &[u8]) -> Result<Vec<Entry<'_>>, CpioError> {
     }
 }
 
+/// What [`unpack`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Unpacked {
+    pub files: usize,
+    pub bytes: u64,
+    /// Files whose contents the filesystem refused, with why and their
+    /// size. They are not left in the filesystem.
+    pub skipped: alloc::vec::Vec<(String, Errno, u64)>,
+}
+
 /// Unpack `archive` below `root`, creating parent directories as needed.
 /// A file that already exists (from an earlier archive) is replaced; an
-/// existing directory is kept. Returns `(files, bytes)` unpacked.
-pub fn unpack(root: &Arc<dyn Inode>, archive: &[u8]) -> Result<(usize, u64), CpioError> {
+/// existing directory is kept. A damaged archive is an error; a file that
+/// cannot be written is skipped (see [`Unpacked::skipped`]).
+pub fn unpack(root: &Arc<dyn Inode>, archive: &[u8]) -> Result<Unpacked, CpioError> {
     let entries = parse(archive)?;
-    let (mut files, mut bytes) = (0, 0u64);
+    let mut unpacked = Unpacked::default();
     for entry in &entries {
         let mut directory = root.clone();
         let mut components = entry.path.split('/').peekable();
@@ -169,10 +182,17 @@ pub fn unpack(root: &Arc<dyn Inode>, archive: &[u8]) -> Result<(usize, u64), Cpi
                         .map_err(CpioError::Filesystem)?,
                     Err(error) => return Err(CpioError::Filesystem(error)),
                 };
-                file.write_at(0, entry.data)
-                    .map_err(CpioError::Filesystem)?;
-                files += 1;
-                bytes += entry.data.len() as u64;
+                if let Err(error) = file.write_at(0, entry.data) {
+                    // Not an empty or truncated file that looks real.
+                    drop(file);
+                    let _ = directory.unlink(component);
+                    unpacked
+                        .skipped
+                        .push((entry.path.clone(), error, entry.data.len() as u64));
+                    continue;
+                }
+                unpacked.files += 1;
+                unpacked.bytes += entry.data.len() as u64;
             } else {
                 directory = match directory.lookup(component) {
                     Ok(existing) if existing.kind() == InodeKind::Directory => existing,
@@ -185,5 +205,5 @@ pub fn unpack(root: &Arc<dyn Inode>, archive: &[u8]) -> Result<(usize, u64), Cpi
             }
         }
     }
-    Ok((files, bytes))
+    Ok(unpacked)
 }

@@ -11,6 +11,9 @@
 # ("h i ret ctrl-d"); QEMU_TEST_SERIAL is text (with \r, \x7f escapes)
 # sent to the serial port. See scripts/qemu-input.py.
 #
+# QEMU_TEST_POSTCHECK is a command run after a PASS (e.g. checking a file
+# QEMU wrote); the test fails if it does.
+#
 # usage: run-qemu-test.sh <runner> <image> [qemu options...]
 set -euo pipefail
 
@@ -89,5 +92,11 @@ if [ -n "${QEMU_TEST_SYMBOLS:-}" ]; then
             exit 1
         fi
     done <<< "$QEMU_TEST_SYMBOLS"
+fi
+if [ -n "${QEMU_TEST_POSTCHECK:-}" ]; then
+    if ! bash -c "$QEMU_TEST_POSTCHECK"; then
+        echo "qemu-test: post-check failed: $QEMU_TEST_POSTCHECK" >&2
+        exit 1
+    fi
 fi
 echo "qemu-test: PASS"

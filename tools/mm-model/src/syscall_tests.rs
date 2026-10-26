@@ -14,11 +14,11 @@ use crate::syscall::{Context, Outcome, ProcessOps, dispatch};
 use crate::vma::{MemoryMap, Protection};
 use std::cell::{Cell, RefCell};
 
-const BASE: u64 = 0x40_0000;
+pub(crate) const BASE: u64 = 0x40_0000;
 
 /// A process with one child (pid 9, exit code 3), and a memory map with
 /// no pages behind it: the bookkeeping the kernel applies.
-struct FakeProcess {
+pub(crate) struct FakeProcess {
     waited: RefCell<Vec<Option<u64>>>,
     map: RefCell<MemoryMap>,
     fs_base: Cell<u64>,
@@ -27,6 +27,12 @@ struct FakeProcess {
     child_exited: Cell<bool>,
     /// What execve was asked to run.
     exec: RefCell<Option<(String, Vec<String>, Vec<String>)>>,
+    /// Monotonic time; a sleep advances it to the deadline.
+    pub(crate) clock: Cell<u64>,
+    /// Unix time at boot, if there is a wall clock.
+    pub(crate) epoch: Cell<Option<u64>>,
+    /// The deadline of every sleep.
+    pub(crate) sleeps: RefCell<Vec<u64>>,
 }
 
 impl ProcessOps for FakeProcess {
@@ -107,17 +113,30 @@ impl ProcessOps for FakeProcess {
     fn fs_base(&self) -> u64 {
         self.fs_base.get()
     }
+
+    fn monotonic_ns(&self) -> u64 {
+        self.clock.get()
+    }
+
+    fn realtime_ns(&self) -> Option<u64> {
+        self.epoch.get().map(|epoch| epoch + self.clock.get())
+    }
+
+    fn sleep_until_ns(&self, deadline: u64) {
+        self.sleeps.borrow_mut().push(deadline);
+        self.clock.set(self.clock.get().max(deadline));
+    }
 }
 
-struct World {
-    vfs: Vfs,
-    files: FileTable,
-    memory: FakeUser,
-    process: FakeProcess,
+pub(crate) struct World {
+    pub(crate) vfs: Vfs,
+    pub(crate) files: FileTable,
+    pub(crate) memory: FakeUser,
+    pub(crate) process: FakeProcess,
 }
 
 impl World {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let vfs = Vfs::new();
         vfs.mount("/", RamFs::new()).unwrap();
         vfs.mkdir("/dev").unwrap();
@@ -133,11 +152,14 @@ impl World {
                 cwd: RefCell::new("/".to_string()),
                 child_exited: Cell::new(true),
                 exec: RefCell::new(None),
+                clock: Cell::new(0),
+                epoch: Cell::new(None),
+                sleeps: RefCell::new(Vec::new()),
             },
         }
     }
 
-    fn call(&self, number: u64, args: &[u64]) -> i64 {
+    pub(crate) fn call(&self, number: u64, args: &[u64]) -> i64 {
         let mut all = [0u64; 6];
         all[..args.len()].copy_from_slice(args);
         let context = Context {
@@ -153,7 +175,7 @@ impl World {
     }
 
     /// Put a NUL-terminated string in user memory at `offset`.
-    fn string(&self, offset: u64, text: &str) -> u64 {
+    pub(crate) fn string(&self, offset: u64, text: &str) -> u64 {
         let mut bytes = text.as_bytes().to_vec();
         bytes.push(0);
         self.memory.bytes.borrow_mut()[offset as usize..offset as usize + bytes.len()]
@@ -161,18 +183,18 @@ impl World {
         BASE + offset
     }
 
-    fn user(&self, offset: u64, length: usize) -> Vec<u8> {
+    pub(crate) fn user(&self, offset: u64, length: usize) -> Vec<u8> {
         self.memory.bytes.borrow()[offset as usize..offset as usize + length].to_vec()
     }
 
-    fn put(&self, offset: u64, data: &[u8]) -> u64 {
+    pub(crate) fn put(&self, offset: u64, data: &[u8]) -> u64 {
         self.memory.bytes.borrow_mut()[offset as usize..offset as usize + data.len()]
             .copy_from_slice(data);
         BASE + offset
     }
 }
 
-fn errno(error: Errno) -> i64 {
+pub(crate) fn errno(error: Errno) -> i64 {
     -i64::from(error.code())
 }
 

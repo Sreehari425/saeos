@@ -6,3 +6,4 @@ result
 /.config
 /.config.cargo.toml
 /defconfig.toml
+/initramfs/output.wav

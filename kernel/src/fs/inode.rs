@@ -8,6 +8,7 @@
 //! what it supports.
 
 use super::errno::{Errno, FsResult};
+use super::file::OpenFlags;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -91,6 +92,19 @@ pub trait Inode: Send + Sync + Any {
     /// Whether this is a terminal (`isatty`, terminal `ioctl`s).
     fn is_terminal(&self) -> bool {
         false
+    }
+
+    /// Called by `open`. A device that keeps per-open state (`/dev/dsp`)
+    /// returns a fresh inode for this open file, released when the last
+    /// descriptor to it closes; `None` opens this inode itself.
+    fn open(&self, _flags: OpenFlags) -> FsResult<Option<Arc<dyn Inode>>> {
+        Ok(None)
+    }
+
+    /// An `ioctl` whose argument is one `int`, in and/or out (the
+    /// syscall copies it). Terminal ioctls are handled separately.
+    fn ioctl(&self, _request: u64, _value: &mut i32) -> FsResult<()> {
+        Err(Errno::ENOTTY)
     }
 
     /// For filesystems that downcast directories (`rename`).

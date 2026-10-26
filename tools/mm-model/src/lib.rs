@@ -58,10 +58,16 @@ mod pci_tests;
 pub mod sh_parse;
 #[cfg(test)]
 mod sh_tests;
+#[path = "../../../kernel/src/sound/mod.rs"]
+pub mod sound;
+#[cfg(test)]
+mod sound_tests;
 #[path = "../../../kernel/src/syscall/mod.rs"]
 pub mod syscall;
 #[cfg(test)]
 mod syscall_tests;
+#[cfg(test)]
+mod time_tests;
 #[path = "../../../kernel/src/drivers/tty.rs"]
 pub mod tty;
 #[cfg(test)]
@@ -80,6 +86,10 @@ pub mod user_startinfo;
 pub mod vma;
 #[cfg(test)]
 mod vma_tests;
+#[path = "../../../userspace/coreutils/src/wav.rs"]
+pub mod wav;
+#[cfg(test)]
+mod wav_tests;
 pub use heap_model::*;
 mod lock_model;
 #[path = "../../../kernel/src/task/mod.rs"]

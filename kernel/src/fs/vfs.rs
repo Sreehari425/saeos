@@ -233,6 +233,7 @@ impl Vfs {
             }
             InodeKind::CharDevice => {}
         }
+        let inode = inode.open(flags)?.unwrap_or(inode);
         files.insert(OpenFile::new(inode, flags))
     }
 

@@ -1,3 +1,4 @@
+pub mod ac97;
 pub mod console;
 pub mod font;
 #[cfg(feature = "framebuffer")]

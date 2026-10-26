@@ -20,8 +20,13 @@ pub static VFS: Vfs = Vfs::new();
 /// Mount ramfs at `/` and unpack every initramfs archive the bootloader
 /// loaded into it (later archives override earlier files), then hand their
 /// memory back. Then mount devfs at `/dev` and procfs at `/proc`. Needs the
-/// heap.
+/// page heap: initramfs files are each one allocation, and the static heap
+/// (10 MiB) could not hold a large one.
 pub fn init(boot_info: &BootInfo) {
+    assert!(
+        crate::mm::heap::page_heap_enabled(),
+        "fs::init before the page heap (mm::finish_boot)"
+    );
     let root = RamFs::new();
     VFS.mount("/", root.clone()).expect("mount ramfs at /");
     let archives: Vec<PhysicalRange> = boot_info.initramfs.iter().flatten().copied().collect();
@@ -37,12 +42,22 @@ pub fn init(boot_info: &BootInfo) {
             )
         };
         match initramfs::unpack(&root.root(), archive) {
-            Ok((files, bytes)) => crate::kinfo!(
-                "fs: initramfs at {:#x}: {} files, {} bytes",
-                range.start,
-                files,
-                bytes
-            ),
+            Ok(unpacked) => {
+                crate::kinfo!(
+                    "fs: initramfs at {:#x}: {} files, {} bytes",
+                    range.start,
+                    unpacked.files,
+                    unpacked.bytes
+                );
+                for (path, error, size) in &unpacked.skipped {
+                    crate::kerror!(
+                        "fs: initramfs: /{} ({} KiB) not unpacked: {:?}",
+                        path,
+                        size.div_ceil(1024),
+                        error
+                    );
+                }
+            }
             Err(error) => {
                 crate::kerror!("fs: initramfs at {:#x} rejected: {:?}", range.start, error)
             }
@@ -67,6 +82,7 @@ pub fn init(boot_info: &BootInfo) {
             ("meminfo", generator(proc_meminfo)),
             ("mounts", generator(proc_mounts)),
             ("pci", generator(crate::drivers::pci::proc_text)),
+            ("sound", generator(crate::sound::proc_text)),
         ]),
     );
 }

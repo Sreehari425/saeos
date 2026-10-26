@@ -347,7 +347,22 @@ fn sample_image() -> mkinitramfs::Image {
 }
 
 fn unpack_into_vfs(archive: &[u8]) -> (Vfs, Result<(usize, u64), CpioError>) {
-    let filesystem = RamFs::new();
+    let (vfs, result) = unpack_with_limit(archive, crate::fs::ramfs::DEFAULT_LIMIT);
+    (
+        vfs,
+        result.map(|unpacked| {
+            assert!(
+                unpacked.skipped.is_empty(),
+                "skipped {:?}",
+                unpacked.skipped
+            );
+            (unpacked.files, unpacked.bytes)
+        }),
+    )
+}
+
+fn unpack_with_limit(archive: &[u8], limit: u64) -> (Vfs, Result<initramfs::Unpacked, CpioError>) {
+    let filesystem = RamFs::with_limit(limit);
     let vfs = Vfs::new();
     vfs.mount("/", filesystem.clone()).unwrap();
     let result = initramfs::unpack(&filesystem.root(), archive);
@@ -383,6 +398,31 @@ fn cpio_parses_and_unpacks() {
         vec![5; 1300]
     );
     assert_eq!(vfs.stat("/empty").unwrap().kind, InodeKind::Directory);
+}
+
+#[test]
+fn a_file_that_does_not_fit_is_skipped_not_left_empty() {
+    let mut image = mkinitramfs::Image::default();
+    image.add_file("/bin/init", 0o755, vec![1; 100]).unwrap();
+    image
+        .add_file("/music/huge.wav", 0o644, vec![2; 5000])
+        .unwrap();
+    image.add_file("/sbin/after", 0o755, vec![3; 100]).unwrap();
+    let (vfs, result) = unpack_with_limit(&image.to_cpio(), 1000);
+    let unpacked = result.unwrap();
+    assert_eq!((unpacked.files, unpacked.bytes), (2, 200));
+    assert_eq!(
+        unpacked.skipped,
+        [("music/huge.wav".to_string(), Errno::ENOSPC, 5000)]
+    );
+    // No empty file pretends to be it, and entries after it still unpack.
+    assert_eq!(vfs.stat("/music/huge.wav"), Err(Errno::ENOENT));
+    let files = FileTable::new();
+    assert_eq!(
+        read_file(&vfs, &files, "/sbin/after").unwrap(),
+        vec![3; 100]
+    );
+    assert_eq!(read_file(&vfs, &files, "/bin/init").unwrap(), vec![1; 100]);
 }
 
 #[test]

@@ -1,8 +1,9 @@
-//! Device files: `/dev/null`, `/dev/zero`, `/dev/console`. Devices are
-//! ordinary inodes, so later `/dev/fb0` and `/dev/dsp` use the same `open` /
-//! `write` path as files.
+//! Device files: `/dev/null`, `/dev/zero`, `/dev/console`, `/dev/dsp`.
+//! Devices are ordinary inodes, so they use the same `open` / `write` path
+//! as files; `/dev/dsp` hands each open its own inode (`sound/mod.rs`).
 
 use super::errno::{Errno, FsResult};
+use super::file::OpenFlags;
 use super::inode::{DirEntry, FileSystem, Inode, InodeKind, Stat, new_fs_id};
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -19,10 +20,14 @@ enum Device {
     /// line discipline, `drivers/tty.rs`); writes go to the screen and the
     /// serial console.
     Console,
+    /// Sound output (OSS): each open gets the card through
+    /// `sound::open`; `ENODEV` without a card.
+    Dsp,
 }
 
-const DEVICES: [(&str, Device); 3] = [
+const DEVICES: [(&str, Device); 4] = [
     ("console", Device::Console),
+    ("dsp", Device::Dsp),
     ("null", Device::Null),
     ("zero", Device::Zero),
 ];
@@ -56,6 +61,7 @@ impl Inode for DeviceNode {
                 Ok(buf.len())
             }
             Device::Console => Ok(console_read(buf)),
+            Device::Dsp => Err(Errno::EINVAL),
         }
     }
 
@@ -72,6 +78,16 @@ impl Inode for DeviceNode {
 
     fn is_terminal(&self) -> bool {
         self.device == Device::Console
+    }
+
+    fn open(&self, _flags: OpenFlags) -> FsResult<Option<Arc<dyn Inode>>> {
+        if self.device != Device::Dsp {
+            return Ok(None);
+        }
+        #[cfg(not(host_model))]
+        return crate::sound::open(self.ino, self.fs_id).map(Some);
+        #[cfg(host_model)]
+        Err(Errno::ENODEV)
     }
 
     fn as_any(&self) -> &dyn Any {

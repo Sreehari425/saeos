@@ -24,6 +24,7 @@ pub mod mm;
 pub mod process;
 pub mod scheduler;
 pub mod shell;
+pub mod sound;
 pub mod sync;
 pub mod syscall;
 pub mod task;
@@ -203,7 +204,6 @@ pub fn kernel_main_high(handoff: Handoff) -> ! {
     // First, so loglevel= applies to the rest of bring-up.
     cmdline::init(&boot_info.cmdline);
     mm::init_late(boot_info);
-    fs::init(boot_info);
 
     let acpi_topology = bios_acpi.or_else(|| match boot_info.rsdp_addr {
         Some(address) => match unsafe { acpi::parse_rsdp(address) } {
@@ -262,6 +262,9 @@ pub fn kernel_main_high(handoff: Handoff) -> ! {
     // GDT, IDT, TSS, and every MMIO pointer now use upper-half addresses, so
     // the boot identity map can go; the lower half belongs to processes.
     mm::finish_boot();
+    // After finish_boot: large files need the page heap (the static heap
+    // is 10 MiB).
+    fs::init(boot_info);
     // Find PCI devices (needs the heap; drivers that need interrupts come
     // after the interrupt controller, which is up now).
     drivers::pci::init();

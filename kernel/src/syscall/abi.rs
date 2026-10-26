@@ -120,6 +120,40 @@ pub fn exit_status_word(status: i32) -> i32 {
     }
 }
 
+/// How an `ioctl` request moves its argument, from the `_IOC` encoding
+/// (`include/uapi/asm-generic/ioctl.h`): bits 30-31 the direction, 16-29
+/// the size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoctlInt {
+    /// Copy the `int` in from user memory first (`_IOC_WRITE`).
+    pub copy_in: bool,
+    /// Copy it back out afterwards (`_IOC_READ`).
+    pub copy_out: bool,
+}
+
+/// The copies for an integer `ioctl`: `None` for a request with no
+/// argument (`_IO`, like `SNDCTL_DSP_SYNC`), `ENOTTY` for an argument that
+/// is not one `int`.
+pub fn ioctl_int(request: u64) -> Result<Option<IoctlInt>, Errno> {
+    const IOC_WRITE: u64 = 1;
+    const IOC_READ: u64 = 2;
+    let direction = (request >> 30) & 0x3;
+    let size = (request >> 16) & 0x3fff;
+    if request >> 32 != 0 {
+        return Err(Errno::ENOTTY);
+    }
+    if direction == 0 {
+        return Ok(None);
+    }
+    if size != 4 {
+        return Err(Errno::ENOTTY);
+    }
+    Ok(Some(IoctlInt {
+        copy_in: direction & IOC_WRITE != 0,
+        copy_out: direction & IOC_READ != 0,
+    }))
+}
+
 pub const TCGETS: u64 = 0x5401;
 pub const TIOCGWINSZ: u64 = 0x5413;
 

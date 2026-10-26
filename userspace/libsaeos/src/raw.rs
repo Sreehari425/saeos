@@ -19,6 +19,7 @@ pub mod nr {
     pub const IOCTL: u64 = 16;
     pub const DUP: u64 = 32;
     pub const DUP2: u64 = 33;
+    pub const NANOSLEEP: u64 = 35;
     pub const GETPID: u64 = 39;
     pub const FORK: u64 = 57;
     pub const EXECVE: u64 = 59;
@@ -31,6 +32,8 @@ pub mod nr {
     pub const UNLINK: u64 = 87;
     pub const GETPPID: u64 = 110;
     pub const GETDENTS64: u64 = 217;
+    pub const CLOCK_GETTIME: u64 = 228;
+    pub const CLOCK_NANOSLEEP: u64 = 230;
     pub const ARCH_PRCTL: u64 = 158;
     pub const EXIT: u64 = 60;
     pub const EXIT_GROUP: u64 = 231;

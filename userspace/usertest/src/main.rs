@@ -52,6 +52,7 @@ fn main(args: Args) -> i32 {
         }
         Some(b"tty") => tty(),
         Some(b"shell") => shell(),
+        Some(b"sound") => sound(),
         Some(b"ud") => {
             say(b"usertest: executing ud2\n");
             unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
@@ -782,4 +783,172 @@ fn shell() -> ! {
         }
         Err(_) => fail(96, b"fork"),
     }
+}
+
+/// A sine table for the tones: one cycle, in 16-bit samples (computed
+/// with a Taylor series: `core` has no `sin`).
+fn sine_table() -> [i16; 256] {
+    let mut table = [0i16; 256];
+    for (index, entry) in table.iter_mut().enumerate() {
+        // x in [-pi, pi): the series converges well there.
+        let x = (index as f64 / 256.0) * 2.0 * core::f64::consts::PI - core::f64::consts::PI;
+        let mut term = x;
+        let mut sum = x;
+        for n in 1..12 {
+            term *= -x * x / ((2 * n) as f64 * (2 * n + 1) as f64);
+            sum += term;
+        }
+        // sin(x - pi) = -sin(x): shift back to a cycle starting at 0.
+        *entry = (-sum * 12_000.0) as i16;
+    }
+    table
+}
+
+/// `milliseconds` of a `frequency` Hz tone at `rate`, as the card format
+/// `format` (`AFMT_U8` or `AFMT_S16_LE`) with `channels` channels.
+fn tone(frequency: u32, rate: u32, channels: u32, format: i32, milliseconds: u32) -> Vec<u8> {
+    let table = sine_table();
+    let frames = (rate as u64 * u64::from(milliseconds) / 1000) as usize;
+    let mut samples = Vec::with_capacity(frames * channels as usize * 2);
+    // Phase in 1/2^32 of a cycle, so the frequency is exact on average.
+    let step = ((u64::from(frequency) << 32) / u64::from(rate)) as u32;
+    let mut phase = 0u32;
+    for _ in 0..frames {
+        let value = table[(phase >> 24) as usize];
+        phase = phase.wrapping_add(step);
+        for _ in 0..channels {
+            if format == libsaeos::sound::AFMT_U8 {
+                samples.push(((value >> 8) + 128) as u8);
+            } else {
+                samples.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    samples
+}
+
+/// `usertest sound`: tones on /dev/dsp for the host to check in QEMU's
+/// WAV capture (`scripts/check-wav.py`): 440 Hz (48 kHz stereo 16-bit,
+/// 1 s), a pause long enough for the card to run dry, the same tone's next
+/// 0.5 s (playback restarts after the underrun, in phase), 1000 Hz (22050
+/// Hz mono 8-bit, 0.5 s), 880 and 550 Hz (8 kHz, 0.15 s each, below the
+/// start threshold), then `play /test/tone.wav` (660 Hz). Also: the ioctls'
+/// answers and errors, one opener at a time, and the clocks.
+fn sound() -> ! {
+    use libsaeos::sound::{AFMT_S16_LE, AFMT_U8, Dsp};
+    use libsaeos::time;
+    const SNDCTL_DSP_SETFMT: u64 = 0xc004_5005;
+
+    let mut dsp = match Dsp::open() {
+        Ok(dsp) => dsp,
+        Err(_) => fail(130, b"open /dev/dsp"),
+    };
+    if Dsp::open().map(|_| ()) != Err(Errno::EBUSY) {
+        fail(131, b"a second open of /dev/dsp is not EBUSY");
+    }
+    let mut query = 0i32;
+    if ioctl(dsp.fd(), SNDCTL_DSP_SETFMT, &raw mut query as u64) != 0 || query != AFMT_S16_LE {
+        fail(132, b"the default format is not S16_LE");
+    }
+    if dsp.set_format(0x1000) != Ok(AFMT_S16_LE)
+        || dsp.set_channels(0) != Err(Errno::EINVAL)
+        || dsp.set_rate(0) != Err(Errno::EINVAL)
+        || ioctl(dsp.fd(), 0x5413, 0) != -25
+    {
+        fail(133, b"sound ioctl errors");
+    }
+    if dsp.set_rate(48_000) != Ok(48_000) || dsp.set_channels(2) != Ok(2) {
+        fail(134, b"48 kHz stereo");
+    }
+
+    // 1.5 s of 440 Hz, written in two parts with a pause between: the
+    // card runs dry and restarts, and the second part must continue the
+    // first without a phase jump. One second is 93.75 periods, so a partial
+    // period waits through the pause (moved to period 0 for the restart).
+    // The first part goes in odd-sized writes, so frames and periods split.
+    let whole = tone(440, 48_000, 2, AFMT_S16_LE, 1500);
+    let (first, second) = whole.split_at(192_000);
+    for chunk in first.chunks(3001) {
+        if dsp.write_all(chunk).is_err() {
+            fail(135, b"write /dev/dsp");
+        }
+    }
+    // No sync: the card plays the queue dry and stops (an underrun).
+    let before = time::now();
+    time::sleep(600 * time::NANOS_PER_MILLISECOND);
+    let slept = time::now() - before;
+    if slept < 600 * time::NANOS_PER_MILLISECOND {
+        fail(136, b"nanosleep returned early");
+    }
+    if dsp.write_all(second).is_err() || dsp.sync().is_err() {
+        fail(137, b"restart after an underrun");
+    }
+
+    // 1000 Hz, 22050 Hz mono 8-bit: a wrong rate shows as a wrong pitch.
+    if dsp.set_format(AFMT_U8) != Ok(AFMT_U8)
+        || dsp.set_channels(1) != Ok(1)
+        || dsp.set_rate(22_050) != Ok(22_050)
+    {
+        fail(138, b"22050 Hz mono 8-bit");
+    }
+    if dsp.write_all(&tone(1000, 22_050, 1, AFMT_U8, 500)).is_err() || dsp.sync().is_err() {
+        fail(139, b"write 8-bit mono");
+    }
+    let report = fs::read_to_string("/proc/sound").unwrap_or_default();
+    if !report.contains("card: Intel AC'97") || report.contains("underruns: 0\n") {
+        println!("{report}");
+        fail(140, b"/proc/sound (expected an underrun)");
+    }
+
+    // Sounds shorter than the card's start threshold (4 periods: 256 ms at
+    // 8 kHz; these are 3 once padded) must still play: 880 Hz ended by a
+    // sync, then 550 Hz ended by closing /dev/dsp without one, which must
+    // play out on its own (not wait for the next opener).
+    if dsp.set_rate(8_000) != Ok(8_000)
+        || dsp.write_all(&tone(880, 8_000, 1, AFMT_U8, 150)).is_err()
+        || dsp.sync().is_err()
+    {
+        fail(142, b"a short sound ended by a sync");
+    }
+    let periods_played = || {
+        fs::read_to_string("/proc/sound")
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| line.strip_prefix("periods played: ")?.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let before_close = periods_played();
+    if dsp.write_all(&tone(550, 8_000, 1, AFMT_U8, 150)).is_err() {
+        fail(143, b"write a short sound");
+    }
+    drop(dsp);
+    time::sleep(400 * time::NANOS_PER_MILLISECOND);
+    let after_close = periods_played();
+    if after_close < before_close + 3 {
+        println!("usertest: periods played {before_close} -> {after_close}");
+        fail(144, b"audio left at close did not play");
+    }
+
+    // A WAV file through play (16 kHz mono 16-bit, 660 Hz).
+    let status = match process::fork() {
+        Ok(process::Fork::Child) => {
+            let error = process::exec_inherit("/bin/play", &["play", "/test/tone.wav"]);
+            eprintln!("usertest: exec /bin/play: {error}");
+            process::exit(91)
+        }
+        Ok(process::Fork::Parent(pid)) => process::wait(Some(pid)).map(|(_, status)| status.code()),
+        Err(error) => Err(error),
+    };
+    if status != Ok(Some(0)) {
+        fail(141, b"play /test/tone.wav");
+    }
+    let underruns = report
+        .lines()
+        .find_map(|line| line.strip_prefix("underruns: "))
+        .unwrap_or("?");
+    println!(
+        "usertest: sound PASS (slept {} ms, {underruns} underruns)",
+        slept / time::NANOS_PER_MILLISECOND
+    );
+    exit(0)
 }

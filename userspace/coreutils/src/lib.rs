@@ -4,6 +4,8 @@
 
 extern crate alloc;
 
+pub mod wav;
+
 use libsaeos::prelude::*;
 
 /// Report `error` for `path` like the Unix tools do and return exit code 1.

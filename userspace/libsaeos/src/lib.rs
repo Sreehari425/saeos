@@ -5,6 +5,7 @@
 //!              c: the C interface (malloc, open, strlen, errno, ...)
 //!              heap + alloc: the allocator (brk heap, mmap for large)
 //!              start + tls: _start, argv/envp, thread-local storage
+//!              time: clocks and sleeping; sound: /dev/dsp
 //!              raw: the syscalls themselves (Linux x86_64 numbers)
 //! ```
 //!
@@ -28,8 +29,10 @@ pub mod io;
 pub mod lines;
 pub mod process;
 pub mod raw;
+pub mod sound;
 mod start;
 pub mod startinfo;
+pub mod time;
 mod tls;
 
 // The raw layer stays at the root for programs written against it.

@@ -3,6 +3,11 @@ KERNEL := saeos
 BIOS_TARGET := x86_64-unknown-none
 UEFI_TARGET := x86_64-unknown-uefi
 QEMU_ARGS ?=
+# A sound card to hear: `make run SOUND=pipewire` (or pa, alsa, sdl, ...)
+# adds an AC'97 card played through that QEMU audio backend.
+SOUND ?=
+SOUND_ARGS = $(if $(SOUND),-audiodev $(SOUND)$(COMMA)id=snd -device AC97$(COMMA)audiodev=snd)
+COMMA := ,
 FEATURES = $(shell if [ -f .config ]; then cargo run --quiet -p ratconf -- features 2>/dev/null; fi)
 FEATURE_ARGS = $(if $(FEATURES),--features $(FEATURES),)
 
@@ -27,7 +32,7 @@ BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi
 
 .PHONY: check-std-lock userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test test help
 
 all: bios
 
@@ -37,7 +42,7 @@ all: bios
 # whose entry point is in its executable segment.
 USER_PROGRAMS := hello usertest init sh coreutils
 # The executables they produce (checked, and installed by initramfs.toml).
-USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false lspci
+USER_BINARIES := hello usertest init sh ls cat echo mkdir rm mv stat true false lspci sleep play
 USER_TARGET := userspace/x86_64-saeos.json
 USER_BUILD = cargo build --release -Zjson-target-spec \
 	-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
@@ -55,6 +60,7 @@ initramfs: userspace
 		echo "initramfs: $(INITRAMFS_IMAGE) contains /test" >&2; exit 1; fi
 
 initramfs-test: userspace
+	./scripts/make-test-tone.py target/test-tone.wav
 	$(MKINITRAMFS) build initramfs.toml -o $(INITRAMFS_TEST_IMAGE) --test-fixtures
 
 bios: olddefconfig
@@ -80,18 +86,18 @@ asm-uefi: olddefconfig
 		--emit=asm
 
 run: olddefconfig
-	CMDLINE='$(CMDLINE)' nix run path:.#bios -- $(QEMU_ARGS)
+	CMDLINE='$(CMDLINE)' nix run path:.#bios -- $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-uefi: olddefconfig
-	CMDLINE='$(CMDLINE)' nix run path:.#uefi -- $(QEMU_ARGS)
+	CMDLINE='$(CMDLINE)' nix run path:.#uefi -- $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-debug: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) $(QEMU_ARGS)
+	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-uefi-debug: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(QEMU_ARGS)
+	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(QEMU_ARGS) $(SOUND_ARGS)
 
 # Start QEMU halted with a GDB stub on :1234, then attach with `make gdb`
 # (or `make gdb-uefi`) from a second terminal.
@@ -137,7 +143,7 @@ miri:
 
 # Host tests plus every QEMU test on both boot paths; each run ends with the
 # kernel's own verdict through isa-debug-exit.
-test: mm-test miri boot-test user-test mm-guard-test fault-test panic-lock-test
+test: mm-test miri boot-test user-test sound-test mm-guard-test fault-test panic-lock-test
 
 # Each target boots twice: on QEMU's default CPU, and with -cpu max, where
 # SMEP/SMAP exist and the user-memory test checks they are enforced.
@@ -191,6 +197,21 @@ define user_tests
 	CMDLINE='init=/test/bin/usertest -- shell' QEMU_TEST_EXPECT="usertest: shell PASS" $(USER_TEST_RUN) $(1) -m 2G
 	CMDLINE='init=/bin/sh saeos.test.exit=5' QEMU_TEST_INPUT_AFTER='saeos:/$$ ' QEMU_TEST_KEYS='$(SHELL_KEYS)' QEMU_TEST_EXPECT="$$(printf '^typed-ok$$\n^/etc$$')" $(USER_TEST_RUN) $(1) -m 2G
 endef
+
+# Sound: usertest plays tones on an AC'97 card while QEMU records what
+# the card outputs; check-wav.py then requires each tone, in order, at its
+# pitch, unbroken (see the script). A wrong sample rate shows as a wrong
+# pitch, a lost period as a phase jump.
+SOUND_TONES := 440:1 440:0.5 1000:0.5 880:0.15 550:0.15 660:0.5
+SOUND_RUN = CMDLINE='init=/test/bin/usertest -- sound' QEMU_TEST_EXPECT="usertest: sound PASS" \
+	QEMU_TEST_POSTCHECK="./scripts/check-wav.py $(2) $(SOUND_TONES)" $(USER_TEST_RUN) $(1) -m 2G \
+	-audiodev wav,id=snd,path=$(2) -device AC97,audiodev=snd
+sound-test: initramfs-test
+	./scripts/check-wav.py --self-test
+	cargo build -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),user-test
+	$(call SOUND_RUN,$(BIOS_TEST_IMAGE),target/sound-bios.wav)
+	cargo build -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test
+	$(call SOUND_RUN,$(UEFI_TEST_IMAGE),target/sound-uefi.wav)
 
 # The interactive shell as init, typed at: "echo typed-ok", "cd /etc",
 # "pwd", "exit 5" (the exit status is the verdict).
@@ -273,10 +294,10 @@ nix-gc:
 help:
 	@echo "SaeOS build targets:"
 	@echo "  all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug check"
-	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\""
+	@echo "  run options: make run-uefi QEMU_ARGS=\"-m 16g\" CMDLINE=\"loglevel=debug\" SOUND=pipewire"
 	@echo "  userspace initramfs initramfs-test (from initramfs.toml)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
-	@echo "  test boot-test user-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
+	@echo "  test boot-test user-test sound-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
 	@echo "  fmt-check clippy"
 	@echo "  debug debug-uefi gdb gdb-uefi symbolize LOG=<file>"
 	@echo "  clean distclean mrproper nix-gc"

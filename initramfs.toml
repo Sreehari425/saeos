@@ -90,3 +90,19 @@ test = true
 source = "target/x86_64-saeos/release/lspci"
 target = "/bin/lspci"
 mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/sleep"
+target = "/bin/sleep"
+mode = 0o755
+
+[[file]]
+source = "target/x86_64-saeos/release/play"
+target = "/bin/play"
+mode = 0o755
+
+# The sound test's WAV (made by scripts/make-test-tone.py).
+[[file]]
+source = "target/test-tone.wav"
+target = "/test/tone.wav"
+test = true

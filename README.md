@@ -34,6 +34,10 @@ run inside QEMU. The current codebase includes:
   console line editing, and libsaeos, a C library in Rust
 - PCI enumeration (buses behind bridges, BARs, capabilities) with a
   driver-matching layer; `lspci` and `/proc/pci`
+- DMA buffers and MSI interrupts for drivers
+- Sound: an Intel AC'97 driver behind `/dev/dsp` (the OSS interface), and
+  `play` for WAV files
+- Clocks and sleeping for programs (`clock_gettime`, `nanosleep`, `sleep`)
 - VGA text and UEFI GOP framebuffer consoles
 - Serial output, keyboard input, and basic shell commands
 - PIT, RTC, TSC, and local APIC timer support
@@ -116,6 +120,13 @@ Pass extra QEMU arguments with `QEMU_ARGS`:
 make run-uefi QEMU_ARGS="-m 1G -smp 2"
 ```
 
+Add a sound card you can hear with `SOUND`, naming a QEMU audio backend
+(`pipewire`, `pa`, `alsa`, `sdl`, ...):
+
+```sh
+make run-debug SOUND=pipewire
+```
+
 ## Configuration
 
 SaeOS uses a small, declarative kernel configuration system.
@@ -140,6 +151,7 @@ make fmt-check     # Check formatting
 make clippy        # Run Clippy with warnings denied
 make test          # All tests below plus the fault tests, on BIOS and UEFI
 make user-test     # Ring-3 tests: a test program runs as init (PID 1)
+make sound-test    # Play tones on an AC'97 card and check QEMU's recording
 make mm-test       # Host tests for the buddy allocator, scheduler model, and lock order
 make miri          # The same host tests under Miri (undefined-behaviour checks)
 make mm-stress     # Boot with MM self-tests and stress runs (also mm-stress-uefi)
