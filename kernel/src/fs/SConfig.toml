@@ -1,0 +1,12 @@
+[module]
+id = "kernel.fs"
+name = "Filesystems"
+description = "Filesystems mounted at boot besides the root ramfs and /dev."
+
+[[option]]
+id = "procfs"
+name = "/proc filesystem"
+type = "bool"
+default = true
+feature = "procfs"
+help = "Mount procfs at /proc: cmdline, interrupts, meminfo, mounts, fb, pci, sound. lspci and fbinfo read it."

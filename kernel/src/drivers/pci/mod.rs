@@ -29,7 +29,6 @@ mod kernel {
     use super::msi::{self, MsiCapability};
     use crate::arch::x86_64::{interrupt_controller, vectors};
     use crate::sync::SpinMutex;
-    use alloc::string::String;
     use alloc::vec::Vec;
     use core::fmt::Write;
 
@@ -45,16 +44,19 @@ mod kernel {
 
     /// Drivers, tried in order; the first that matches claims a device.
     static DRIVERS: &[PciDriver] = &[
+        #[cfg(feature = "ac97")]
         PciDriver {
             name: "ac97",
             matches: crate::drivers::ac97::matches,
             probe: crate::drivers::ac97::probe,
         },
+        #[cfg(feature = "hda")]
         PciDriver {
             name: "hda",
             matches: crate::drivers::hda::matches,
             probe: crate::drivers::hda::probe,
         },
+        #[cfg(feature = "bochs-vbe")]
         PciDriver {
             name: "bochs-vbe",
             matches: crate::drivers::bochs_vbe::matches,
@@ -221,8 +223,9 @@ mod kernel {
     }
 
     /// `/proc/pci`: one line per function, then its BARs indented.
+    #[cfg(feature = "procfs")]
     pub fn proc_text() -> Vec<u8> {
-        let mut text = String::new();
+        let mut text = alloc::string::String::new();
         for device in DEVICES.lock().iter() {
             let _ = write!(text, "{device}");
             if device.has_capability(CAPABILITY_MSI).is_some() {

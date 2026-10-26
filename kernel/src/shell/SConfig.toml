@@ -1,0 +1,12 @@
+[module]
+id = "kernel.shell"
+name = "Kernel shell"
+description = "The in-kernel debug shell."
+
+[[option]]
+id = "kernel_shell"
+name = "Kernel debug shell"
+type = "bool"
+default = true
+feature = "kernel-shell"
+help = "Build the in-kernel shell, started instead of userspace with saeos.kshell on the command line. Without it, saeos.kshell only logs a warning."

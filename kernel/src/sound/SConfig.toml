@@ -1,0 +1,20 @@
+[module]
+id = "kernel.sound"
+name = "Sound"
+description = "Sound card drivers behind /dev/dsp."
+
+[[option]]
+id = "ac97"
+name = "AC'97 audio"
+type = "bool"
+default = true
+feature = "ac97"
+help = "Drive Intel ICH AC'97 controllers (QEMU's -device AC97). Without any sound driver, /dev/dsp reports no device."
+
+[[option]]
+id = "hda"
+name = "Intel HD Audio"
+type = "bool"
+default = true
+feature = "hda"
+help = "Drive Intel High Definition Audio controllers and their codecs (QEMU's -device intel-hda, and most PCs)."

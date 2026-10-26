@@ -10,4 +10,8 @@ children = [
     "src/mm/SConfig.toml",
     "src/drivers/SConfig.toml",
     "src/arch/x86_64/SConfig.toml",
+    "src/sound/SConfig.toml",
+    "src/fs/SConfig.toml",
+    "src/shell/SConfig.toml",
+    "src/boot_test/SConfig.toml",
 ]

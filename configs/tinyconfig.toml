@@ -1,3 +1,7 @@
+[kernel.scheduler]
+selftest = false
+debug = false
+
 [kernel.time]
 pit = false
 rtc = false
@@ -9,6 +13,8 @@ selftest = false
 paging_debug = false
 stress = false
 lock_debug = false
+poison = false
+guard_test = false
 allocator_stats = false
 
 [kernel.drivers]
@@ -16,6 +22,24 @@ serial = true
 framebuffer = false
 vga_text = true
 keyboard = false
+bochs_vbe = false
 
 [kernel.arch.x86_64]
 apic = false
+
+[kernel.sound]
+ac97 = false
+hda = false
+
+[kernel.fs]
+procfs = false
+
+[kernel.shell]
+kernel_shell = false
+
+[kernel.testing]
+boot_test = false
+user_test = false
+fault_test = false
+panic_lock_test = false
+qemu_exit = false

@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! saeos.kshell           -> the in-kernel debug shell instead of userspace
+//!                           (`kernel-shell` builds; otherwise a warning)
 //! init=PATH              -> run PATH; if it cannot start, panic
 //! otherwise              -> the first of /sbin/init /etc/init /bin/init /bin/sh
 //! nothing could start    -> "No working init found" panic
@@ -23,8 +24,13 @@ const ENVIRONMENT: [&str; 3] = ["HOME=/", "PATH=/bin:/sbin", "TERM=linux"];
 pub fn kernel_init() -> ! {
     let params = crate::cmdline::params();
     if params.flag("saeos.kshell") {
-        crate::kinfo!("init: saeos.kshell given; running the kernel shell");
-        crate::shell::run();
+        #[cfg(feature = "kernel-shell")]
+        {
+            crate::kinfo!("init: saeos.kshell given; running the kernel shell");
+            crate::shell::run();
+        }
+        #[cfg(not(feature = "kernel-shell"))]
+        crate::kwarn!("init: saeos.kshell given, but this kernel has no kernel shell");
     }
     let arguments: Vec<&str> = params.init_args().collect();
     if let Some(path) = params.get("init") {

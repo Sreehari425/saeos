@@ -160,6 +160,7 @@ pub fn register_gop(info: crate::boot::boot_info::FramebufferInfo) {
 }
 
 /// `/proc/fb`.
+#[cfg(feature = "procfs")]
 pub fn proc_text() -> Vec<u8> {
     let registered = DISPLAY.lock();
     let Some(registered) = registered.as_ref() else {

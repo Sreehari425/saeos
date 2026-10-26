@@ -23,6 +23,7 @@ pub mod klog_ring;
 pub mod mm;
 pub mod process;
 pub mod scheduler;
+#[cfg(feature = "kernel-shell")]
 pub mod shell;
 pub mod sound;
 pub mod sync;

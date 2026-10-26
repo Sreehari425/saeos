@@ -6,6 +6,7 @@ use super::errno::{Errno, FsResult};
 use super::file::{Fd, FileTable, OpenFlags, Whence};
 use super::initramfs;
 use super::inode::{DirEntry, FileSystem, Stat};
+#[cfg(feature = "procfs")]
 use super::procfs::{Generator, ProcFs};
 use super::ramfs::RamFs;
 use super::vfs::Vfs;
@@ -28,9 +29,9 @@ pub fn initramfs_loaded() -> bool {
 
 /// Mount ramfs at `/` and unpack every initramfs archive the bootloader
 /// loaded into it (later archives override earlier files), then hand their
-/// memory back. Then mount devfs at `/dev` and procfs at `/proc`. Needs the
-/// page heap: initramfs files are each one allocation, and the static heap
-/// (10 MiB) could not hold a large one.
+/// memory back. Then mount devfs at `/dev` and (with `procfs`) procfs at
+/// `/proc`. Needs the page heap: initramfs files are each one allocation,
+/// and the static heap (10 MiB) could not hold a large one.
 pub fn init(boot_info: &BootInfo) {
     assert!(
         crate::mm::heap::page_heap_enabled(),
@@ -83,6 +84,7 @@ pub fn init(boot_info: &BootInfo) {
     }
 
     mount_pseudo("/dev", DevFs::new());
+    #[cfg(feature = "procfs")]
     mount_pseudo(
         "/proc",
         ProcFs::new(alloc::vec![
@@ -100,6 +102,7 @@ pub fn init(boot_info: &BootInfo) {
     );
 }
 
+#[cfg(feature = "procfs")]
 fn generator(function: fn() -> Vec<u8>) -> Generator {
     Arc::new(function)
 }
@@ -118,6 +121,7 @@ fn mount_pseudo(path: &str, filesystem: Arc<dyn FileSystem>) {
 }
 
 /// `/proc/cmdline`: the command line and a newline, exactly as Linux.
+#[cfg(feature = "procfs")]
 fn proc_cmdline() -> Vec<u8> {
     let mut contents = Vec::from(crate::cmdline::raw().as_bytes());
     contents.push(b'\n');
@@ -125,6 +129,7 @@ fn proc_cmdline() -> Vec<u8> {
 }
 
 /// `/proc/meminfo`: physical memory, in Linux's format (kB).
+#[cfg(feature = "procfs")]
 fn proc_meminfo() -> Vec<u8> {
     let stats = crate::mm::frame::stats();
     alloc::format!(
@@ -136,6 +141,7 @@ fn proc_meminfo() -> Vec<u8> {
 }
 
 /// `/proc/mounts`: `device mountpoint type options 0 0`, as Linux.
+#[cfg(feature = "procfs")]
 fn proc_mounts() -> Vec<u8> {
     let mut contents = alloc::string::String::new();
     for (path, name) in VFS.mounts() {

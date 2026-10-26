@@ -67,6 +67,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "olddefconfig" => olddefconfig(&root, &modules)?,
         "savedefconfig" => savedefconfig(&root, &modules)?,
         "features" => print_features(&root, &modules)?,
+        "check" => check(&root, &modules)?,
         "help" | "--help" | "-h" => print_help(),
         other => return Err(format!("unknown command `{other}`").into()),
     }
@@ -82,6 +83,9 @@ fn print_help() {
     println!("  olddefconfig   preserve existing values and fill new defaults");
     println!("  savedefconfig  write only non-default values to defconfig.toml");
     println!("  features       print selected Cargo features as a comma list");
+    println!(
+        "  check          every Cargo feature has an option, and every option's feature exists"
+    );
 }
 
 fn discover_modules(root: &Path) -> Result<Vec<Module>, Box<dyn std::error::Error>> {
@@ -369,6 +373,57 @@ fn print_features(root: &Path, modules: &[Module]) -> Result<(), Box<dyn std::er
         .join(",");
     println!("{features}");
     Ok(())
+}
+
+/// Each config root's crate (the `Cargo.toml` beside its `SBuild.toml`)
+/// against the options: a feature no option names cannot be chosen in
+/// menuconfig, and an option naming a missing feature breaks the build.
+fn check(root: &Path, modules: &[Module]) -> Result<(), Box<dyn std::error::Error>> {
+    let named = modules
+        .iter()
+        .flat_map(|module| module.options.iter())
+        .filter_map(|option| option.feature.clone())
+        .collect::<BTreeSet<_>>();
+    let mut declared = BTreeSet::new();
+    let mut problems = Vec::new();
+    let build = read_toml(&root.join(ROOT_BUILD))?;
+    for config_root in array_of_strings(&build, &["config", "roots"]) {
+        let build_path = root.join(&config_root);
+        let base = build_path.parent().unwrap_or(root);
+        let manifest = base.join("Cargo.toml");
+        let Some(features) = read_toml(&manifest)?
+            .get("features")
+            .and_then(Value::as_table)
+            .map(|table| table.keys().cloned().collect::<Vec<_>>())
+        else {
+            continue;
+        };
+        for feature in features {
+            if feature != "default" && !named.contains(&feature) {
+                problems.push(format!(
+                    "{}: feature `{feature}` has no option in any SConfig.toml",
+                    manifest.display()
+                ));
+            }
+            declared.insert(feature);
+        }
+    }
+    for feature in named.difference(&declared) {
+        problems.push(format!(
+            "an option turns on feature `{feature}`, which no Cargo.toml declares"
+        ));
+    }
+    if problems.is_empty() {
+        println!(
+            "ratconf: {} options, every feature accounted for",
+            named.len()
+        );
+        return Ok(());
+    }
+    for problem in &problems {
+        eprintln!("ratconf: {problem}");
+    }
+    Err(format!("{} problems", problems.len()).into())
 }
 
 fn menuconfig(root: &Path, modules: &[Module]) -> Result<(), Box<dyn std::error::Error>> {

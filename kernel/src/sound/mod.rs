@@ -64,7 +64,6 @@ mod kernel {
     use crate::task::WaitQueue;
     use alloc::boxed::Box;
     use alloc::sync::Arc;
-    use alloc::vec::Vec;
     use core::any::Any;
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -483,7 +482,8 @@ mod kernel {
     }
 
     /// `/proc/sound`, up to date with the card.
-    pub fn proc_text() -> Vec<u8> {
+    #[cfg(feature = "procfs")]
+    pub fn proc_text() -> alloc::vec::Vec<u8> {
         let mut card = CARD.lock();
         let Some(card) = card.as_mut() else {
             return b"no sound card\n".to_vec();

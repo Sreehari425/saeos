@@ -1,7 +1,7 @@
 [module]
 id = "kernel.drivers"
 name = "Drivers"
-description = "Console and input driver options."
+description = "Console, input and display driver options."
 
 [[option]]
 id = "serial"
@@ -34,3 +34,11 @@ type = "bool"
 default = true
 feature = "keyboard"
 help = "Enable PS/2 keyboard input for the interactive shell."
+
+[[option]]
+id = "bochs_vbe"
+name = "Bochs VBE display"
+type = "bool"
+default = true
+feature = "bochs-vbe"
+help = "Drive the Bochs/QEMU standard VGA (-vga std) in graphics mode for /dev/fb0 on BIOS boots. UEFI boots use the firmware's GOP framebuffer."

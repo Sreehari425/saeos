@@ -79,6 +79,7 @@ pub fn snapshot() -> alloc::vec::Vec<(u8, &'static str, u64)> {
 
 /// `/proc/interrupts`: `vector: count owner` per allocated vector, then
 /// the stray count.
+#[cfg(feature = "procfs")]
 pub fn proc_text() -> alloc::vec::Vec<u8> {
     use core::fmt::Write;
     let mut text = alloc::string::String::new();

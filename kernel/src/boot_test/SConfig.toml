@@ -1,0 +1,44 @@
+[module]
+id = "kernel.testing"
+name = "Testing"
+description = "Builds for the automated QEMU tests; the make test targets choose these themselves."
+
+[[option]]
+id = "boot_test"
+name = "Unattended boot test"
+type = "bool"
+default = false
+feature = "boot-test"
+help = "Replace init with a task that runs the memory, scheduler, PCI and filesystem self-tests and exits QEMU with the verdict (needs -device isa-debug-exit,iobase=0xf4,iosize=0x04)."
+
+[[option]]
+id = "user_test"
+name = "Userspace test verdict"
+type = "bool"
+default = false
+feature = "user-test"
+help = "Turn init's exit status into the QEMU exit verdict (0 passes), for test programs run as PID 1, with a task that keeps switching FPU and FS state in and out under them."
+
+[[option]]
+id = "fault_test"
+name = "Fault tests"
+type = "bool"
+default = false
+feature = "fault-test"
+help = "Execute an undefined instruction in a kernel task at boot; the #UD report must name the task."
+
+[[option]]
+id = "panic_lock_test"
+name = "Panic-under-lock test"
+type = "bool"
+default = false
+feature = "panic-lock-test"
+help = "Panic while holding the console and serial locks, as a fault inside println! would; the panic message must still come out."
+
+[[option]]
+id = "qemu_exit"
+name = "QEMU exit device"
+type = "bool"
+default = false
+feature = "qemu-exit"
+help = "Let the kernel exit QEMU through isa-debug-exit (port 0xf4). The tests above turn this on themselves."

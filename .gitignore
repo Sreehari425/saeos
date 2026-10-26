@@ -9,3 +9,4 @@ result
 /initramfs/output.wav
 # make badapple-data: generated from the original video, never committed.
 /initramfs/badapple/
+scripts/__pycache__/

@@ -43,7 +43,9 @@ CMDLINE ?=
 BOOT_ENV = INITRAMFS=$(INITRAMFS_IMAGE) CMDLINE='$(CMDLINE)'
 
 # Fixed feature sets for the automated QEMU tests, independent of .config.
-TEST_FEATURES := serial,apic,apic-timer,pit,tsc,keyboard
+TEST_FEATURES := serial,apic,apic-timer,pit,tsc,keyboard,ac97,hda,bochs-vbe,procfs,kernel-shell
+# The fewest features a kernel builds with (configs/tinyconfig.toml).
+TINY_FEATURES := serial,vga-text
 BIOS_TEST_FEATURES := $(TEST_FEATURES),vga-text
 UEFI_TEST_FEATURES := $(TEST_FEATURES),framebuffer
 # Enough RAM to exercise frames above 4 GiB.
@@ -148,6 +150,7 @@ check: olddefconfig check-std-lock
 	cargo check -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
 	cargo check -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
 	cargo check -p ratconf
+	$(RATCONF) check
 	cargo check -p mkinitramfs
 	cargo check -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p libsaeos $(addprefix -p ,$(USER_PROGRAMS))
 
@@ -327,6 +330,9 @@ clippy: olddefconfig
 	# The test builds compile code the configured build does not.
 	cargo clippy -p $(KERNEL) --target $(BIOS_TARGET) --features $(BIOS_TEST_FEATURES),boot-test -- -D warnings
 	cargo clippy -p $(KERNEL) --target $(UEFI_TARGET) --features $(UEFI_TEST_FEATURES),user-test -- -D warnings
+	# And what they leave out: the code behind every optional feature off.
+	cargo clippy -p $(KERNEL) --target $(BIOS_TARGET) --features $(TINY_FEATURES) -- -D warnings
+	cargo clippy -p $(KERNEL) --target $(UEFI_TARGET) --features $(TINY_FEATURES) -- -D warnings
 	cargo clippy -p ratconf -- -D warnings
 	cargo clippy -p mkinitramfs --all-targets -- -D warnings
 	cargo clippy -Zjson-target-spec -Zbuild-std=core,alloc --target $(USER_TARGET) -p libsaeos $(addprefix -p ,$(USER_PROGRAMS)) -- -D warnings
