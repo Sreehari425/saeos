@@ -17,6 +17,15 @@ use alloc::vec::Vec;
 
 pub static VFS: Vfs = Vfs::new();
 
+static INITRAMFS_LOADED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Whether the bootloader handed over an initramfs (`init` says so when it
+/// finds no program to run).
+pub fn initramfs_loaded() -> bool {
+    INITRAMFS_LOADED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Mount ramfs at `/` and unpack every initramfs archive the bootloader
 /// loaded into it (later archives override earlier files), then hand their
 /// memory back. Then mount devfs at `/dev` and procfs at `/proc`. Needs the
@@ -32,6 +41,8 @@ pub fn init(boot_info: &BootInfo) {
     let archives: Vec<PhysicalRange> = boot_info.initramfs.iter().flatten().copied().collect();
     if archives.is_empty() {
         crate::kwarn!("fs: no initramfs; / starts empty");
+    } else {
+        INITRAMFS_LOADED.store(true, core::sync::atomic::Ordering::Relaxed);
     }
     for range in archives {
         // Bootloader memory is ordinary RAM, reachable through the direct map.

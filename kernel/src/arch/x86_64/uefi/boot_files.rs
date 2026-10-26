@@ -116,7 +116,10 @@ unsafe fn open_boot_volume(boot_services: &EfiBootServices, device: EfiHandle) -
 
 /// Read `\saeos\initramfs.cpio` into freshly allocated LoaderData pages.
 unsafe fn load_initramfs(boot_services: &EfiBootServices, root: &File) -> Option<PhysicalRange> {
-    let file = unsafe { File::open(root, &INITRAMFS_PATH) }?;
+    let Some(file) = (unsafe { File::open(root, &INITRAMFS_PATH) }) else {
+        unsafe { serial_str("[UEFI] no \\saeos\\initramfs.cpio\n") };
+        return None;
+    };
     let size = unsafe { file.size() }.filter(|&size| size != 0)?;
     let pages = usize::try_from(size.div_ceil(4096)).ok()?;
     let allocate_pages: EfiAllocatePages =
@@ -125,7 +128,11 @@ unsafe fn load_initramfs(boot_services: &EfiBootServices, root: &File) -> Option
     let status =
         unsafe { allocate_pages(ALLOCATE_MAX_ADDRESS, EFI_LOADER_DATA, pages, &mut address) };
     if status != EFI_SUCCESS {
-        unsafe { serial_str("[UEFI] initramfs: cannot allocate memory\n") };
+        unsafe {
+            serial_str("[UEFI] initramfs: cannot allocate ");
+            serial_hex(size);
+            serial_str(" bytes in one piece; give the machine more memory (QEMU -m)\n");
+        }
         return None;
     }
     // Firmware still identity maps all memory.
@@ -190,15 +197,15 @@ pub unsafe fn load(
         return (None, from_options.unwrap_or(Cmdline::EMPTY));
     };
     let initramfs = unsafe { load_initramfs(boot_services, &root) };
-    match initramfs {
-        Some(range) => unsafe {
+    // On failure, load_initramfs logged why.
+    if let Some(range) = initramfs {
+        unsafe {
             serial_str("[UEFI] initramfs: ");
             serial_hex(range.end - range.start);
             serial_str(" bytes at ");
             serial_hex(range.start);
             serial_str("\n");
-        },
-        None => unsafe { serial_str("[UEFI] no \\saeos\\initramfs.cpio\n") },
+        }
     }
     let cmdline = from_options
         .or_else(|| unsafe { cmdline_from_file(&root) })

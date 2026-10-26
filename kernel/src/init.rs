@@ -80,10 +80,13 @@ fn no_working_init(reason: core::fmt::Arguments) -> ! {
     crate::kerror!("init: {}", reason);
     let expected = cfg!(feature = "user-test")
         && crate::cmdline::params().get("saeos.test") == Some("no-init");
+    let hint = if crate::fs::initramfs_loaded() {
+        "Try passing init= option to kernel."
+    } else {
+        "The bootloader loaded no initramfs (too big for the machine's memory? see its log)."
+    };
     crate::fatal::report(
-        format_args!(
-            "Kernel panic - not syncing: No working init found. Try passing init= option to kernel."
-        ),
+        format_args!("Kernel panic - not syncing: No working init found. {hint}"),
         expected,
     )
 }

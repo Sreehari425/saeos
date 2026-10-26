@@ -8,6 +8,10 @@ QEMU_ARGS ?=
 # with SOUND_CARD=hda.
 SOUND ?=
 SOUND_CARD ?= ac97
+# Memory for `make run*`: QEMU's default 128 MiB is too little for a big
+# initramfs (UEFI needs it in one piece, and the kernel unpacks a copy).
+# QEMU_ARGS come after it, so `QEMU_ARGS="-m 4G"` still wins.
+RUN_MEM ?= 1G
 COMMA := ,
 AC97_DEVICES = -device AC97$(COMMA)audiodev=snd
 HDA_DEVICES = -device intel-hda -device hda-output$(COMMA)audiodev=snd
@@ -91,28 +95,28 @@ asm-uefi: olddefconfig
 		--emit=asm
 
 run: olddefconfig
-	CMDLINE='$(CMDLINE)' nix run path:.#bios -- $(QEMU_ARGS) $(SOUND_ARGS)
+	CMDLINE='$(CMDLINE)' nix run path:.#bios -- -m $(RUN_MEM) $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-uefi: olddefconfig
-	CMDLINE='$(CMDLINE)' nix run path:.#uefi -- $(QEMU_ARGS) $(SOUND_ARGS)
+	CMDLINE='$(CMDLINE)' nix run path:.#uefi -- -m $(RUN_MEM) $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-debug: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) $(QEMU_ARGS) $(SOUND_ARGS)
+	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -m $(RUN_MEM) $(QEMU_ARGS) $(SOUND_ARGS)
 
 run-uefi-debug: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(QEMU_ARGS) $(SOUND_ARGS)
+	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -m $(RUN_MEM) $(QEMU_ARGS) $(SOUND_ARGS)
 
 # Start QEMU halted with a GDB stub on :1234, then attach with `make gdb`
 # (or `make gdb-uefi`) from a second terminal.
 debug: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(BIOS_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -s -S -no-shutdown $(QEMU_ARGS)
+	$(BOOT_ENV) ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$(KERNEL) -s -S -no-shutdown -m $(RUN_MEM) $(QEMU_ARGS)
 
 debug-uefi: olddefconfig initramfs
 	cargo build -p $(KERNEL) --target $(UEFI_TARGET) $(FEATURE_ARGS)
-	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -s -S -no-shutdown $(QEMU_ARGS)
+	$(BOOT_ENV) ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi -s -S -no-shutdown -m $(RUN_MEM) $(QEMU_ARGS)
 
 gdb:
 	gdb -x scripts/gdbinit target/$(BIOS_TARGET)/debug/$(KERNEL)
