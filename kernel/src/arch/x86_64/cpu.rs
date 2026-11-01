@@ -181,6 +181,35 @@ pub fn cpuid(eax: u32) -> core::arch::x86_64::CpuidResult {
     core::arch::x86_64::__cpuid(eax)
 }
 
+/// Whether CPUID advertises the hardware random-number generator instruction.
+#[inline]
+pub fn has_rdrand() -> bool {
+    cpuid(1).ecx & (1 << 30) != 0
+}
+
+/// Request one 64-bit value from the CPU's hardware CSPRNG.
+///
+/// Returns `None` when the instruction is unavailable or the CPU reports a
+/// transient failure. Callers must not substitute timing data for a failure.
+#[inline]
+pub fn rdrand64() -> Option<u64> {
+    if !has_rdrand() {
+        return None;
+    }
+    let value: u64;
+    let success: u8;
+    unsafe {
+        core::arch::asm!(
+            "rdrand {value}",
+            "setc {success}",
+            value = out(reg) value,
+            success = out(reg_byte) success,
+            options(nomem, nostack)
+        );
+    }
+    (success != 0).then_some(value)
+}
+
 /// Enable execution-disable page-table bits when the processor supports them.
 /// Firmware commonly leaves this enabled, but the BIOS path must establish it
 /// explicitly before the kernel installs mappings containing NX.

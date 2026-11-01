@@ -343,11 +343,19 @@ fn filesystem_test() -> bool {
         let zero = fs::open("/dev/zero", OpenFlags::READ)?;
         let zero_ok = fs::read(zero, &mut buffer)? == 16 && buffer == [0; 16];
         fs::close(zero)?;
+        let urandom = fs::open("/dev/urandom", OpenFlags::READ)?;
+        let random_read = fs::read(urandom, &mut buffer);
+        fs::close(urandom)?;
+        let random_ok = match random_read {
+            Ok(16) => true,
+            Err(Errno::ENODEV) => !crate::arch::x86_64::cpu::has_rdrand(),
+            _ => false,
+        };
         let console = fs::open("/dev/console", OpenFlags::WRITE)?;
         fs::write(console, b"boot-test: written through /dev/console\n")?;
         fs::close(console)?;
         let console_ok = crate::klog::contains("written through /dev/console");
-        Ok(null_ok && zero_ok && console_ok)
+        Ok(null_ok && zero_ok && random_ok && console_ok)
     })()
     .unwrap_or(false);
 

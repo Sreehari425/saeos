@@ -1,5 +1,5 @@
-//! Device files: `/dev/null`, `/dev/zero`, `/dev/console`, `/dev/dsp`,
-//! `/dev/fb0`.
+//! Device files: `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/console`,
+//! `/dev/dsp`, `/dev/fb0`.
 //! Devices are ordinary inodes, so they use the same `open` / `write` path
 //! as files; `/dev/dsp` and `/dev/fb0` hand each open its own inode
 //! (`sound/mod.rs`, `drivers/fb.rs`).
@@ -12,12 +12,52 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
+/// Fill from the CPU random generator. RDRAND is the cryptographic source;
+/// never fall back to timing-derived output if it is unavailable.
+fn fill_urandom(buf: &mut [u8], mut next_word: impl FnMut() -> Option<u64>) -> FsResult<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let mut word = None;
+        for _ in 0..10 {
+            if let Some(value) = next_word() {
+                word = Some(value);
+                break;
+            }
+        }
+        let Some(bytes) = word.map(u64::to_ne_bytes) else {
+            return if filled == 0 {
+                Err(Errno::EIO)
+            } else {
+                Ok(filled)
+            };
+        };
+        let count = (buf.len() - filled).min(bytes.len());
+        buf[filled..filled + count].copy_from_slice(&bytes[..count]);
+        filled += count;
+    }
+    Ok(filled)
+}
+
+#[cfg(host_model)]
+fn test_random_word() -> Option<u64> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0x4d59_5df4_d0f3_3173);
+    let mut value = STATE.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    Some(value ^ (value >> 31))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Device {
     /// Reads are end of file; writes are discarded.
     Null,
     /// Reads return zeros; writes are discarded.
     Zero,
+    /// Reads bytes from the CPU's hardware CSPRNG; writes are rejected.
+    Urandom,
     /// Reads are lines typed at the keyboard or serial port (through the
     /// line discipline, `drivers/tty.rs`); writes go to the screen and the
     /// serial console.
@@ -29,8 +69,9 @@ enum Device {
     Fb,
 }
 
-const DEVICES: [(&str, Device); 5] = [
+const DEVICES: [(&str, Device); 6] = [
     ("console", Device::Console),
+    ("urandom", Device::Urandom),
     ("dsp", Device::Dsp),
     ("fb0", Device::Fb),
     ("null", Device::Null),
@@ -65,12 +106,29 @@ impl Inode for DeviceNode {
                 buf.fill(0);
                 Ok(buf.len())
             }
+            Device::Urandom => {
+                #[cfg(not(host_model))]
+                {
+                    if !crate::arch::x86_64::cpu::has_rdrand() {
+                        Err(Errno::ENODEV)
+                    } else {
+                        fill_urandom(buf, crate::arch::x86_64::cpu::rdrand64)
+                    }
+                }
+                #[cfg(host_model)]
+                {
+                    fill_urandom(buf, test_random_word)
+                }
+            }
             Device::Console => Ok(console_read(buf)),
             Device::Dsp | Device::Fb => Err(Errno::EINVAL),
         }
     }
 
     fn write_at(&self, _offset: u64, buf: &[u8]) -> FsResult<usize> {
+        if self.device == Device::Urandom {
+            return Err(Errno::EROFS);
+        }
         if self.device == Device::Console {
             console_write(buf);
         }

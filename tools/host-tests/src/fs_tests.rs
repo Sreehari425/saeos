@@ -322,6 +322,29 @@ fn device_files() {
     let mut buffer = [9u8; 8];
     assert_eq!(vfs.read(&files, zero, &mut buffer).unwrap(), 8);
     assert_eq!(buffer, [0; 8]);
+
+    let urandom = vfs.open(&files, "/dev/urandom", RW).unwrap();
+    assert_eq!(
+        vfs.stat("/dev/urandom").unwrap().kind,
+        InodeKind::CharDevice
+    );
+    assert_eq!(
+        vfs.lseek(&files, urandom, 0, Whence::Set),
+        Err(Errno::ESPIPE)
+    );
+    let mut empty = [];
+    assert_eq!(vfs.read(&files, urandom, &mut empty).unwrap(), 0);
+    let mut random_a = [0; 5];
+    let mut random_b = [0; 11];
+    assert_eq!(vfs.read(&files, urandom, &mut random_a).unwrap(), 5);
+    assert_eq!(vfs.read(&files, urandom, &mut random_b).unwrap(), 11);
+    assert_ne!(random_a, [0; 5]);
+    assert_ne!(&random_a[..], &random_b[..5]);
+    assert_eq!(
+        vfs.write(&files, urandom, b"seed").unwrap_err(),
+        Errno::EROFS
+    );
+
     let console = vfs.open(&files, "/dev/console", OpenFlags::WRITE).unwrap();
     CONSOLE_CAPTURE.lock().unwrap().clear();
     vfs.write(&files, console, b"hi console").unwrap();
