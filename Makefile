@@ -58,7 +58,7 @@ BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(ACCEL_ARGS)
 
 .PHONY: check-std-lock userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test badapple-test badapple-data iso iso-test test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test kani mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test badapple-test badapple-data iso iso-test test help
 
 all: bios
 
@@ -167,6 +167,13 @@ host-test:
 	cargo test -p mkinitramfs
 
 mm-test: host-test
+
+# Bounded model checking for selected pure Rust harnesses. Install separately:
+# cargo install --locked kani-verifier && cargo kani setup
+kani:
+	@command -v cargo-kani >/dev/null 2>&1 || { \
+		echo "Kani is not installed. See docs/verification/kani.md" >&2; exit 127; }
+	cargo kani -p kani-ring
 
 # The host tests under Miri, which checks for undefined behaviour the
 # normal tests cannot see.

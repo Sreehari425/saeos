@@ -209,7 +209,7 @@
             ]
             ++ isoTools;
 
-            shellHook = ''
+          shellHook = ''
             # The UEFI runner needs firmware; keep a user-provided path.
             export OVMF_PATH="''${OVMF_PATH:-${pkgs.OVMF.fd}/FV/OVMF.fd}"
             echo "Rust OS Development Environment Loaded!"
