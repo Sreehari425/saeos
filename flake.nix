@@ -109,6 +109,81 @@
             '';
           };
 
+        # Formal verification tools are provided by the development shell,
+        # but are not part of the OS build or test dependencies.
+        kaniVersion = "0.68.0";
+        kaniBundle = pkgs.fetchurl {
+          url = "https://github.com/model-checking/kani/releases/download/kani-${kaniVersion}/kani-${kaniVersion}-x86_64-unknown-linux-gnu.tar.gz";
+          hash = "sha256-MuK0hNc+3gu/ZKLPCHnEJZQiSX2K7E7mfUSN6a54Q9M=";
+        };
+        kaniRustToolchain = pkgs.rust-bin.nightly."2026-08-21".default;
+        kaniHome = pkgs.runCommand "kani-home-${kaniVersion}" { nativeBuildInputs = [ pkgs.autoPatchelfHook ]; buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]; } ''
+          mkdir -p "$out/kani-${kaniVersion}"
+          tar -xzf ${kaniBundle} --strip-components=1 -C "$out/kani-${kaniVersion}"
+          chmod -R u+w "$out/kani-${kaniVersion}"
+          ln -s ${kaniRustToolchain} "$out/kani-${kaniVersion}/toolchain"
+        '';
+        kaniCrate = pkgs.fetchCrate {
+          pname = "kani-verifier";
+          version = kaniVersion;
+          hash = "sha256-Sw3+vYRXIQu2vMu54t2j/z0Ig17wePWnt2sAGDpybIw=";
+        };
+        kaniVerifier = (pkgs.makeRustPlatform {
+          cargo = kaniRustToolchain;
+          rustc = kaniRustToolchain;
+        }).buildRustPackage {
+          pname = "kani-verifier";
+          version = kaniVersion;
+          src = kaniCrate;
+          cargoLock.lockFile = "${kaniCrate}/Cargo.lock";
+          nativeBuildInputs = [ pkgs.autoPatchelfHook pkgs.makeWrapper ];
+          buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
+          doCheck = false;
+          postInstall = ''
+            wrapProgram "$out/bin/cargo-kani" --set KANI_HOME "${kaniHome}"
+            wrapProgram "$out/bin/kani" --set KANI_HOME "${kaniHome}"
+          '';
+        };
+
+        verusVersion = pkgs.lib.removeSuffix "\n" (builtins.readFile ./verification/verus/VERUS_VERSION);
+        verusArchive = pkgs.fetchurl {
+          url = "https://github.com/verus-lang/verus/releases/download/release/${verusVersion}/verus-${verusVersion}-x86-linux.zip";
+          hash = "sha256-86ARkpLfiFXkQ12oEwvuGHOw5qYMMGrM+BoI6mh7ujw=";
+        };
+        verusRustToolchain = pkgs.rust-bin.stable."1.99.1".default.override {
+          extensions = [ "rustc-dev" "rust-src" ];
+        };
+        verus = pkgs.stdenvNoCC.mkDerivation {
+          pname = "verus";
+          version = verusVersion;
+          src = verusArchive;
+          nativeBuildInputs = [ pkgs.unzip pkgs.autoPatchelfHook pkgs.makeWrapper ];
+          buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib verusRustToolchain pkgs.rustup ];
+          dontBuild = true;
+          installPhase = ''
+            mkdir -p "$out/libexec/verus" "$out/bin"
+            unzip -q "$src" -d "$out/libexec/verus"
+            chmod -R u+w "$out/libexec/verus"
+            autoPatchelf "$out/libexec/verus"
+            for tool in verus cargo-verus; do
+              cat > "$out/bin/$tool" <<EOF
+            #!/bin/sh
+            set -eu
+            rustup_home="\$(mktemp -d)"
+            trap 'rm -rf "\$rustup_home"' EXIT
+            mkdir -p "\$rustup_home/toolchains"
+            ln -s ${verusRustToolchain} "\$rustup_home/toolchains/1.99.1-x86_64-unknown-linux-gnu"
+            export RUSTUP_HOME="\$rustup_home"
+            export RUSTUP_TOOLCHAIN="1.99.1-x86_64-unknown-linux-gnu"
+            export VERUS_Z3_PATH="$out/libexec/verus/verus-x86-linux/z3"
+            export PATH="${pkgs.rustup}/bin:${verusRustToolchain}/bin:\$PATH"
+            "$out/libexec/verus/verus-x86-linux/$tool" "\$@"
+            EOF
+              chmod +x "$out/bin/$tool"
+            done
+          '';
+        };
+
         bios = cargoBuild "x86_64-unknown-none";
         uefi = cargoBuild "x86_64-unknown-uefi";
 
@@ -205,8 +280,11 @@
               # The test and media scripts (check-wav.py, bav.py, ...) and
               # make badapple-data.
               python3
+              lean4
               ffmpeg
             ]
+            # Upstream verifier release assets are currently packaged for Linux x86_64.
+            ++ (if system == "x86_64-linux" then [ kaniVerifier kaniRustToolchain verus verusRustToolchain ] else [ ])
             ++ isoTools;
 
           shellHook = ''

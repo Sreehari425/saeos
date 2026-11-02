@@ -73,6 +73,48 @@ fn full_periods_start_at_threshold_and_wrap_safely() {
 }
 
 #[kani::proof]
+fn consumed_periods_allow_safe_wraparound() {
+    let mut ring = Ring::new();
+    for _ in 0..(PERIODS - 1) {
+        ring.commit(PERIOD_BYTES);
+    }
+    assert_eq!(ring.queued(), PERIODS - 1);
+    assert!(ring.is_running());
+
+    // Retire periods 0..29, leaving period 30 at the head. The fill cursor
+    // is at period 31, so subsequent submissions cross the end of the ring.
+    let update = ring.update(Status {
+        current: PERIODS - 2,
+        halted: false,
+    });
+    assert_eq!(update.finished, Some((0, PERIODS - 2)));
+    assert_eq!(ring.queued(), 1);
+    assert_invariants(&ring);
+
+    assert_eq!(
+        ring.commit(PERIOD_BYTES),
+        Action::Submit { last: PERIODS - 1 }
+    );
+    let update = ring.update(Status {
+        current: PERIODS - 1,
+        halted: false,
+    });
+    assert_eq!(update.finished, Some((PERIODS - 2, 1)));
+    assert_eq!(ring.queued(), 1);
+    assert_invariants(&ring);
+
+    assert_eq!(ring.commit(PERIOD_BYTES), Action::Submit { last: 0 });
+    let update = ring.update(Status {
+        current: 0,
+        halted: false,
+    });
+    assert_eq!(update.finished, Some((PERIODS - 1, 1)));
+    assert_eq!(ring.queued(), 1);
+    assert_eq!(ring.played(), PERIODS as u64);
+    assert_invariants(&ring);
+}
+
+#[kani::proof]
 fn valid_card_updates_and_halt_preserve_accounting() {
     let mut ring = Ring::new();
     for _ in 0..START_PERIODS {
