@@ -6,7 +6,7 @@ SaeOS uses three complementary techniques for selected, reviewable proof targets
 | --- | --- | --- |
 | [Kani](https://model-checking.github.io/kani/) | Bounded executions of the actual sound-ring Rust module, imported by `tools/kani-ring`. | Unbounded behavior beyond the harness bounds/assumptions, or correctness of unrelated kernel code. |
 | [Verus](https://github.com/verus-lang/verus) | Contracts on a small executable allocator-accounting model in `verification/verus/Allocator.rs`. | The production buddy allocator in `kernel/src/mm/buddy.rs` or correspondence to that implementation. |
-| [Lean 4](https://lean-lang.org/) | The mathematical mapping-policy model in `verification/lean/SaeosVerification/Mapping.lean`. | That the Rust mapping implementation in `kernel/src/mm/mapping_model.rs` refines this model. |
+| [Lean 4](https://lean-lang.org/) | The mathematical mapping policy, single-range planner model, virtual-address/chunk-construction properties, and a conditional exact-coverage theorem in `verification/lean/SaeosVerification/Mapping/`. | That the planner's per-step safety conditions hold for all valid page-aligned inputs, or that the Rust mapping implementation in `kernel/src/mm/mapping_model.rs` refines this model. |
 
 A proof is only as strong as its model, preconditions, and assumptions. In particular, the Verus and Lean checks currently prove properties of separate models, not the production kernel implementations. Connecting a model to its implementation requires a separate refinement/correspondence argument.
 
@@ -54,7 +54,7 @@ cd verification/lean
 lake build
 ```
 
-`make lean-check` runs the Lake build from the project directory. The mapping policy model and its theorem modules cover MMIO base-page selection, 1 GiB eligibility and priority, 2 MiB selection when 1 GiB is ineligible, and base-page fallback when neither huge-page branch applies. These establish properties of the Lean model only; they do not prove that the Rust mapping planner refines the model. Keep Lean dependencies declared in its Lake project and commit any lockfile produced for dependencies.
+`make lean-check` runs the Lake build from the project directory. The Lean mapping modules cover MMIO base-page selection, huge-page eligibility and priority, fallback policy, a single-range planner model, and direct/identity virtual-address and chunk-construction properties. The exact-coverage theorem is conditional on a per-step safety premise; proving that premise for all page-aligned valid ranges remains future work. These establish properties of the Lean model only; they do not prove that the Rust mapping planner refines the model. Keep Lean dependencies declared in its Lake project and commit any lockfile produced for dependencies.
 
 ### Verus outside Nix
 

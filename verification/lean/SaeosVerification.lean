@@ -1,2 +1,4 @@
 import SaeosVerification.Mapping
 import SaeosVerification.Mapping.Properties
+import SaeosVerification.Mapping.Planner
+import SaeosVerification.Mapping.PlannerProperties
