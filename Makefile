@@ -58,7 +58,7 @@ BIOS_TEST_IMAGE := ./scripts/runner-bios-x86_64.sh target/$(BIOS_TARGET)/debug/$
 UEFI_TEST_IMAGE := ./scripts/runner-uefi-x86_64.sh target/$(UEFI_TARGET)/debug/$(KERNEL).efi $(ACCEL_ARGS)
 
 .PHONY: check-std-lock userspace initramfs initramfs-test all bios uefi asm asm-bios asm-uefi run run-uefi run-debug run-uefi-debug debug debug-uefi gdb gdb-uefi symbolize check menuconfig defconfig tinyconfig olddefconfig savedefconfig
-.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test kani verus-check lean-check verify mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test badapple-test badapple-data iso iso-test test help
+.PHONY: headers_check headers_install clean distclean mrproper nix-gc fmt-check clippy host-test kani kani-mapping verus-check lean-check verify mm-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test boot-test user-test sound-test fb-test badapple-test badapple-data iso iso-test test help
 
 all: bios
 
@@ -173,6 +173,12 @@ kani:
 	@command -v cargo-kani >/dev/null 2>&1 || { \
 		echo "Kani is not installed. See docs/verification/README.md" >&2; exit 127; }
 	cargo kani -p kani-ring
+
+# Bounded checks of the production pure memory-mapping planner.
+kani-mapping:
+	@command -v cargo-kani >/dev/null 2>&1 || { \
+		echo "Kani is not installed. See docs/verification/README.md" >&2; exit 127; }
+	cargo kani -p kani-mapping
 
 # Independent formal-verification checks; Kani and Verus are in nix develop.
 lean-check:
@@ -422,6 +428,7 @@ help:
 	@echo "  iso: target/saeos.iso for BIOS and UEFI, CD or USB stick (CMDLINE built in)"
 	@echo "  menuconfig defconfig tinyconfig olddefconfig savedefconfig"
 	@echo "  test boot-test user-test sound-test fb-test badapple-test iso-test host-test miri mm-stress mm-stress-uefi mm-guard-test fault-test panic-lock-test"
+	@echo "  kani-mapping (bounded Kani checks of the production mapping planner)"
 	@echo "  verify (kani + verus-check + lean-check); each proof tool is optional"
 	@echo "  fmt-check clippy"
 	@echo "  debug debug-uefi gdb gdb-uefi symbolize LOG=<file>"

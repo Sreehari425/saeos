@@ -16,6 +16,7 @@ Run a tool independently:
 
 ```sh
 make kani
+make kani-mapping
 make verus-check
 make lean-check
 ```
@@ -42,7 +43,7 @@ The flake pins Kani 0.68.0 and reads the Verus release pin from `verification/ve
 
 Outside Nix, install the Kani Cargo subcommand and initialize its toolchain with `cargo install --locked kani-verifier` and `cargo kani setup`. Verus must be installed from the exact release in `verification/verus/VERUS_VERSION` and paired with the Rust toolchain required by that release.
 
-The Kani target expects `cargo-kani` on `PATH` and runs `cargo kani -p kani-ring`.
+The `make kani` target runs `cargo kani -p kani-ring`. The separate `make kani-mapping` target runs bounded checks against the production pure mapping planner in `kernel/src/mm/mapping_model.rs`, imported directly by `tools/kani-mapping`. Its symbolic coverage harness constrains ranges to at most 8 KiB, with page-aligned starts and lengths and endpoints below the four-level mapping limit; separate fixed-input harnesses exercise 2 MiB and 1 GiB page selection. It checks address conversion boundaries, plan coverage/contiguity, virtual-address mode, leaf-size consistency, and those large-page cases. These proofs cover only the pure range planner under the stated assumptions—not full memory-map input validation, page-table installation, bootloader data validity, hardware behavior, or the production buddy allocator. This target is intentionally opt-in and is not yet included in `make kani`, `make verify`, or `make test`.
 
 ### Lean 4
 

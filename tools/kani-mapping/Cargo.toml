@@ -1,0 +1,11 @@
+[package]
+name = "kani-mapping"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+[lib]
+path = "src/lib.rs"

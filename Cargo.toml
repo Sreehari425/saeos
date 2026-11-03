@@ -5,6 +5,7 @@ members = [
     "tools/mkinitramfs",
     "tools/host-tests",
     "tools/kani-ring",
+    "tools/kani-mapping",
     "tools/ratconf",
     "userspace/coreutils",
     "userspace/hello",
