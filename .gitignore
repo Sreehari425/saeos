@@ -10,3 +10,4 @@ result
 # make badapple-data: generated from the original video, never committed.
 /initramfs/badapple/
 scripts/__pycache__/
+verification/lean/.lake/
