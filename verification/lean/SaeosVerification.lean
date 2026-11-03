@@ -1,1 +1,2 @@
 import SaeosVerification.Mapping
+import SaeosVerification.Mapping.Properties

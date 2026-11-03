@@ -54,7 +54,7 @@ cd verification/lean
 lake build
 ```
 
-`make lean-check` runs the Lake build from the project directory. Keep Lean dependencies declared in its Lake project and commit any lockfile produced for dependencies.
+`make lean-check` runs the Lake build from the project directory. The mapping policy model and its theorem modules cover MMIO base-page selection, 1 GiB eligibility and priority, 2 MiB selection when 1 GiB is ineligible, and base-page fallback when neither huge-page branch applies. These establish properties of the Lean model only; they do not prove that the Rust mapping planner refines the model. Keep Lean dependencies declared in its Lake project and commit any lockfile produced for dependencies.
 
 ### Verus outside Nix
 
